@@ -1,0 +1,9 @@
+[submodule "freqtrade"]
+	path = freqtrade
+	url = https://github.com/xrunmasterx/freqtrade.git
+[submodule "frequi"]
+	path = frequi
+	url = https://github.com/xrunmasterx/frequi.git
+[submodule "freqtrade-strategies"]
+	path = freqtrade-strategies
+	url = https://github.com/freqtrade/freqtrade-strategies.git
