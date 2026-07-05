@@ -1,6 +1,17 @@
 {
     "$schema": "https://schema.freqtrade.io/schema.json",
     "bot_name": "freqtrade-cn-local",
+    "research_bots": [
+        {
+            "id": "a-share-local",
+            "label": "A Share Local",
+            "market": "a_share",
+            "data_source": {
+                "type": "local_csv",
+                "root": "research_data/a_share"
+            }
+        }
+    ],
     "max_open_trades": 3,
     "stake_currency": "USDT",
     "stake_amount": 100,
