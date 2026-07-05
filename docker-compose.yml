@@ -1,0 +1,41 @@
+---
+services:
+  freqtrade:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: freqtrade-cn:local
+    container_name: freqtrade-cn
+    restart: unless-stopped
+    volumes:
+      - "./ft_userdata/user_data:/freqtrade/user_data"
+    ports:
+      - "127.0.0.1:${FT_UI_PORT:-8081}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --config /freqtrade/user_data/config.json
+      --strategy SampleStrategy
+
+  freqtrade-futures:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: freqtrade-cn:local
+    container_name: freqtrade-cn-futures
+    restart: unless-stopped
+    volumes:
+      - "./ft_userdata/user_data:/freqtrade/user_data"
+    ports:
+      - "127.0.0.1:${FT_FUTURES_UI_PORT:-8082}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade-futures.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3-futures.sqlite
+      --config /freqtrade/user_data/config.volatility.futures.json
+      --strategy VolatilitySystem

@@ -1,0 +1,16 @@
+.env
+ft_userdata/user_data/config.json
+ft_userdata/user_data/logs/
+ft_userdata/user_data/data/
+ft_userdata/user_data/backtest_results/
+ft_userdata/user_data/lsri_validation_runs/
+ft_userdata/user_data/*.sqlite
+ft_userdata/user_data/*.sqlite-shm
+ft_userdata/user_data/*.sqlite-wal
+__pycache__/
+*.py[cod]
+ft_userdata/user_data/__pycache__/
+ft_userdata/user_data/strategies/__pycache__/
+screenshots/
+*verify.png
+.superpowers/**/state/
