@@ -96,6 +96,12 @@ FreqUI should render from metadata when available:
 - Tooltip groups come from `ChartLayerMeta.source` and `label`.
 - Decision evidence appears above strategy output and watch indicators.
 - One visible crosshair selection must map to one candle timestamp and one data index.
+- Candle-time bars must be visually centered on their `candle_open_time`. When multiple bar
+  series share a panel and x axis, render them as timestamp-overlaid evidence, not as
+  category-grouped bars.
+- Multi-state histograms should prefer one logical bar series with state-driven color. If legacy
+  compatibility requires separate bar columns, FreqUI must still preserve the same timestamp
+  center for every bar series.
 
 Fallbacks may exist for old responses, but new work should improve metadata rather than add
 more column-name heuristics.
@@ -109,6 +115,8 @@ When adding or changing chart features, add tests that prove:
 - Watch and strategy data are never silently substituted for each other.
 - Decision snapshot evidence appears only for matching candle timestamps.
 - Frontend tooltip and legend behavior still work without metadata fallback.
+- Multiple candle-time bar series on the same axis remain centered on the selected candle
+  timestamp.
 
 Recommended local checks:
 
