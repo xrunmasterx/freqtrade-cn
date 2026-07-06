@@ -1,5 +1,6 @@
 .env
 ft_userdata/user_data/config.json
+ft_userdata/user_data/config.research.json
 ft_userdata/user_data/logs/
 ft_userdata/user_data/data/
 ft_userdata/user_data/backtest_results/

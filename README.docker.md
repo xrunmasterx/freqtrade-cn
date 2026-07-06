@@ -17,6 +17,7 @@ Create local config files:
 ```powershell
 Copy-Item .env.example .env
 Copy-Item ft_userdata\user_data\config.example.json ft_userdata\user_data\config.json
+Copy-Item ft_userdata\user_data\config.example.json ft_userdata\user_data\config.research.json
 ```
 
 Edit `ft_userdata\user_data\config.json` before running:
@@ -37,6 +38,12 @@ Open:
 
 ```text
 http://127.0.0.1:8081/trade
+```
+
+The optional research-only webserver is available at:
+
+```text
+http://127.0.0.1:8083/research
 ```
 
 Default example login:
@@ -61,4 +68,5 @@ docker compose down
 - Pairs: `BTC/USDT`, `ETH/USDT`
 - Strategy: `SampleStrategy`
 - Host UI port: `8081`
+- Research UI port: `8083`
 - Container API/UI port: `8080`
