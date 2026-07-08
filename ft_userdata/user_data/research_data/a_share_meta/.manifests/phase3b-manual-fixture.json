@@ -1,0 +1,20 @@
+{
+    "created_at":  "2026-07-07T00:00:00+08:00",
+    "provider":  "manual_fixture",
+    "run_id":  "phase3b-manual-fixture",
+    "provider_version":  "phase3b",
+    "files":  [
+                  {
+                      "start":  "2024-01-02",
+                      "stop":  "2024-07-01",
+                      "warnings":  [
+
+                                   ],
+                      "kind":  "feature",
+                      "status":  "ok",
+                      "path":  "features/fund_flow_daily/600519.SH.csv",
+                      "rows":  118,
+                      "dataset":  "fund_flow_daily"
+                  }
+              ]
+}
