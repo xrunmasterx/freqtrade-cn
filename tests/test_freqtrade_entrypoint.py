@@ -90,6 +90,16 @@ class EntrypointTests(unittest.TestCase):
             entrypoint.load_api_secrets(environ)
         self.assertNotIn(secret, str(raised.exception))
 
+    def test_embedded_null_secret_fails_closed(self) -> None:
+        secret = "api-password-before-null\x00after-null-is-still-long-enough"
+        environ = self.secret_environment(api_password=secret)
+
+        with self.assertRaisesRegex(
+            entrypoint.SecretConfigurationError, "must not contain null bytes"
+        ) as raised:
+            entrypoint.load_api_secrets(environ)
+        self.assertNotIn(secret, str(raised.exception))
+
     def test_short_placeholder_and_duplicate_values_fail_closed(self) -> None:
         for invalid in ("short", entrypoint.SENTINEL):
             with self.subTest(invalid=invalid):
@@ -133,6 +143,25 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 78)
         execvpe.assert_not_called()
         self.assertNotIn(secret, stderr.getvalue())
+
+    @mock.patch("docker.freqtrade_entrypoint.os.execvpe")
+    def test_main_rejects_null_secret_without_exec_or_detail_leak(self, execvpe) -> None:
+        secret = "api-password-before-null\x00after-null-is-still-long-enough"
+        environ = self.secret_environment(api_password=secret)
+        secret_path = environ["FT_API_PASSWORD_FILE"]
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            entrypoint.main([], environ)
+
+        error = stderr.getvalue()
+        self.assertEqual(raised.exception.code, 78)
+        execvpe.assert_not_called()
+        self.assertNotIn(secret, error)
+        self.assertNotIn("before-null", error)
+        self.assertNotIn("after-null", error)
+        self.assertNotIn(secret_path, error)
+        self.assertNotIn("ValueError", error)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ def _read_secret(path_text: str, label: str, minimum_length: int) -> str:
         raise SecretConfigurationError(f"{label} secret file cannot be read") from exc
     if "\r" in value or "\n" in value:
         raise SecretConfigurationError(f"{label} secret must be one line")
+    if "\x00" in value:
+        raise SecretConfigurationError(f"{label} secret must not contain null bytes")
     if len(value) < minimum_length or value == SENTINEL:
         raise SecretConfigurationError(f"{label} secret does not meet runtime policy")
     return value
