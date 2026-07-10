@@ -235,6 +235,56 @@ class BootstrapRuntimeTests(unittest.TestCase):
         )
         for service in self.manifest["services"]:
             self.assertTrue((self.root / service["state_root"] / "home").is_dir())
+        override = json.loads(
+            (self.root / "ft_userdata/runtime/compose.identity.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            override,
+            {
+                "services": {
+                    service["name"]: {"user": "1001:1002"}
+                    for service in self.manifest["services"]
+                }
+            },
+        )
+
+    def test_posix_init_rejects_root_runtime_identity(self) -> None:
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=0, create=True),
+            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=0, create=True),
+            self.assertRaisesRegex(ValueError, "non-root runtime identity"),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+        self.assertFalse((self.root / ".env").exists())
+
+    def test_init_rejects_conflicting_or_unknown_compose_identity_override(self) -> None:
+        override = self.root / "ft_userdata/runtime/compose.identity.yml"
+        override.parent.mkdir(parents=True)
+        invalid_documents = (
+            {"services": {"freqtrade": {"user": "999:999"}}},
+            {
+                "services": {
+                    service["name"]: {"user": "1000:1000"}
+                    for service in self.manifest["services"]
+                },
+                "unknown": {},
+            },
+        )
+        for document in invalid_documents:
+            with self.subTest(document=document):
+                content = json.dumps(document) + "\n"
+                override.write_text(content, encoding="utf-8")
+                with (
+                    mock.patch.object(
+                        bootstrap_runtime, "_is_windows", return_value=True
+                    ),
+                    self.assertRaisesRegex(ValueError, "compose identity override"),
+                ):
+                    bootstrap_runtime.init_runtime(self.root, self.manifest)
+                self.assertEqual(override.read_text(encoding="utf-8"), content)
 
     def test_windows_init_writes_container_identity_1000(self) -> None:
         with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
@@ -291,6 +341,54 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "runtime identity"),
                 ):
                     bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+    def test_verify_rejects_invalid_ambient_runtime_identity(self) -> None:
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        ambient_cases = (
+            {"FREQTRADE_RUNTIME_UID": "1000"},
+            {"FREQTRADE_RUNTIME_UID": "bad", "FREQTRADE_RUNTIME_GID": "1000"},
+            {"FREQTRADE_RUNTIME_UID": "0", "FREQTRADE_RUNTIME_GID": "0"},
+            {"FREQTRADE_RUNTIME_UID": "1001", "FREQTRADE_RUNTIME_GID": "1000"},
+        )
+        for ambient in ambient_cases:
+            with self.subTest(ambient=ambient):
+                with (
+                    mock.patch.object(
+                        bootstrap_runtime, "_is_windows", return_value=True
+                    ),
+                    mock.patch.dict(os.environ, ambient, clear=True),
+                    self.assertRaisesRegex(ValueError, "ambient runtime identity"),
+                ):
+                    bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "FREQTRADE_RUNTIME_UID": "1000",
+                    "FREQTRADE_RUNTIME_GID": "1000",
+                },
+                clear=True,
+            ),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+    def test_verify_rejects_compose_override_drift(self) -> None:
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+        override = self.root / "ft_userdata/runtime/compose.identity.yml"
+        document = json.loads(override.read_text(encoding="utf-8"))
+        document["services"]["freqtrade"]["user"] = "1001:1000"
+        override.write_text(json.dumps(document), encoding="utf-8")
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True),
+            self.assertRaisesRegex(ValueError, "compose identity override"),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
     def test_init_never_overwrites_existing_config_or_secret(self) -> None:
         config = self.root / "configs/spot.json"
@@ -354,6 +452,61 @@ class BootstrapRuntimeTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "owned by runtime uid"),
         ):
             bootstrap_runtime._verify_secret_permissions(secret, runtime_uid=1001)
+
+    def test_posix_directory_access_ignores_supplementary_groups(self) -> None:
+        directory = self.root / "state"
+        directory.mkdir()
+        status = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o770,
+            st_uid=2000,
+            st_gid=2001,
+        )
+        with (
+            mock.patch.object(Path, "stat", return_value=status),
+            mock.patch.object(bootstrap_runtime.os, "getgroups", return_value=[2001], create=True),
+            self.assertRaisesRegex(ValueError, "runtime writable directory permissions"),
+        ):
+            bootstrap_runtime._verify_posix_writable_directory(
+                directory,
+                runtime_uid=1001,
+                runtime_gid=1002,
+            )
+
+    def test_verify_rejects_missing_or_symlinked_writable_directory(self) -> None:
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+        writable_directories = (
+            self.root / "runtime/freqtrade/home",
+            self.root / "runtime/freqtrade/logs",
+            self.root / "runtime/freqtrade-research/data",
+            self.root / "runtime/freqtrade-research/backtest_results",
+        )
+        for directory in writable_directories:
+            with self.subTest(directory=directory):
+                directory.rmdir()
+                with (
+                    mock.patch.object(
+                        bootstrap_runtime, "_is_windows", return_value=True
+                    ),
+                    self.assertRaisesRegex(
+                        ValueError, "runtime writable directory"
+                    ),
+                ):
+                    bootstrap_runtime.verify_runtime(self.root, self.manifest)
+                directory.mkdir()
+
+        logs = self.root / "runtime/freqtrade/logs"
+        original_is_symlink = Path.is_symlink
+
+        def fake_is_symlink(path: Path) -> bool:
+            return path == logs or original_is_symlink(path)
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True),
+            mock.patch.object(Path, "is_symlink", fake_is_symlink),
+            self.assertRaisesRegex(ValueError, "runtime writable directory"),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
     def test_windows_permission_branches_use_acl_proof(self) -> None:
         secret = self.root / "secret with spaces"
@@ -448,15 +601,20 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(
                 bootstrap_runtime, "_verify_secret_permissions"
             ) as verify_secret,
-            mock.patch.object(bootstrap_runtime.os, "access", return_value=True) as access,
+            mock.patch.object(
+                bootstrap_runtime, "_verify_posix_writable_directory"
+            ) as verify_directory,
         ):
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
         self.assertTrue(verify_secret.call_args_list)
         self.assertTrue(all(call.args[1] == 1001 for call in verify_secret.call_args_list))
-        self.assertEqual(access.call_count, len(self.manifest["services"]))
+        self.assertEqual(verify_directory.call_count, 11)
         self.assertTrue(
-            all(call.args[1] == os.R_OK | os.W_OK | os.X_OK for call in access.call_args_list)
+            all(
+                call.args[1:] == (1001, 1002)
+                for call in verify_directory.call_args_list
+            )
         )
 
         with (
@@ -464,8 +622,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_verify_secret_permissions"),
-            mock.patch.object(bootstrap_runtime.os, "access", return_value=False),
-            self.assertRaisesRegex(ValueError, "state root must be readable, writable, and searchable"),
+            mock.patch.object(
+                bootstrap_runtime,
+                "_verify_posix_writable_directory",
+                side_effect=ValueError("runtime writable directory permissions"),
+            ),
+            self.assertRaisesRegex(ValueError, "runtime writable directory permissions"),
         ):
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
 

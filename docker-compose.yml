@@ -25,7 +25,6 @@ x-freqtrade-common: &freqtrade-common
     dockerfile: Dockerfile
   image: freqtrade-cn:local
   restart: unless-stopped
-  user: "${FREQTRADE_RUNTIME_UID:?run bootstrap first}:${FREQTRADE_RUNTIME_GID:?run bootstrap first}"
   init: true
   cap_drop:
     - ALL

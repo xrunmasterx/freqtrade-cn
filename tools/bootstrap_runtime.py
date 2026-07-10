@@ -32,6 +32,7 @@ RUNTIME_IDENTITY_PATTERN = re.compile(
     r"^\s*(?:export\s+)?(FREQTRADE_RUNTIME_(?:UID|GID))\s*=\s*(.*?)\s*$"
 )
 NON_NEGATIVE_INTEGER_PATTERN = re.compile(r"[0-9]+")
+COMPOSE_IDENTITY_RELATIVE_PATH = Path("ft_userdata/runtime/compose.identity.yml")
 WINDOWS_ACL_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $secretPath = $env:FREQTRADE_RUNTIME_SECRET_PATH
@@ -141,10 +142,13 @@ def _expected_runtime_identity() -> dict[str, int]:
             "FREQTRADE_RUNTIME_UID": 1000,
             "FREQTRADE_RUNTIME_GID": 1000,
         }
-    return {
+    identity = {
         "FREQTRADE_RUNTIME_UID": os.getuid(),
         "FREQTRADE_RUNTIME_GID": os.getgid(),
     }
+    if any(value <= 0 for value in identity.values()):
+        raise ValueError("POSIX bootstrap requires a non-root runtime identity")
+    return identity
 
 
 def _parse_runtime_identity(content: str) -> dict[str, int]:
@@ -176,6 +180,64 @@ def _read_runtime_identity(path: Path) -> dict[str, int]:
     return values
 
 
+def _verify_ambient_runtime_identity(identity: dict[str, int]) -> None:
+    ambient = {key: os.environ.get(key) for key in RUNTIME_IDENTITY_KEYS}
+    present = [key for key, value in ambient.items() if value is not None]
+    if not present:
+        return
+    if len(present) != len(RUNTIME_IDENTITY_KEYS):
+        raise ValueError("ambient runtime identity must contain both uid and gid")
+    for key in RUNTIME_IDENTITY_KEYS:
+        value = ambient[key]
+        if value is None or NON_NEGATIVE_INTEGER_PATTERN.fullmatch(value) is None:
+            raise ValueError("ambient runtime identity must be a positive integer pair")
+        if int(value) <= 0 or int(value) != identity[key]:
+            raise ValueError("ambient runtime identity does not match verified identity")
+
+
+def _expected_compose_identity(
+    manifest: dict[str, Any], identity: dict[str, int]
+) -> dict[str, object]:
+    user = (
+        f"{identity['FREQTRADE_RUNTIME_UID']}:"
+        f"{identity['FREQTRADE_RUNTIME_GID']}"
+    )
+    return {
+        "services": {
+            service["name"]: {"user": user} for service in manifest["services"]
+        }
+    }
+
+
+def _read_compose_identity(
+    path: Path,
+    manifest: dict[str, Any],
+    identity: dict[str, int],
+) -> dict[str, object]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid compose identity override") from error
+    if document != _expected_compose_identity(manifest, identity):
+        raise ValueError("invalid or conflicting compose identity override")
+    return document
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def _merge_runtime_identity(path: Path) -> None:
     expected = _expected_runtime_identity()
     if path.exists() and not path.is_file():
@@ -195,18 +257,81 @@ def _merge_runtime_identity(path: Path) -> None:
         merged += newline
     merged += "".join(f"{key}={expected[key]}{newline}" for key in missing)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(merged)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    _atomic_write_text(path, merged)
+
+
+def _merge_compose_identity(
+    path: Path,
+    manifest: dict[str, Any],
+    identity: dict[str, int],
+) -> None:
+    if path.exists():
+        if not path.is_file():
+            raise ValueError("invalid compose identity override")
+        _read_compose_identity(path, manifest, identity)
+        return
+    content = json.dumps(
+        _expected_compose_identity(manifest, identity),
+        indent=2,
+        ensure_ascii=True,
+    )
+    _atomic_write_text(path, content + "\n")
+
+
+def _service_writable_directories(root: Path, service: dict[str, Any]) -> list[Path]:
+    state_root = root / service["state_root"]
+    directories = [state_root, state_root / "home", state_root / "logs"]
+    if service["role"] == "research":
+        directories.extend(
+            [state_root / "data", state_root / "backtest_results"]
+        )
+    return directories
+
+
+def _verify_posix_writable_directory(
+    path: Path,
+    runtime_uid: int,
+    runtime_gid: int,
+) -> None:
+    status = path.stat()
+    mode = stat.S_IMODE(status.st_mode)
+    if mode & stat.S_IWOTH:
+        raise ValueError("runtime writable directory must not be other-writable")
+    if status.st_uid == runtime_uid:
+        effective = (mode >> 6) & 0o7
+    elif status.st_gid == runtime_gid:
+        effective = (mode >> 3) & 0o7
+    else:
+        effective = mode & 0o7
+    if effective != 0o7:
+        raise ValueError("runtime writable directory permissions do not grant rwx")
+
+
+def _verify_writable_directories(
+    root: Path,
+    service: dict[str, Any],
+    runtime_uid: int,
+    runtime_gid: int,
+) -> Path:
+    directories = _service_writable_directories(root, service)
+    state_root = directories[0]
+    if state_root.is_symlink() or not state_root.is_dir():
+        raise ValueError(f"invalid runtime writable directory for {service['name']}")
+    resolved_root = state_root.resolve()
+    for path in directories:
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError(f"invalid runtime writable directory for {service['name']}")
+        resolved = path.resolve()
+        if resolved != resolved_root and resolved_root not in resolved.parents:
+            raise ValueError(f"runtime writable directory escapes state root: {service['name']}")
+        if _is_windows():
+            if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+                raise ValueError(
+                    f"runtime writable directory is not accessible: {service['name']}"
+                )
+        else:
+            _verify_posix_writable_directory(path, runtime_uid, runtime_gid)
+    return resolved_root
 
 
 def write_new_secret(path: Path, entropy_bytes: int) -> None:
@@ -223,7 +348,12 @@ def write_new_secret(path: Path, entropy_bytes: int) -> None:
 
 
 def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
+    identity = _expected_runtime_identity()
+    override_path = root / COMPOSE_IDENTITY_RELATIVE_PATH
+    if override_path.is_symlink() or override_path.exists():
+        _read_compose_identity(override_path, manifest, identity)
     _merge_runtime_identity(root / ".env")
+    _merge_compose_identity(override_path, manifest, identity)
     for service in manifest["services"]:
         template = root / service["config_template"]
         config = root / service["config_path"]
@@ -288,22 +418,28 @@ def rotate_secrets(
 
 def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
     identity = _read_runtime_identity(root / ".env")
+    _verify_ambient_runtime_identity(identity)
+    _read_compose_identity(
+        root / COMPOSE_IDENTITY_RELATIVE_PATH,
+        manifest,
+        identity,
+    )
     runtime_uid = identity["FREQTRADE_RUNTIME_UID"]
+    runtime_gid = identity["FREQTRADE_RUNTIME_GID"]
     all_values: list[str] = []
     state_roots: set[Path] = set()
     for service in manifest["services"]:
         config = root / service["config_path"]
-        state_root = (root / service["state_root"]).resolve()
+        state_root = _verify_writable_directories(
+            root,
+            service,
+            runtime_uid,
+            runtime_gid,
+        )
         if not config.is_file():
             raise ValueError(f"missing operational config for {service['name']}")
-        if not state_root.is_dir() or state_root in state_roots:
+        if state_root in state_roots:
             raise ValueError(f"invalid or duplicate state root for {service['name']}")
-        if not (state_root / "home").is_dir():
-            raise ValueError(f"missing runtime home for {service['name']}")
-        if not os.access(state_root, os.R_OK | os.W_OK | os.X_OK):
-            raise ValueError(
-                f"state root must be readable, writable, and searchable: {service['name']}"
-            )
         state_roots.add(state_root)
 
         config_data = json.loads(config.read_text(encoding="utf-8"))

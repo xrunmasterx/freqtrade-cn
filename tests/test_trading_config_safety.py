@@ -4,11 +4,11 @@ import json
 import os
 import shlex
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
+from tools.compose_runtime import render_compose
 from tools.runtime_manifest import load_runtime_manifest
 
 
@@ -25,27 +25,6 @@ SECRET_FILES = {
     "jwt_secret": "jwt_secret_key",
     "ws_token": "ws_token",
 }
-
-
-def render_compose() -> dict[str, Any]:
-    result = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "--profile",
-            "trading",
-            "--profile",
-            "research",
-            "config",
-            "--format",
-            "json",
-        ],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
 
 
 def command_tokens(service: dict[str, Any]) -> list[str]:
@@ -74,7 +53,7 @@ class TradingConfigSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.manifest = load_runtime_manifest()
-        cls.compose = render_compose()
+        cls.compose = render_compose(root=REPO_ROOT)
         cls.entries = {entry["name"]: entry for entry in cls.manifest["services"]}
         cls.services = cls.compose["services"]
 
@@ -83,35 +62,22 @@ class TradingConfigSafetyTests(unittest.TestCase):
         for name, entry in self.entries.items():
             self.assertEqual(self.services[name]["profiles"], [entry["profile"]])
 
-    def test_compose_requires_bootstrapped_runtime_identity(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            empty_env = Path(temporary_directory) / ".env"
-            empty_env.write_text("", encoding="utf-8")
-            result = subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "--env-file",
-                    str(empty_env),
-                    "--profile",
-                    "trading",
-                    "--profile",
-                    "research",
-                    "config",
-                    "--quiet",
-                ],
-                cwd=REPO_ROOT,
-                env={
-                    key: value
-                    for key, value in os.environ.items()
-                    if key not in {"FREQTRADE_RUNTIME_UID", "FREQTRADE_RUNTIME_GID"}
-                },
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("run bootstrap first", result.stderr)
+    def test_base_compose_cannot_render_ambient_root_identity(self) -> None:
+        environment = os.environ.copy()
+        environment["FREQTRADE_RUNTIME_UID"] = "0"
+        environment["FREQTRADE_RUNTIME_GID"] = "0"
+        result = subprocess.run(
+            ["docker", "compose", "-f", "docker-compose.yml", "config", "--format", "json"],
+            cwd=REPO_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        base = json.loads(result.stdout)
+        self.assertTrue(all("user" not in service for service in base["services"].values()))
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("USER ftuser", dockerfile)
 
     def test_services_use_bootstrapped_identity_and_private_home(self) -> None:
         identity = {}
