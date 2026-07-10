@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import secrets
 import shutil
+import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,103 @@ SECRET_SPECS = {
     "jwt_secret_key": 48,
     "ws_token": 32,
 }
+WINDOWS_ACL_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$secretPath = $env:FREQTRADE_RUNTIME_SECRET_PATH
+$action = $env:FREQTRADE_RUNTIME_ACL_ACTION
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+
+if ($action -eq 'harden') {
+    $acl = Get-Acl -LiteralPath $secretPath
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) {
+        $null = $acl.RemoveAccessRuleSpecific($rule)
+    }
+    $acl.SetOwner($identity.User)
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity.User,
+        $fullControl,
+        $allow
+    )
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $secretPath -AclObject $acl
+} elseif ($action -ne 'verify') {
+    throw 'unsupported runtime ACL action'
+}
+
+$acl = Get-Acl -LiteralPath $secretPath
+$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+$rules = @(
+    $acl.GetAccessRules(
+        $true,
+        $true,
+        [System.Security.Principal.SecurityIdentifier]
+    )
+)
+$valid = $acl.AreAccessRulesProtected `
+    -and $owner.Value -eq $identity.User.Value `
+    -and $rules.Count -eq 1 `
+    -and $rules[0].IdentityReference.Value -eq $identity.User.Value `
+    -and $rules[0].AccessControlType -eq $allow `
+    -and -not $rules[0].IsInherited `
+    -and [int]$rules[0].FileSystemRights -eq [int]$fullControl
+if (-not $valid) {
+    throw 'runtime secret ACL verification failed'
+}
+Write-Output "runtime secret ACL: $action`: OK"
+"""
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _run_windows_acl(action: str, path: Path) -> None:
+    if action not in {"harden", "verify"}:
+        raise ValueError("unsupported Windows runtime secret ACL action")
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        raise ValueError("unable to prove Windows runtime secret ACL")
+    encoded_script = base64.b64encode(WINDOWS_ACL_SCRIPT.encode("utf-16-le")).decode("ascii")
+    environment = os.environ.copy()
+    environment["FREQTRADE_RUNTIME_SECRET_PATH"] = str(path)
+    environment["FREQTRADE_RUNTIME_ACL_ACTION"] = action
+    try:
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded_script,
+            ],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"failed to {action} Windows runtime secret ACL") from error
+    if completed.returncode != 0:
+        raise ValueError(f"failed to {action} Windows runtime secret ACL")
+
+
+def _harden_secret_permissions(path: Path) -> None:
+    if _is_windows():
+        _run_windows_acl("harden", path)
+    else:
+        os.chmod(path, 0o600)
+
+
+def _verify_secret_permissions(path: Path) -> None:
+    if _is_windows():
+        _run_windows_acl("verify", path)
+    elif stat.S_IMODE(path.stat().st_mode) != 0o600:
+        raise ValueError("runtime secret permissions must be 0600")
 
 
 def write_new_secret(path: Path, entropy_bytes: int) -> None:
@@ -29,6 +129,7 @@ def write_new_secret(path: Path, entropy_bytes: int) -> None:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(secrets.token_urlsafe(entropy_bytes))
             handle.write("\n")
+        _harden_secret_permissions(path)
     except BaseException:
         path.unlink(missing_ok=True)
         raise
@@ -55,6 +156,10 @@ def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
             path = secret_root / filename
             if not path.exists():
                 write_new_secret(path, entropy_bytes)
+            elif path.is_file():
+                _harden_secret_permissions(path)
+            else:
+                raise ValueError(f"invalid runtime secret file for {service['name']}")
 
 
 def sanitize_api_configs(root: Path, manifest: dict[str, Any]) -> None:
@@ -89,6 +194,7 @@ def rotate_secrets(
             temporary = secret_root / f".{filename}.{secrets.token_hex(8)}.tmp"
             write_new_secret(temporary, entropy_bytes)
             os.replace(temporary, destination)
+            _harden_secret_permissions(destination)
 
 
 def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
@@ -115,6 +221,7 @@ def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
             path = root / "ft_userdata" / "secrets" / service["name"] / filename
             if not path.is_file():
                 raise ValueError(f"missing runtime secret file for {service['name']}")
+            _verify_secret_permissions(path)
             value = path.read_text(encoding="utf-8").rstrip("\r\n")
             if "\n" in value or "\r" in value or len(value) < 32 or value == SENTINEL:
                 raise ValueError(f"runtime secret policy failed for {service['name']}")

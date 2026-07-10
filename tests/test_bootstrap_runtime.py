@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 from tools import bootstrap_runtime
 from tools.bootstrap_runtime import SENTINEL
@@ -16,6 +20,14 @@ from tools.runtime_manifest import load_runtime_manifest
 
 class BootstrapRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.real_windows_acl = getattr(bootstrap_runtime, "_run_windows_acl", None)
+        self.windows_acl_patcher = mock.patch.object(
+            bootstrap_runtime,
+            "_run_windows_acl",
+            create=True,
+        )
+        self.mock_windows_acl = self.windows_acl_patcher.start()
+        self.addCleanup(self.windows_acl_patcher.stop)
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
@@ -61,12 +73,15 @@ class BootstrapRuntimeTests(unittest.TestCase):
         }
 
     def write_manifest(self, services: list[dict[str, object]]) -> Path:
+        return self.write_manifest_data({"schema_version": 1, "services": services})
+
+    def write_manifest_data(self, data: object) -> Path:
         path = self.root / "runtime-services.json"
-        path.write_text(
-            json.dumps({"schema_version": 1, "services": services}),
-            encoding="utf-8",
-        )
+        path.write_text(json.dumps(data), encoding="utf-8")
         return path
+
+    def supported_manifest(self) -> dict[str, Any]:
+        return copy.deepcopy(load_runtime_manifest())
 
     def read_all_secret_values(self) -> dict[str, list[str]]:
         return {
@@ -98,8 +113,19 @@ class BootstrapRuntimeTests(unittest.TestCase):
         data["schema_version"] = 2
         manifest.write_text(json.dumps(data), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "schema_version must be 1"):
+        with self.assertRaisesRegex(ValueError, "schema_version must be integer 1"):
             load_runtime_manifest(manifest)
+
+    def test_load_manifest_rejects_boolean_schema_version(self) -> None:
+        data = self.supported_manifest()
+        data["schema_version"] = True
+
+        with self.assertRaisesRegex(ValueError, "schema_version must be integer 1"):
+            load_runtime_manifest(self.write_manifest_data(data))
+
+    def test_load_manifest_rejects_non_object_top_level(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            load_runtime_manifest(self.write_manifest_data([]))
 
     def test_load_manifest_rejects_missing_service_keys(self) -> None:
         service = self.service("freqtrade")
@@ -110,10 +136,45 @@ class BootstrapRuntimeTests(unittest.TestCase):
             load_runtime_manifest(manifest)
 
     def test_load_manifest_rejects_unsupported_role(self) -> None:
-        manifest = self.write_manifest([self.service("freqtrade", role="admin")])
+        data = self.supported_manifest()
+        data["services"][0]["role"] = "admin"
 
         with self.assertRaisesRegex(ValueError, "unsupported runtime role"):
-            load_runtime_manifest(manifest)
+            load_runtime_manifest(self.write_manifest_data(data))
+
+    def test_load_manifest_rejects_extra_service(self) -> None:
+        data = self.supported_manifest()
+        data["services"].append(self.service("freqtrade-extra"))
+
+        with self.assertRaisesRegex(ValueError, "exactly the supported services"):
+            load_runtime_manifest(self.write_manifest_data(data))
+
+    def test_load_manifest_rejects_extra_service_key(self) -> None:
+        data = self.supported_manifest()
+        data["services"][0]["unexpected"] = "value"
+
+        with self.assertRaisesRegex(ValueError, "unexpected keys"):
+            load_runtime_manifest(self.write_manifest_data(data))
+
+    def test_load_manifest_rejects_unsafe_or_non_string_paths(self) -> None:
+        mutations = (
+            ("config_path", "C:/outside/config.json"),
+            ("state_root", "ft_userdata/runtime/../outside"),
+            ("config_template", 123),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field, value=value):
+                data = self.supported_manifest()
+                data["services"][0][field] = value
+                with self.assertRaisesRegex(ValueError, "repository-relative path"):
+                    load_runtime_manifest(self.write_manifest_data(data))
+
+    def test_load_manifest_rejects_contract_value_drift(self) -> None:
+        data = self.supported_manifest()
+        data["services"][2]["strategy"] = "UnexpectedStrategy"
+
+        with self.assertRaisesRegex(ValueError, "contract mismatch"):
+            load_runtime_manifest(self.write_manifest_data(data))
 
     def test_default_manifest_has_exact_supported_services(self) -> None:
         manifest = load_runtime_manifest()
@@ -169,6 +230,108 @@ class BootstrapRuntimeTests(unittest.TestCase):
             secret.read_text(encoding="utf-8"),
             "existing-secret-value-that-is-long-enough\n",
         )
+        if os.name == "nt":
+            self.mock_windows_acl.assert_any_call("harden", secret)
+
+    def test_posix_hardening_sets_mode_0600(self) -> None:
+        secret = self.root / "secret"
+        secret.write_text("not-a-real-secret\n", encoding="utf-8")
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(bootstrap_runtime.os, "chmod") as chmod,
+        ):
+            bootstrap_runtime._harden_secret_permissions(secret)
+
+        chmod.assert_called_once_with(secret, 0o600)
+
+    def test_posix_verify_rejects_group_or_other_permissions(self) -> None:
+        secret = self.root / "secret"
+        secret.write_text("not-a-real-secret\n", encoding="utf-8")
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(
+                Path,
+                "stat",
+                return_value=SimpleNamespace(st_mode=stat.S_IFREG | 0o644),
+            ),
+            self.assertRaisesRegex(ValueError, "permissions must be 0600"),
+        ):
+            bootstrap_runtime._verify_secret_permissions(secret)
+
+    def test_windows_permission_branches_use_acl_proof(self) -> None:
+        secret = self.root / "secret with spaces"
+        secret.write_text("not-a-real-secret\n", encoding="utf-8")
+
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime._harden_secret_permissions(secret)
+            bootstrap_runtime._verify_secret_permissions(secret)
+
+        self.assertEqual(
+            self.mock_windows_acl.call_args_list,
+            [mock.call("harden", secret), mock.call("verify", secret)],
+        )
+
+    def test_windows_acl_wrapper_uses_argument_array_and_path_environment(self) -> None:
+        secret = self.root / "secret path with spaces"
+        completed = subprocess.CompletedProcess([], 0, "runtime secret ACL: OK\n", "")
+
+        with (
+            mock.patch.object(
+                bootstrap_runtime.shutil,
+                "which",
+                return_value="C:/Program Files/PowerShell/powershell.exe",
+            ),
+            mock.patch.object(bootstrap_runtime.subprocess, "run", return_value=completed) as run,
+        ):
+            self.real_windows_acl("verify", secret)
+
+        command = run.call_args.args[0]
+        options = run.call_args.kwargs
+        self.assertIsInstance(command, list)
+        self.assertEqual(command[0], "C:/Program Files/PowerShell/powershell.exe")
+        self.assertNotIn(str(secret), command)
+        self.assertNotIn("shell", options)
+        self.assertEqual(options["env"]["FREQTRADE_RUNTIME_SECRET_PATH"], str(secret))
+
+    def test_windows_acl_failure_is_secret_safe_and_fails_closed(self) -> None:
+        secret_value = "secret-value-that-must-not-appear-in-errors"
+        secret = self.root / "secret"
+        secret.write_text(secret_value + "\n", encoding="utf-8")
+        completed = subprocess.CompletedProcess([], 1, "", "ACL command failed")
+
+        with (
+            mock.patch.object(bootstrap_runtime.shutil, "which", return_value="powershell.exe"),
+            mock.patch.object(bootstrap_runtime.subprocess, "run", return_value=completed),
+            self.assertRaisesRegex(ValueError, "Windows runtime secret ACL") as raised,
+        ):
+            self.real_windows_acl("verify", secret)
+        self.assertNotIn(secret_value, str(raised.exception))
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL integration test")
+    def test_windows_init_and_verify_with_real_acl(self) -> None:
+        with mock.patch.object(
+            bootstrap_runtime,
+            "_run_windows_acl",
+            new=self.real_windows_acl,
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode integration test")
+    def test_posix_init_existing_and_rotated_secrets_are_0600(self) -> None:
+        existing = self.root / "ft_userdata/secrets/freqtrade/api_password"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("existing-secret-value-that-is-long-enough\n", encoding="utf-8")
+        os.chmod(existing, 0o644)
+
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        self.assertEqual(stat.S_IMODE(existing.stat().st_mode), 0o600)
+        bootstrap_runtime.rotate_secrets(self.root, self.manifest, {"freqtrade"})
+        for filename in bootstrap_runtime.SECRET_SPECS:
+            path = existing.parent / filename
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_verify_accepts_initialized_runtime(self) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
