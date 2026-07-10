@@ -140,7 +140,7 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
         raise StateBundleError("state bundle is incomplete")
     try:
         manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeError, OSError) as error:
+    except (json.JSONDecodeError, UnicodeError, OSError, RecursionError) as error:
         raise StateBundleError("invalid state bundle manifest") from error
     manifest = _validate_manifest(manifest_data)
     if sha256_file(database_path) != manifest["database_sha256"]:
@@ -210,8 +210,8 @@ def create_backup(
 
 
 def restore_bundle(bundle: Path, destination: Path) -> None:
-    verify_bundle(bundle)
-    if destination.exists():
+    manifest = verify_bundle(bundle)
+    if os.path.lexists(destination):
         raise StateBundleError(f"restore destination already exists: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_text = tempfile.mkstemp(
@@ -221,14 +221,39 @@ def restore_bundle(bundle: Path, destination: Path) -> None:
     )
     os.close(descriptor)
     temporary = Path(temporary_text)
+    published = False
     try:
         shutil.copyfile(bundle / "database.sqlite", temporary)
-        inspect_database(temporary)
-        if sha256_file(temporary) != sha256_file(bundle / "database.sqlite"):
-            raise StateBundleError("restored database hash mismatch")
-        os.replace(temporary, destination)
+        if sha256_file(temporary) != manifest["database_sha256"]:
+            raise StateBundleError("restored database metadata mismatch: hash")
+        if temporary.stat().st_size != manifest["database_size"]:
+            raise StateBundleError("restored database metadata mismatch: size")
+        inspected = inspect_database(temporary)
+        for key in (
+            "user_version",
+            "tables",
+            "row_counts",
+            "integrity_check",
+            "foreign_key_violations",
+        ):
+            if inspected[key] != manifest[key]:
+                raise StateBundleError(f"restored database metadata mismatch: {key}")
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as error:
+            raise StateBundleError(
+                f"restore destination already exists: {destination}"
+            ) from error
+        published = True
+        try:
+            temporary.unlink()
+        except OSError as error:
+            raise StateBundleError(
+                "restore succeeded but temporary cleanup failed"
+            ) from error
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        if not published:
+            temporary.unlink(missing_ok=True)
         raise
 
 

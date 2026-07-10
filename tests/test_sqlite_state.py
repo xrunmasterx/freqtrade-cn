@@ -240,8 +240,91 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
         self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
 
-    def test_restore_closes_connections_before_atomic_replace(self) -> None:
+    def test_restore_rejects_bundle_database_swapped_after_verification(self) -> None:
+        bundle = self.create_valid_bundle()
+        swapped = self.root / "swapped.sqlite"
+        self.create_database(swapped)
+        with closing(sqlite3.connect(swapped)) as connection:
+            connection.execute("INSERT INTO orders(id) VALUES (99)")
+            connection.commit()
+        original_verify = sqlite_state.verify_bundle
+
+        def verify_then_swap(path: Path) -> dict[str, object]:
+            manifest = original_verify(path)
+            os.replace(swapped, path / "database.sqlite")
+            return manifest
+
+        with mock.patch.object(
+            sqlite_state, "verify_bundle", side_effect=verify_then_swap
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "metadata mismatch"):
+                sqlite_state.restore_bundle(bundle, self.destination)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
+
+    def test_restore_does_not_clobber_destination_created_during_copy(self) -> None:
+        bundle = self.create_valid_bundle()
+        original_copyfile = shutil.copyfile
+
+        def copy_then_create_destination(source: Path, target: Path) -> str:
+            result = original_copyfile(source, target)
+            self.destination.write_bytes(b"KEEP-ME")
+            return result
+
+        with mock.patch.object(
+            shutil, "copyfile", side_effect=copy_then_create_destination
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "already exists"):
+                sqlite_state.restore_bundle(bundle, self.destination)
+        self.assertEqual(self.destination.read_bytes(), b"KEEP-ME")
+        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
+
+    def test_restore_does_not_clobber_dangling_symlink_created_during_copy(self) -> None:
+        bundle = self.create_valid_bundle()
+        missing_target = self.root / "missing-target.sqlite"
+        original_copyfile = shutil.copyfile
+
+        def copy_then_create_symlink(source: Path, target: Path) -> str:
+            result = original_copyfile(source, target)
+            self.destination.symlink_to(missing_target)
+            return result
+
+        with mock.patch.object(
+            shutil, "copyfile", side_effect=copy_then_create_symlink
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "already exists"):
+                sqlite_state.restore_bundle(bundle, self.destination)
+        self.assertTrue(self.destination.is_symlink())
+        link_target = str(Path(os.readlink(self.destination))).removeprefix("\\\\?\\")
+        self.assertEqual(Path(link_target), missing_target)
+        self.assertFalse(missing_target.exists())
+        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
+
+    def test_restore_reports_cleanup_failure_after_successful_link(self) -> None:
+        bundle = self.create_valid_bundle()
+        original_unlink = Path.unlink
+
+        def reject_temporary_unlink(
+            path: Path, missing_ok: bool = False
+        ) -> None:
+            if path.name.startswith(".restored.sqlite.") and path.suffix == ".tmp":
+                raise PermissionError("temporary unlink blocked")
+            original_unlink(path, missing_ok=missing_ok)
+
+        with mock.patch.object(
+            Path, "unlink", autospec=True, side_effect=reject_temporary_unlink
+        ):
+            with self.assertRaisesRegex(
+                sqlite_state.StateBundleError, "succeeded but temporary cleanup failed"
+            ):
+                sqlite_state.restore_bundle(bundle, self.destination)
+        self.assertTrue(self.destination.is_file())
+        sqlite_state.compare_databases(bundle / "database.sqlite", self.destination)
+        self.assertEqual(len(list(self.root.glob(".restored.sqlite.*.tmp"))), 1)
+
+    def test_restore_closes_connections_before_atomic_publish(self) -> None:
         sqlite_state.restore_bundle(self.create_valid_bundle(), self.destination)
+        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
         renamed = self.destination.with_name("renamed.sqlite")
         os.replace(self.destination, renamed)
         self.assertTrue(renamed.is_file())
@@ -297,6 +380,21 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertNotIn(secret, completed.stdout + completed.stderr)
         self.assertNotIn("BTC/USDT", completed.stdout + completed.stderr)
 
+    def test_cli_deeply_nested_manifest_has_fixed_safe_error(self) -> None:
+        bundle = self.create_valid_bundle()
+        secret = "DO-NOT-ECHO-THIS"
+        deeply_nested = "[" * 2000 + json.dumps(secret) + "]" * 2000
+        (bundle / "manifest.json").write_text(deeply_nested, encoding="utf-8")
+
+        completed = self.run_cli("verify", "--bundle", str(bundle))
+
+        output = completed.stdout + completed.stderr
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "SQLite state operation failed\n")
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn(str(self.root), output)
+        self.assertNotIn(secret, output)
 
 if __name__ == "__main__":
     unittest.main()
