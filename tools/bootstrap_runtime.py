@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -23,6 +24,14 @@ SECRET_SPECS = {
     "jwt_secret_key": 48,
     "ws_token": 32,
 }
+RUNTIME_IDENTITY_KEYS = (
+    "FREQTRADE_RUNTIME_UID",
+    "FREQTRADE_RUNTIME_GID",
+)
+RUNTIME_IDENTITY_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?(FREQTRADE_RUNTIME_(?:UID|GID))\s*=\s*(.*?)\s*$"
+)
+NON_NEGATIVE_INTEGER_PATTERN = re.compile(r"[0-9]+")
 WINDOWS_ACL_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $secretPath = $env:FREQTRADE_RUNTIME_SECRET_PATH
@@ -115,11 +124,89 @@ def _harden_secret_permissions(path: Path) -> None:
         os.chmod(path, 0o600)
 
 
-def _verify_secret_permissions(path: Path) -> None:
+def _verify_secret_permissions(path: Path, runtime_uid: int) -> None:
     if _is_windows():
         _run_windows_acl("verify", path)
-    elif stat.S_IMODE(path.stat().st_mode) != 0o600:
-        raise ValueError("runtime secret permissions must be 0600")
+    else:
+        status = path.stat()
+        if stat.S_IMODE(status.st_mode) != 0o600:
+            raise ValueError("runtime secret permissions must be 0600")
+        if status.st_uid != runtime_uid:
+            raise ValueError("runtime secret must be owned by runtime uid")
+
+
+def _expected_runtime_identity() -> dict[str, int]:
+    if _is_windows():
+        return {
+            "FREQTRADE_RUNTIME_UID": 1000,
+            "FREQTRADE_RUNTIME_GID": 1000,
+        }
+    return {
+        "FREQTRADE_RUNTIME_UID": os.getuid(),
+        "FREQTRADE_RUNTIME_GID": os.getgid(),
+    }
+
+
+def _parse_runtime_identity(content: str) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for line in content.splitlines():
+        match = RUNTIME_IDENTITY_PATTERN.fullmatch(line)
+        if match is None:
+            continue
+        key, value = match.groups()
+        if key in values:
+            raise ValueError(f"duplicate runtime identity key: {key}")
+        if NON_NEGATIVE_INTEGER_PATTERN.fullmatch(value) is None:
+            raise ValueError(f"runtime identity must be a non-negative integer: {key}")
+        values[key] = int(value)
+    return values
+
+
+def _read_runtime_identity(path: Path) -> dict[str, int]:
+    if not path.is_file():
+        raise ValueError("missing runtime identity environment")
+    values = _parse_runtime_identity(path.read_text(encoding="utf-8"))
+    missing = [key for key in RUNTIME_IDENTITY_KEYS if key not in values]
+    if missing:
+        raise ValueError(f"missing runtime identity key: {missing[0]}")
+    expected = _expected_runtime_identity()
+    for key in RUNTIME_IDENTITY_KEYS:
+        if values[key] != expected[key]:
+            raise ValueError(f"runtime identity does not match current host: {key}")
+    return values
+
+
+def _merge_runtime_identity(path: Path) -> None:
+    expected = _expected_runtime_identity()
+    if path.exists() and not path.is_file():
+        raise ValueError("invalid runtime identity environment")
+    content = path.read_bytes().decode("utf-8") if path.is_file() else ""
+    existing = _parse_runtime_identity(content)
+    for key, value in existing.items():
+        if value != expected[key]:
+            raise ValueError(f"runtime identity conflicts with current host: {key}")
+
+    missing = [key for key in RUNTIME_IDENTITY_KEYS if key not in existing]
+    if not missing:
+        return
+    newline = "\r\n" if "\r\n" in content else "\n"
+    merged = content
+    if merged and not merged.endswith(("\r", "\n")):
+        merged += newline
+    merged += "".join(f"{key}={expected[key]}{newline}" for key in missing)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(merged)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def write_new_secret(path: Path, entropy_bytes: int) -> None:
@@ -136,6 +223,7 @@ def write_new_secret(path: Path, entropy_bytes: int) -> None:
 
 
 def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
+    _merge_runtime_identity(root / ".env")
     for service in manifest["services"]:
         template = root / service["config_template"]
         config = root / service["config_path"]
@@ -147,6 +235,7 @@ def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
 
         state_root = root / service["state_root"]
         (state_root / "logs").mkdir(parents=True, exist_ok=True)
+        (state_root / "home").mkdir(parents=True, exist_ok=True)
         if service["role"] == "research":
             (state_root / "data").mkdir(parents=True, exist_ok=True)
             (state_root / "backtest_results").mkdir(parents=True, exist_ok=True)
@@ -198,6 +287,8 @@ def rotate_secrets(
 
 
 def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
+    identity = _read_runtime_identity(root / ".env")
+    runtime_uid = identity["FREQTRADE_RUNTIME_UID"]
     all_values: list[str] = []
     state_roots: set[Path] = set()
     for service in manifest["services"]:
@@ -207,6 +298,12 @@ def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
             raise ValueError(f"missing operational config for {service['name']}")
         if not state_root.is_dir() or state_root in state_roots:
             raise ValueError(f"invalid or duplicate state root for {service['name']}")
+        if not (state_root / "home").is_dir():
+            raise ValueError(f"missing runtime home for {service['name']}")
+        if not os.access(state_root, os.R_OK | os.W_OK | os.X_OK):
+            raise ValueError(
+                f"state root must be readable, writable, and searchable: {service['name']}"
+            )
         state_roots.add(state_root)
 
         config_data = json.loads(config.read_text(encoding="utf-8"))
@@ -221,7 +318,7 @@ def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
             path = root / "ft_userdata" / "secrets" / service["name"] / filename
             if not path.is_file():
                 raise ValueError(f"missing runtime secret file for {service['name']}")
-            _verify_secret_permissions(path)
+            _verify_secret_permissions(path, runtime_uid)
             value = path.read_text(encoding="utf-8").rstrip("\r\n")
             if "\n" in value or "\r" in value or len(value) < 32 or value == SENTINEL:
                 raise ValueError(f"runtime secret policy failed for {service['name']}")

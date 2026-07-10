@@ -14,6 +14,7 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONFAULTHANDLER=1
+ENV PYTHONUSERBASE=/home/ftuser/.local
 ENV PATH=/home/ftuser/.local/bin:$PATH
 ENV FT_APP_ENV="docker"
 
@@ -54,6 +55,12 @@ USER ftuser
 RUN printf '%s\n' 'local-frequi-f5a81466' > /freqtrade/freqtrade/rpc/api_server/ui/.uiversion \
   && pip install -e . --user --no-cache-dir \
   && mkdir -p /freqtrade/user_data/
+
+USER root
+RUN chmod 0755 /home/ftuser \
+  && chmod -R a+rX /home/ftuser/.local
+
+USER ftuser
 
 ENTRYPOINT ["python", "/usr/local/bin/freqtrade-entrypoint"]
 CMD ["trade"]

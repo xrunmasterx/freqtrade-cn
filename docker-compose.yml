@@ -25,6 +25,7 @@ x-freqtrade-common: &freqtrade-common
     dockerfile: Dockerfile
   image: freqtrade-cn:local
   restart: unless-stopped
+  user: "${FREQTRADE_RUNTIME_UID:?run bootstrap first}:${FREQTRADE_RUNTIME_GID:?run bootstrap first}"
   init: true
   cap_drop:
     - ALL
@@ -73,6 +74,7 @@ services:
       FT_API_PASSWORD_FILE: /run/secrets/api_password
       FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
       FT_WS_TOKEN_FILE: /run/secrets/ws_token
+      HOME: /freqtrade/state/home
     ports:
       - target: 8080
         published: "${FT_UI_PORT:-8081}"
@@ -131,6 +133,7 @@ services:
       FT_API_PASSWORD_FILE: /run/secrets/api_password
       FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
       FT_WS_TOKEN_FILE: /run/secrets/ws_token
+      HOME: /freqtrade/state/home
     ports:
       - target: 8080
         published: "${FT_FUTURES_UI_PORT:-8082}"
@@ -199,6 +202,7 @@ services:
       FT_API_PASSWORD_FILE: /run/secrets/api_password
       FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
       FT_WS_TOKEN_FILE: /run/secrets/ws_token
+      HOME: /freqtrade/state/home
     ports:
       - target: 8080
         published: "${FT_RESEARCH_UI_PORT:-8083}"

@@ -215,6 +215,83 @@ class BootstrapRuntimeTests(unittest.TestCase):
         self.assertEqual(len(all_values), len(set(all_values)))
         self.assertTrue(all(len(value) >= 32 for value in all_values))
 
+    def test_posix_init_merges_runtime_identity_and_creates_service_homes(self) -> None:
+        environment = self.root / ".env"
+        environment.write_bytes(
+            b"# user settings\r\nFT_UI_PORT=9000\r\nFREQTRADE_RUNTIME_UID=1001\r\n"
+        )
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
+            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        self.assertEqual(
+            environment.read_bytes(),
+            b"# user settings\r\nFT_UI_PORT=9000\r\n"
+            b"FREQTRADE_RUNTIME_UID=1001\r\nFREQTRADE_RUNTIME_GID=1002\r\n",
+        )
+        for service in self.manifest["services"]:
+            self.assertTrue((self.root / service["state_root"] / "home").is_dir())
+
+    def test_windows_init_writes_container_identity_1000(self) -> None:
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        self.assertEqual(
+            (self.root / ".env").read_text(encoding="utf-8"),
+            "FREQTRADE_RUNTIME_UID=1000\nFREQTRADE_RUNTIME_GID=1000\n",
+        )
+
+    def test_init_rejects_conflicting_or_duplicate_runtime_identity(self) -> None:
+        invalid_contents = (
+            "FREQTRADE_RUNTIME_UID=999\nFREQTRADE_RUNTIME_GID=1002\n",
+            "FREQTRADE_RUNTIME_UID=1001\nFREQTRADE_RUNTIME_UID=1001\n"
+            "FREQTRADE_RUNTIME_GID=1002\n",
+        )
+        for content in invalid_contents:
+            with self.subTest(content=content):
+                environment = self.root / ".env"
+                environment.write_text(content, encoding="utf-8")
+                with (
+                    mock.patch.object(
+                        bootstrap_runtime, "_is_windows", return_value=False
+                    ),
+                    mock.patch.object(
+                        bootstrap_runtime.os, "getuid", return_value=1001, create=True
+                    ),
+                    mock.patch.object(
+                        bootstrap_runtime.os, "getgid", return_value=1002, create=True
+                    ),
+                    self.assertRaisesRegex(ValueError, "runtime identity"),
+                ):
+                    bootstrap_runtime.init_runtime(self.root, self.manifest)
+                self.assertEqual(environment.read_text(encoding="utf-8"), content)
+
+    def test_verify_rejects_missing_duplicate_invalid_or_mismatched_identity(self) -> None:
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        invalid_contents = (
+            "FREQTRADE_RUNTIME_UID=1000\n",
+            "FREQTRADE_RUNTIME_UID=1000\nFREQTRADE_RUNTIME_UID=1000\n"
+            "FREQTRADE_RUNTIME_GID=1000\n",
+            "FREQTRADE_RUNTIME_UID=-1\nFREQTRADE_RUNTIME_GID=1000\n",
+            "FREQTRADE_RUNTIME_UID=1001\nFREQTRADE_RUNTIME_GID=1000\n",
+        )
+        for content in invalid_contents:
+            with self.subTest(content=content):
+                (self.root / ".env").write_text(content, encoding="utf-8")
+                with (
+                    mock.patch.object(
+                        bootstrap_runtime, "_is_windows", return_value=True
+                    ),
+                    self.assertRaisesRegex(ValueError, "runtime identity"),
+                ):
+                    bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
     def test_init_never_overwrites_existing_config_or_secret(self) -> None:
         config = self.root / "configs/spot.json"
         config.parent.mkdir(parents=True)
@@ -258,7 +335,25 @@ class BootstrapRuntimeTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(ValueError, "permissions must be 0600"),
         ):
-            bootstrap_runtime._verify_secret_permissions(secret)
+            bootstrap_runtime._verify_secret_permissions(secret, runtime_uid=1001)
+
+    def test_posix_verify_requires_runtime_uid_to_own_secret(self) -> None:
+        secret = self.root / "secret"
+        secret.write_text("not-a-real-secret\n", encoding="utf-8")
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(
+                Path,
+                "stat",
+                return_value=SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_uid=1000,
+                ),
+            ),
+            self.assertRaisesRegex(ValueError, "owned by runtime uid"),
+        ):
+            bootstrap_runtime._verify_secret_permissions(secret, runtime_uid=1001)
 
     def test_windows_permission_branches_use_acl_proof(self) -> None:
         secret = self.root / "secret with spaces"
@@ -266,7 +361,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
             bootstrap_runtime._harden_secret_permissions(secret)
-            bootstrap_runtime._verify_secret_permissions(secret)
+            bootstrap_runtime._verify_secret_permissions(secret, runtime_uid=1000)
 
         self.assertEqual(
             self.mock_windows_acl.call_args_list,
@@ -337,6 +432,42 @@ class BootstrapRuntimeTests(unittest.TestCase):
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 
         bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+    def test_posix_verify_uses_env_uid_and_requires_accessible_state(self) -> None:
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
+            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
+            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(
+                bootstrap_runtime, "_verify_secret_permissions"
+            ) as verify_secret,
+            mock.patch.object(bootstrap_runtime.os, "access", return_value=True) as access,
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+        self.assertTrue(verify_secret.call_args_list)
+        self.assertTrue(all(call.args[1] == 1001 for call in verify_secret.call_args_list))
+        self.assertEqual(access.call_count, len(self.manifest["services"]))
+        self.assertTrue(
+            all(call.args[1] == os.R_OK | os.W_OK | os.X_OK for call in access.call_args_list)
+        )
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
+            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(bootstrap_runtime, "_verify_secret_permissions"),
+            mock.patch.object(bootstrap_runtime.os, "access", return_value=False),
+            self.assertRaisesRegex(ValueError, "state root must be readable, writable, and searchable"),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
     def test_verify_rejects_duplicate_secret_values_without_printing_them(self) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)

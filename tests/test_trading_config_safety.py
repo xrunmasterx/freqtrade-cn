@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -80,6 +82,50 @@ class TradingConfigSafetyTests(unittest.TestCase):
         self.assertEqual(set(self.services), set(self.entries))
         for name, entry in self.entries.items():
             self.assertEqual(self.services[name]["profiles"], [entry["profile"]])
+
+    def test_compose_requires_bootstrapped_runtime_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            empty_env = Path(temporary_directory) / ".env"
+            empty_env.write_text("", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "docker",
+                    "compose",
+                    "--env-file",
+                    str(empty_env),
+                    "--profile",
+                    "trading",
+                    "--profile",
+                    "research",
+                    "config",
+                    "--quiet",
+                ],
+                cwd=REPO_ROOT,
+                env={
+                    key: value
+                    for key, value in os.environ.items()
+                    if key not in {"FREQTRADE_RUNTIME_UID", "FREQTRADE_RUNTIME_GID"}
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("run bootstrap first", result.stderr)
+
+    def test_services_use_bootstrapped_identity_and_private_home(self) -> None:
+        identity = {}
+        for line in (REPO_ROOT / ".env").read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"FREQTRADE_RUNTIME_UID", "FREQTRADE_RUNTIME_GID"}:
+                identity[key] = value
+        expected_user = (
+            f"{identity['FREQTRADE_RUNTIME_UID']}:"
+            f"{identity['FREQTRADE_RUNTIME_GID']}"
+        )
+        for name, service in self.services.items():
+            self.assertEqual(service["user"], expected_user, name)
+            self.assertEqual(service["environment"]["HOME"], "/freqtrade/state/home", name)
 
     def test_trading_services_load_runtime_then_safety_config_last(self) -> None:
         for name, entry in self.entries.items():
@@ -247,6 +293,7 @@ class TradingConfigSafetyTests(unittest.TestCase):
                     "FT_API_PASSWORD_FILE": "/run/secrets/api_password",
                     "FT_JWT_SECRET_FILE": "/run/secrets/jwt_secret_key",
                     "FT_WS_TOKEN_FILE": "/run/secrets/ws_token",
+                    "HOME": "/freqtrade/state/home",
                 },
                 name,
             )
@@ -273,6 +320,13 @@ class TradingConfigSafetyTests(unittest.TestCase):
             self.assertIs(service["init"], True, name)
             self.assertEqual(service["cap_drop"], ["ALL"], name)
             self.assertIn("no-new-privileges:true", service["security_opt"], name)
+
+    def test_image_install_tree_is_readable_but_not_writable_by_runtime_users(self) -> None:
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ENV PYTHONUSERBASE=/home/ftuser/.local", dockerfile)
+        self.assertIn("chmod 0755 /home/ftuser", dockerfile)
+        self.assertIn("chmod -R a+rX /home/ftuser/.local", dockerfile)
+        self.assertNotIn("chmod -R a+w", dockerfile)
 
 
 if __name__ == "__main__":
