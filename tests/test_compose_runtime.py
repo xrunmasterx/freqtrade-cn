@@ -11,38 +11,83 @@ from unittest import mock
 from tools import compose_runtime
 
 
+SERVICES = ["freqtrade", "freqtrade-futures", "freqtrade-research"]
+MANIFEST = {"services": [{"name": name} for name in SERVICES]}
+IDENTITY = {"FREQTRADE_RUNTIME_UID": 1001, "FREQTRADE_RUNTIME_GID": 1002}
+
+
 class ComposeRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
         (self.root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-        override = self.root / "ft_userdata/runtime/compose.identity.yml"
-        override.parent.mkdir(parents=True)
-        override.write_text('{"services": {}}\n', encoding="utf-8")
 
-    def test_run_verifies_then_uses_literal_override_and_clean_environment(self) -> None:
-        manifest = {"services": []}
+    def test_parser_allows_only_supported_actions_and_safe_options(self) -> None:
+        cases = (
+            (["--profile", "trading", "config", "--quiet", "--format", "json"],),
+            (["--profile", "research", "up", "--detach", "--build", "freqtrade-research"],),
+            (["down"],),
+            (["create", "--force-recreate", "freqtrade"],),
+            (["start", "freqtrade"],),
+            (["stop", "freqtrade-futures"],),
+            (["restart", "freqtrade-research"],),
+            (["ps", "--all"],),
+            (["logs", "--follow", "--tail", "50", "freqtrade"],),
+        )
+        for (arguments,) in cases:
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    compose_runtime.parse_compose_arguments(arguments, set(SERVICES)),
+                    arguments,
+                )
+
+    def test_parser_rejects_escape_hatches_before_docker(self) -> None:
+        forbidden = (
+            ["-f", "-"],
+            ["--file", "-"],
+            ["--project-directory", "outside"],
+            ["--env-file", "outside"],
+            ["run", "--user", "0", "freqtrade"],
+            ["exec", "freqtrade", "sh"],
+            ["up", "--privileged"],
+            ["up", "--volume", "host:/container"],
+            ["up", "--entrypoint", "sh"],
+            ["up", "--env", "X=Y"],
+            ["--profile", "unsafe-experiments", "config"],
+            ["up", "unknown-service"],
+        )
+        for arguments in forbidden:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(compose_runtime.UnsupportedArguments):
+                    compose_runtime.parse_compose_arguments(arguments, set(SERVICES))
+                with (
+                    mock.patch.object(compose_runtime.subprocess, "run") as run,
+                    mock.patch("sys.stderr") as stderr,
+                ):
+                    result = compose_runtime.main(arguments)
+                self.assertEqual(result, 64)
+                run.assert_not_called()
+                self.assertEqual(
+                    "".join(call.args[0] for call in stderr.write.call_args_list),
+                    "compose runtime: unsupported arguments\n",
+                )
+
+    def test_run_uses_verified_in_memory_override_and_clean_environment(self) -> None:
         completed = subprocess.CompletedProcess([], 17, "", "")
-        events = []
-
-        def verify(root: Path, loaded_manifest: object) -> None:
-            events.append(("verify", root, loaded_manifest))
-
-        def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
-            events.append(("run", command, options))
-            return completed
-
         with (
-            mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=manifest),
-            mock.patch.object(compose_runtime, "verify_runtime", side_effect=verify),
-            mock.patch.object(compose_runtime.subprocess, "run", side_effect=run),
+            mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=MANIFEST),
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime.subprocess, "run", return_value=completed) as run,
             mock.patch.dict(
                 os.environ,
                 {
                     "KEEP_ME": "yes",
-                    "FREQTRADE_RUNTIME_UID": "0",
-                    "FREQTRADE_RUNTIME_GID": "0",
+                    "FREQTRADE_RUNTIME_UID": "1001",
+                    "FREQTRADE_RUNTIME_EXTRA": "bad",
+                    "COMPOSE_FILE": "bad.yml",
+                    "COMPOSE_PROFILES": "bad",
+                    "COMPOSE_PROJECT_NAME": "bad",
                 },
                 clear=True,
             ),
@@ -53,46 +98,71 @@ class ComposeRuntimeTests(unittest.TestCase):
             )
 
         self.assertIs(result, completed)
-        self.assertEqual(events[0], ("verify", self.root.resolve(), manifest))
-        command = events[1][1]
+        command = run.call_args.args[0]
         self.assertEqual(
             command,
             [
                 "docker",
                 "compose",
+                "--project-name",
+                "freqtrade-cn",
                 "-f",
                 str(self.root / "docker-compose.yml"),
                 "-f",
-                str(self.root / "ft_userdata/runtime/compose.identity.yml"),
+                "-",
                 "--profile",
                 "trading",
                 "config",
             ],
         )
-        options = events[1][2]
+        options = run.call_args.kwargs
         self.assertNotIn("shell", options)
         self.assertEqual(options["cwd"], self.root.resolve())
         self.assertEqual(options["env"], {"KEEP_ME": "yes"})
-
-    def test_render_compose_parses_wrapper_output(self) -> None:
-        completed = subprocess.CompletedProcess(
-            [],
-            0,
-            json.dumps({"services": {"freqtrade": {"user": "1001:1002"}}}),
-            "",
+        self.assertEqual(
+            json.loads(options["input"]),
+            {
+                "services": {
+                    name: {"user": "1001:1002"} for name in SERVICES
+                }
+            },
         )
-        with mock.patch.object(compose_runtime, "run_compose", return_value=completed):
-            rendered = compose_runtime.render_compose(root=self.root)
-        self.assertEqual(rendered["services"]["freqtrade"]["user"], "1001:1002")
 
-    def test_main_returns_fixed_error_without_leaking_details(self) -> None:
+    def test_verified_identity_is_not_reread_from_replaced_override(self) -> None:
+        override = self.root / "ft_userdata/runtime/compose.identity.yml"
+        override.parent.mkdir(parents=True)
+        override.write_text("verified artifact", encoding="utf-8")
+
+        def verify(root: Path, manifest: object) -> dict[str, int]:
+            override.write_text('{"services":{"freqtrade":{"user":"0:0"}}}', encoding="utf-8")
+            return IDENTITY
+
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=MANIFEST),
+            mock.patch.object(compose_runtime, "verify_runtime", side_effect=verify),
+            mock.patch.object(compose_runtime.subprocess, "run", return_value=completed) as run,
+        ):
+            compose_runtime.run_compose(["config"], root=self.root)
+        users = json.loads(run.call_args.kwargs["input"])["services"]
+        self.assertTrue(all(service["user"] == "1001:1002" for service in users.values()))
+
+    def test_main_rejects_unsupported_arguments_with_fixed_error(self) -> None:
+        with (
+            mock.patch.object(compose_runtime.subprocess, "run") as run,
+            mock.patch("sys.stderr") as stderr,
+        ):
+            result = compose_runtime.main(["run", "--user", "0", "secret-input"])
+        self.assertEqual(result, 64)
+        run.assert_not_called()
+        message = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertEqual(message, "compose runtime: unsupported arguments\n")
+        self.assertNotIn("secret-input", message)
+
+    def test_main_returns_fixed_verification_error_without_leaking_details(self) -> None:
         secret = "detail-that-must-not-leak"
         with (
-            mock.patch.object(
-                compose_runtime,
-                "run_compose",
-                side_effect=ValueError(secret),
-            ),
+            mock.patch.object(compose_runtime, "run_compose", side_effect=ValueError(secret)),
             mock.patch("sys.stderr") as stderr,
         ):
             result = compose_runtime.main(["config"])

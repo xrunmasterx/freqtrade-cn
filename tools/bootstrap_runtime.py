@@ -195,7 +195,7 @@ def _verify_ambient_runtime_identity(identity: dict[str, int]) -> None:
             raise ValueError("ambient runtime identity does not match verified identity")
 
 
-def _expected_compose_identity(
+def build_compose_identity(
     manifest: dict[str, Any], identity: dict[str, int]
 ) -> dict[str, object]:
     user = (
@@ -218,7 +218,7 @@ def _read_compose_identity(
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("invalid compose identity override") from error
-    if document != _expected_compose_identity(manifest, identity):
+    if document != build_compose_identity(manifest, identity):
         raise ValueError("invalid or conflicting compose identity override")
     return document
 
@@ -236,6 +236,36 @@ def _atomic_write_text(path: Path, content: str) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _require_regular_runtime_control_file(path: Path) -> os.stat_result:
+    if path.is_symlink():
+        raise ValueError("runtime control file must be a regular file")
+    try:
+        status = os.lstat(path)
+    except OSError as error:
+        raise ValueError("runtime control file must be a regular file") from error
+    if not stat.S_ISREG(status.st_mode):
+        raise ValueError("runtime control file must be a regular file")
+    return status
+
+
+def _harden_runtime_control_file(path: Path, runtime_uid: int) -> None:
+    status = _require_regular_runtime_control_file(path)
+    if _is_windows():
+        _run_windows_acl("harden", path)
+    else:
+        if status.st_uid != runtime_uid:
+            raise ValueError("runtime control file must be owned by runtime uid")
+        os.chmod(path, 0o600)
+
+
+def _verify_runtime_control_file(path: Path, runtime_uid: int) -> None:
+    status = _require_regular_runtime_control_file(path)
+    if _is_windows():
+        _run_windows_acl("verify", path)
+    elif status.st_uid != runtime_uid or stat.S_IMODE(status.st_mode) != 0o600:
+        raise ValueError("runtime control file must be owned by runtime uid with mode 0600")
 
 
 def _merge_runtime_identity(path: Path) -> None:
@@ -271,7 +301,7 @@ def _merge_compose_identity(
         _read_compose_identity(path, manifest, identity)
         return
     content = json.dumps(
-        _expected_compose_identity(manifest, identity),
+        build_compose_identity(manifest, identity),
         indent=2,
         ensure_ascii=True,
     )
@@ -349,11 +379,17 @@ def write_new_secret(path: Path, entropy_bytes: int) -> None:
 
 def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
     identity = _expected_runtime_identity()
+    runtime_uid = identity["FREQTRADE_RUNTIME_UID"]
+    environment_path = root / ".env"
+    if os.path.lexists(environment_path):
+        _require_regular_runtime_control_file(environment_path)
     override_path = root / COMPOSE_IDENTITY_RELATIVE_PATH
     if override_path.is_symlink() or override_path.exists():
         _read_compose_identity(override_path, manifest, identity)
-    _merge_runtime_identity(root / ".env")
+    _merge_runtime_identity(environment_path)
+    _harden_runtime_control_file(environment_path, runtime_uid)
     _merge_compose_identity(override_path, manifest, identity)
+    _harden_runtime_control_file(override_path, runtime_uid)
     for service in manifest["services"]:
         template = root / service["config_template"]
         config = root / service["config_path"]
@@ -416,11 +452,19 @@ def rotate_secrets(
             _harden_secret_permissions(destination)
 
 
-def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
-    identity = _read_runtime_identity(root / ".env")
+def verify_runtime(root: Path, manifest: dict[str, Any]) -> dict[str, int]:
+    expected_identity = _expected_runtime_identity()
+    environment_path = root / ".env"
+    _verify_runtime_control_file(
+        environment_path,
+        expected_identity["FREQTRADE_RUNTIME_UID"],
+    )
+    identity = _read_runtime_identity(environment_path)
     _verify_ambient_runtime_identity(identity)
+    override_path = root / COMPOSE_IDENTITY_RELATIVE_PATH
+    _verify_runtime_control_file(override_path, identity["FREQTRADE_RUNTIME_UID"])
     _read_compose_identity(
-        root / COMPOSE_IDENTITY_RELATIVE_PATH,
+        override_path,
         manifest,
         identity,
     )
@@ -461,6 +505,7 @@ def verify_runtime(root: Path, manifest: dict[str, Any]) -> None:
             all_values.append(value)
     if len(all_values) != len(set(all_values)):
         raise ValueError("runtime secrets must be unique")
+    return identity
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -225,6 +225,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -294,6 +295,60 @@ class BootstrapRuntimeTests(unittest.TestCase):
             (self.root / ".env").read_text(encoding="utf-8"),
             "FREQTRADE_RUNTIME_UID=1000\nFREQTRADE_RUNTIME_GID=1000\n",
         )
+
+    def test_init_hardens_existing_runtime_control_files(self) -> None:
+        environment = self.root / ".env"
+        environment.write_text(
+            "PORT=9000\nFREQTRADE_RUNTIME_UID=1001\n"
+            "FREQTRADE_RUNTIME_GID=1002\n",
+            encoding="utf-8",
+        )
+        override = self.root / "ft_userdata/runtime/compose.identity.yml"
+        override.parent.mkdir(parents=True)
+        override.write_text(
+            json.dumps(
+                {
+                    "services": {
+                        service["name"]: {"user": "1001:1002"}
+                        for service in self.manifest["services"]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
+            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file") as harden,
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+        self.assertEqual(harden.call_args_list, [mock.call(environment, 1001), mock.call(override, 1001)])
+        self.assertIn("PORT=9000", environment.read_text(encoding="utf-8"))
+
+    def test_verify_rejects_insecure_runtime_control_file_metadata(self) -> None:
+        control = self.root / ".env"
+        control.write_text("identity", encoding="utf-8")
+        cases = (
+            SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=1001),
+            SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=999),
+        )
+        for status in cases:
+            with (
+                self.subTest(status=status),
+                mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+                mock.patch.object(os, "lstat", return_value=status),
+                self.assertRaisesRegex(ValueError, "runtime control file"),
+            ):
+                bootstrap_runtime._verify_runtime_control_file(control, 1001)
+
+    def test_verify_rejects_runtime_control_file_symlink(self) -> None:
+        control = self.root / ".env"
+        with (
+            mock.patch.object(Path, "is_symlink", return_value=True),
+            self.assertRaisesRegex(ValueError, "runtime control file"),
+        ):
+            bootstrap_runtime._verify_runtime_control_file(control, 1001)
 
     def test_init_rejects_conflicting_or_duplicate_runtime_identity(self) -> None:
         invalid_contents = (
@@ -591,6 +646,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -598,6 +654,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
             mock.patch.object(
                 bootstrap_runtime, "_verify_secret_permissions"
             ) as verify_secret,
@@ -621,6 +678,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
             mock.patch.object(bootstrap_runtime, "_verify_secret_permissions"),
             mock.patch.object(
                 bootstrap_runtime,
