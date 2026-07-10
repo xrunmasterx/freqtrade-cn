@@ -1,19 +1,83 @@
 ---
+secrets:
+  freqtrade_api_password:
+    file: ./ft_userdata/secrets/freqtrade/api_password
+  freqtrade_jwt_secret:
+    file: ./ft_userdata/secrets/freqtrade/jwt_secret_key
+  freqtrade_ws_token:
+    file: ./ft_userdata/secrets/freqtrade/ws_token
+  freqtrade_futures_api_password:
+    file: ./ft_userdata/secrets/freqtrade-futures/api_password
+  freqtrade_futures_jwt_secret:
+    file: ./ft_userdata/secrets/freqtrade-futures/jwt_secret_key
+  freqtrade_futures_ws_token:
+    file: ./ft_userdata/secrets/freqtrade-futures/ws_token
+  freqtrade_research_api_password:
+    file: ./ft_userdata/secrets/freqtrade-research/api_password
+  freqtrade_research_jwt_secret:
+    file: ./ft_userdata/secrets/freqtrade-research/jwt_secret_key
+  freqtrade_research_ws_token:
+    file: ./ft_userdata/secrets/freqtrade-research/ws_token
+
+x-freqtrade-common: &freqtrade-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: freqtrade-cn:local
+  restart: unless-stopped
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
 services:
   freqtrade:
+    <<: *freqtrade-common
     profiles: ["trading"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: freqtrade-cn:local
     container_name: freqtrade-cn
-    restart: unless-stopped
     volumes:
-      - "./ft_userdata/user_data:/freqtrade/user_data"
+      - type: bind
+        source: ./ft_userdata/user_data/config.json
+        target: /freqtrade/config/runtime.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ops/config/trading-safety.json
+        target: /freqtrade/config/trading-safety.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/strategies
+        target: /freqtrade/user_data/strategies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade
+        target: /freqtrade/state
+        bind:
+          create_host_path: false
+    secrets:
+      - source: freqtrade_api_password
+        target: api_password
+      - source: freqtrade_jwt_secret
+        target: jwt_secret_key
+      - source: freqtrade_ws_token
+        target: ws_token
+    environment:
+      FT_API_PASSWORD_FILE: /run/secrets/api_password
+      FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      FT_WS_TOKEN_FILE: /run/secrets/ws_token
     ports:
-      - "127.0.0.1:${FT_UI_PORT:-8081}:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - target: 8080
+        published: "${FT_UI_PORT:-8081}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1"]
       interval: 30s
@@ -22,25 +86,56 @@ services:
       start_period: 30s
     command: >
       trade
-      --logfile /freqtrade/user_data/logs/freqtrade.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
-      --config /freqtrade/user_data/config.json
+      --logfile /freqtrade/state/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/state/trades.sqlite
+      --config /freqtrade/config/runtime.json
+      --config /freqtrade/config/trading-safety.json
       --strategy SampleStrategy
 
   freqtrade-futures:
+    <<: *freqtrade-common
     profiles: ["trading"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: freqtrade-cn:local
     container_name: freqtrade-cn-futures
-    restart: unless-stopped
     volumes:
-      - "./ft_userdata/user_data:/freqtrade/user_data"
+      - type: bind
+        source: ./ft_userdata/user_data/config.volatility.futures.json
+        target: /freqtrade/config/runtime.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ops/config/trading-safety.json
+        target: /freqtrade/config/trading-safety.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/strategies
+        target: /freqtrade/user_data/strategies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade-futures
+        target: /freqtrade/state
+        bind:
+          create_host_path: false
+    secrets:
+      - source: freqtrade_futures_api_password
+        target: api_password
+      - source: freqtrade_futures_jwt_secret
+        target: jwt_secret_key
+      - source: freqtrade_futures_ws_token
+        target: ws_token
+    environment:
+      FT_API_PASSWORD_FILE: /run/secrets/api_password
+      FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      FT_WS_TOKEN_FILE: /run/secrets/ws_token
     ports:
-      - "127.0.0.1:${FT_FUTURES_UI_PORT:-8082}:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - target: 8080
+        published: "${FT_FUTURES_UI_PORT:-8082}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1"]
       interval: 30s
@@ -49,25 +144,66 @@ services:
       start_period: 30s
     command: >
       trade
-      --logfile /freqtrade/user_data/logs/freqtrade-futures.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3-futures.sqlite
-      --config /freqtrade/user_data/config.volatility.futures.json
+      --logfile /freqtrade/state/logs/freqtrade-futures.log
+      --db-url sqlite:////freqtrade/state/trades.sqlite
+      --config /freqtrade/config/runtime.json
+      --config /freqtrade/config/trading-safety.json
       --strategy VolatilitySystem
 
   freqtrade-research:
+    <<: *freqtrade-common
     profiles: ["research"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: freqtrade-cn:local
     container_name: freqtrade-cn-research
-    restart: unless-stopped
     volumes:
-      - "./ft_userdata/user_data:/freqtrade/user_data"
+      - type: bind
+        source: ./ft_userdata/user_data/config.research.json
+        target: /freqtrade/config/runtime.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/strategies
+        target: /freqtrade/user_data/strategies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/research_data
+        target: /freqtrade/user_data/research_data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade-research
+        target: /freqtrade/state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade-research/data
+        target: /freqtrade/user_data/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade-research/backtest_results
+        target: /freqtrade/user_data/backtest_results
+        bind:
+          create_host_path: false
+    secrets:
+      - source: freqtrade_research_api_password
+        target: api_password
+      - source: freqtrade_research_jwt_secret
+        target: jwt_secret_key
+      - source: freqtrade_research_ws_token
+        target: ws_token
+    environment:
+      FT_API_PASSWORD_FILE: /run/secrets/api_password
+      FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      FT_WS_TOKEN_FILE: /run/secrets/ws_token
     ports:
-      - "127.0.0.1:${FT_RESEARCH_UI_PORT:-8083}:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - target: 8080
+        published: "${FT_RESEARCH_UI_PORT:-8083}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1"]
       interval: 30s
@@ -76,5 +212,5 @@ services:
       start_period: 30s
     command: >
       webserver
-      --logfile /freqtrade/user_data/logs/freqtrade-research.log
-      --config /freqtrade/user_data/config.research.json
+      --logfile /freqtrade/state/logs/freqtrade-research.log
+      --config /freqtrade/config/runtime.json

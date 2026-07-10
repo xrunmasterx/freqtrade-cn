@@ -1,0 +1,4 @@
+{
+  "dry_run": true,
+  "ignore_buying_expired_candle_after": 60
+}
