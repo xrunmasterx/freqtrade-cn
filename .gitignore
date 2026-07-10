@@ -15,3 +15,4 @@ ft_userdata/user_data/strategies/__pycache__/
 screenshots/
 *verify.png
 .superpowers/**/state/
+.worktrees/
