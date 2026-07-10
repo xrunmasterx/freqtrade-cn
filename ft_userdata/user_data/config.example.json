@@ -96,14 +96,14 @@
         "listen_port": 8080,
         "verbosity": "error",
         "enable_openapi": false,
-        "jwt_secret_key": "replace-me-with-a-long-random-secret",
-        "ws_token": "replace-me-with-a-long-random-token",
+        "jwt_secret_key": "__SET_VIA_SECRET_FILE__",
+        "ws_token": "__SET_VIA_SECRET_FILE__",
         "CORS_origins": [
             "http://127.0.0.1:8081",
             "http://localhost:8081"
         ],
         "username": "freqtrader",
-        "password": "change-me"
+        "password": "__SET_VIA_SECRET_FILE__"
     },
     "initial_state": "running",
     "internals": {

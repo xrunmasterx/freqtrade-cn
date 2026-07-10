@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "services": [
+    {
+      "name": "freqtrade",
+      "role": "trading",
+      "profile": "trading",
+      "config_template": "ft_userdata/user_data/config.example.json",
+      "config_path": "ft_userdata/user_data/config.json",
+      "strategy": "SampleStrategy",
+      "state_root": "ft_userdata/runtime/freqtrade",
+      "legacy_database": "ft_userdata/user_data/tradesv3.sqlite",
+      "database_filename": "trades.sqlite"
+    },
+    {
+      "name": "freqtrade-futures",
+      "role": "trading",
+      "profile": "trading",
+      "config_template": "ft_userdata/user_data/config.volatility.futures.example.json",
+      "config_path": "ft_userdata/user_data/config.volatility.futures.json",
+      "strategy": "VolatilitySystem",
+      "state_root": "ft_userdata/runtime/freqtrade-futures",
+      "legacy_database": "ft_userdata/user_data/tradesv3-futures.sqlite",
+      "database_filename": "trades.sqlite"
+    },
+    {
+      "name": "freqtrade-research",
+      "role": "research",
+      "profile": "research",
+      "config_template": "ft_userdata/user_data/config.research.example.json",
+      "config_path": "ft_userdata/user_data/config.research.json",
+      "strategy": null,
+      "state_root": "ft_userdata/runtime/freqtrade-research",
+      "legacy_database": null,
+      "database_filename": null
+    }
+  ]
+}
