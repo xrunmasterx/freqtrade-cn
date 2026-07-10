@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import posixpath
 import re
 import shlex
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 if __package__:
@@ -24,12 +25,6 @@ EXPECTED_CONFIGS = [
     "/freqtrade/config/runtime.json",
     "/freqtrade/config/trading-safety.json",
 ]
-READ_ONLY_TARGETS = {
-    "/freqtrade/config/runtime.json",
-    "/freqtrade/config/trading-safety.json",
-    "/freqtrade/user_data/strategies",
-    "/freqtrade/user_data/research_data",
-}
 DIRECT_SECRET_ENV = {
     "FREQTRADE__API_SERVER__PASSWORD",
     "FREQTRADE__API_SERVER__JWT_SECRET_KEY",
@@ -47,90 +42,172 @@ SECRET_TARGETS = {
     "ws_token": "ws_token",
 }
 ALLOWED_PROFILES = {"trading", "research"}
+ALLOWED_SERVICE_FIELDS = {
+    "build",
+    "cap_add",
+    "cap_drop",
+    "command",
+    "container_name",
+    "entrypoint",
+    "environment",
+    "extra_hosts",
+    "healthcheck",
+    "image",
+    "init",
+    "ipc",
+    "network_mode",
+    "networks",
+    "pid",
+    "ports",
+    "privileged",
+    "profiles",
+    "restart",
+    "secrets",
+    "security_opt",
+    "user",
+    "userns_mode",
+    "uts",
+    "volumes",
+}
+EXPECTED_PORT_FIELDS = {"mode", "target", "published", "host_ip", "protocol"}
 USER_PATTERN = re.compile(r"[1-9][0-9]*:[1-9][0-9]*\Z")
 
 
-def _load_json_object(
-    path: Path,
-    invalid_error: str,
-    read_error: str,
-) -> tuple[dict[str, Any] | None, str | None]:
+def _load_json_blob(blob: bytes) -> dict[str, Any] | None:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError):
-        return None, read_error
-    except (json.JSONDecodeError, RecursionError):
-        return None, invalid_error
-    if type(data) is not dict:
-        return None, invalid_error
-    return data, None
+        data = json.loads(blob.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return None
+    return data if type(data) is dict else None
 
 
-def validate_tracked_configs(repo_root: Path) -> list[str]:
-    errors: list[str] = []
+def _parse_index_record(record: bytes) -> tuple[str, str] | None:
+    try:
+        metadata, encoded_path = record.split(b"\t", 1)
+        mode, oid, stage = metadata.split(b" ")
+        path = encoded_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if (
+        mode != b"100644"
+        or stage != b"0"
+        or len(oid) not in {40, 64}
+        or re.fullmatch(b"[0-9a-f]+", oid) is None
+    ):
+        return "", ""
+    pure_path = PurePosixPath(path)
+    if (
+        not path
+        or "\\" in path
+        or pure_path.is_absolute()
+        or pure_path.as_posix() != path
+        or any(part in {"", ".", ".."} for part in pure_path.parts)
+    ):
+        return None
+    return path, oid.decode("ascii")
+
+
+def _index_blobs(repo_root: Path) -> tuple[dict[str, bytes], list[str]]:
+    command = [
+        "git",
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        ":(glob)ft_userdata/user_data/**/config*.json",
+        "ops/config/trading-safety.json",
+    ]
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z", "ft_userdata/user_data/config*.json"],
+            command,
             cwd=repo_root,
             capture_output=True,
             check=True,
         )
     except (OSError, subprocess.SubprocessError):
-        return ["tracked config inventory failed"]
+        return {}, ["tracked config inventory failed"]
 
-    relative_paths: list[Path] = []
-    for item in result.stdout.split(b"\0"):
-        if not item:
+    entries: dict[str, str] = {}
+    errors: list[str] = []
+    for record in result.stdout.split(b"\0"):
+        if not record:
             continue
+        parsed = _parse_index_record(record)
+        if parsed is None:
+            return {}, ["tracked config index is malformed"]
+        path, oid = parsed
+        if not path:
+            errors.append("tracked config must be a regular stage-0 file")
+            continue
+        if path in entries:
+            errors.append("tracked config index contains duplicate paths")
+            continue
+        entries[path] = oid
+
+    blobs: dict[str, bytes] = {}
+    for path, oid in entries.items():
         try:
-            relative_paths.append(Path(item.decode("utf-8")))
-        except UnicodeDecodeError:
-            return ["tracked config path encoding is invalid"]
+            result = subprocess.run(
+                ["git", "cat-file", "blob", oid],
+                cwd=repo_root,
+                capture_output=True,
+                check=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            errors.append("tracked config blob could not be read")
+            continue
+        blobs[path] = result.stdout
+    return blobs, errors
 
-    for relative in relative_paths:
+
+def validate_tracked_configs(repo_root: Path) -> list[str]:
+    blobs, errors = _index_blobs(repo_root)
+    if not blobs and errors == ["tracked config inventory failed"]:
+        return errors
+    policy_path = "ops/config/trading-safety.json"
+    for path, blob in blobs.items():
+        if path == policy_path:
+            continue
+        relative = PurePosixPath(path)
+        if relative.parent.as_posix() != "ft_userdata/user_data":
+            errors.append("tracked config path is forbidden")
+            continue
+        if not relative.name.startswith("config") or not relative.name.endswith(".json"):
+            errors.append("tracked config path is forbidden")
+            continue
         if not relative.name.endswith(".example.json"):
-            errors.append(f"tracked operational config is forbidden: {relative.as_posix()}")
+            errors.append(f"tracked operational config is forbidden: {path}")
             continue
-        data, load_error = _load_json_object(
-            repo_root / relative,
-            f"tracked template is not valid JSON or must be an object: {relative.as_posix()}",
-            f"tracked template could not be read: {relative.as_posix()}",
-        )
-        if load_error:
-            errors.append(load_error)
+        data = _load_json_blob(blob)
+        if data is None:
+            errors.append(f"tracked template is not valid JSON or must be an object: {path}")
             continue
-        assert data is not None
         if data.get("dry_run") is not True:
-            errors.append(f"tracked template must be dry-run: {relative.as_posix()}")
+            errors.append(f"tracked template must be dry-run: {path}")
 
         api = data.get("api_server")
         if type(api) is not dict:
-            errors.append(f"tracked API section must be an object: {relative.as_posix()}")
+            errors.append(f"tracked API section must be an object: {path}")
         else:
             for key in API_SECRET_KEYS:
                 if api.get(key) != SENTINEL:
-                    errors.append(
-                        f"tracked API field must use sentinel: {relative.as_posix()}:{key}"
-                    )
+                    errors.append(f"tracked API field must use sentinel: {path}:{key}")
 
         exchange = data.get("exchange")
         if type(exchange) is not dict:
-            errors.append(f"tracked exchange section must be an object: {relative.as_posix()}")
+            errors.append(f"tracked exchange section must be an object: {path}")
         else:
             for key in EXCHANGE_SECRET_KEYS:
                 if exchange.get(key) not in (None, ""):
-                    errors.append(
-                        f"tracked exchange field must be empty: {relative.as_posix()}:{key}"
-                    )
+                    errors.append(f"tracked exchange field must be empty: {path}:{key}")
 
-    policy_path = repo_root / "ops/config/trading-safety.json"
-    policy, policy_error = _load_json_object(
-        policy_path,
-        "trading safety policy is not a valid JSON object",
-        "trading safety policy could not be read",
-    )
-    if policy_error:
-        errors.append(policy_error)
+    policy_blob = blobs.get(policy_path)
+    if policy_blob is None:
+        errors.append("trading safety policy must be a tracked regular stage-0 file")
+        return errors
+    policy = _load_json_blob(policy_blob)
+    if policy is None:
+        errors.append("trading safety policy is not a valid JSON object")
     elif not (
         set(policy) == {"dry_run", "ignore_buying_expired_candle_after"}
         and policy.get("dry_run") is True
@@ -160,14 +237,87 @@ def _command_tokens(command: object) -> list[str] | None:
     return None
 
 
-def _source_matches(source: object, expected_relative: object) -> bool:
-    if type(source) is not str or type(expected_relative) is not str:
+def _is_normalized_container_child(value: object, parent: str) -> bool:
+    if type(value) is not str or not value or "\\" in value:
         return False
-    normalized_source = posixpath.normpath(source.replace("\\", "/"))
-    normalized_expected = posixpath.normpath(expected_relative)
-    return normalized_source == normalized_expected or normalized_source.endswith(
-        f"/{normalized_expected}"
-    )
+    if any(ord(character) < 32 for character in value):
+        return False
+    if not value.startswith("/") or posixpath.normpath(value) != value:
+        return False
+    prefix = parent.rstrip("/") + "/"
+    return value.startswith(prefix) and bool(posixpath.basename(value))
+
+
+def _path_error(
+    source: object,
+    expected_relative: object,
+    repo_root: Path,
+    expected_kind: str,
+) -> str | None:
+    if type(source) is not str or not source or type(expected_relative) is not str:
+        return "source path must be absolute"
+    actual = Path(source)
+    if not actual.is_absolute():
+        return "source path must be absolute"
+    if ".." in actual.parts or any(ord(character) < 32 for character in source):
+        return "source path must not contain traversal"
+
+    root = repo_root.resolve()
+    expected = (root / expected_relative).absolute()
+    if os.path.normcase(str(actual.absolute())) != os.path.normcase(str(expected)):
+        return "source differs from runtime contract"
+    if actual.is_symlink():
+        return "symlink source is forbidden"
+    try:
+        resolved = actual.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return "source resolves outside repo"
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(expected.resolve())):
+        return "source resolves outside repo"
+    if expected_kind == "file" and not actual.is_file():
+        return "source type differs from runtime contract"
+    if expected_kind == "directory" and not actual.is_dir():
+        return "source type differs from runtime contract"
+    return None
+
+
+def _expected_volumes(
+    service: dict[str, object],
+) -> dict[str, tuple[object, bool, str]]:
+    expected = {
+        "/freqtrade/config/runtime.json": (service.get("config_path"), True, "file"),
+        "/freqtrade/user_data/strategies": (
+            "ft_userdata/user_data/strategies",
+            True,
+            "directory",
+        ),
+        "/freqtrade/state": (service.get("state_root"), False, "directory"),
+    }
+    if service.get("role") == "trading":
+        expected["/freqtrade/config/trading-safety.json"] = (
+            "ops/config/trading-safety.json",
+            True,
+            "file",
+        )
+    else:
+        state_root = service.get("state_root")
+        expected["/freqtrade/user_data/research_data"] = (
+            "ft_userdata/user_data/research_data",
+            True,
+            "directory",
+        )
+        expected["/freqtrade/user_data/data"] = (
+            f"{state_root}/data",
+            False,
+            "directory",
+        )
+        expected["/freqtrade/user_data/backtest_results"] = (
+            f"{state_root}/backtest_results",
+            False,
+            "directory",
+        )
+    return expected
 
 
 def _expected_secret_mapping(service_name: str) -> dict[str, str]:
@@ -188,7 +338,12 @@ def _manifest_services(manifest: object) -> dict[str, dict[str, object]] | None:
     return entries
 
 
-def validate_compose(manifest: dict[str, object], compose: dict[str, object]) -> list[str]:
+def validate_compose(
+    manifest: dict[str, object],
+    compose: dict[str, object],
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> list[str]:
     errors: list[str] = []
     manifest_services = _manifest_services(manifest)
     if manifest_services is None:
@@ -219,11 +374,16 @@ def validate_compose(manifest: dict[str, object], compose: dict[str, object]) ->
             continue
         name, filename = expected_top_level_secrets[source]
         expected_path = f"ft_userdata/secrets/{name}/{filename}"
-        if (
-            set(definition) != {"name", "file"}
-            or definition.get("name") != f"freqtrade-cn_{source}"
-            or not _source_matches(definition.get("file"), expected_path)
-        ):
+        if set(definition) != {"name", "file"}:
+            errors.append(
+                f"secret {source}: secret definition fields differ from runtime contract"
+            )
+        if definition.get("name") != f"freqtrade-cn_{source}":
+            errors.append(f"secret {source}: secret file differs from runtime contract")
+        secret_path_error = _path_error(
+            definition.get("file"), expected_path, repo_root, "file"
+        )
+        if secret_path_error:
             errors.append(f"secret {source}: secret file differs from runtime contract")
 
     state_sources: set[str] = set()
@@ -238,9 +398,31 @@ def validate_compose(manifest: dict[str, object], compose: dict[str, object]) ->
         if type(service) is not dict:
             errors.append(f"{name}: service must be an object")
             continue
+        if set(service) - ALLOWED_SERVICE_FIELDS:
+            errors.append(f"{name}: service fields differ from runtime contract")
 
         if "fullstake" in name.lower():
             errors.append(f"{name}: fullstake service is forbidden")
+
+        if "privileged" in service and service.get("privileged") is not False:
+            errors.append(f"{name}: privileged must be false")
+            errors.append(f"{name}: privilege escalation field is forbidden")
+        if "cap_add" in service and service.get("cap_add") != []:
+            errors.append(f"{name}: privilege escalation field is forbidden")
+        for field in (
+            "devices",
+            "device_cgroup_rules",
+            "volumes_from",
+            "gpus",
+            "device_requests",
+            "runtime",
+        ):
+            if field in service:
+                errors.append(f"{name}: privilege escalation field is forbidden")
+        for field in ("network_mode", "pid", "ipc", "uts", "userns_mode"):
+            value = service.get(field)
+            if type(value) is str and value.lower() == "host":
+                errors.append(f"{name}: privilege escalation field is forbidden")
 
         user = service.get("user")
         if type(user) is not str or USER_PATTERN.fullmatch(user) is None:
@@ -282,105 +464,107 @@ def validate_compose(manifest: dict[str, object], compose: dict[str, object]) ->
             errors.append(f"{name}: volumes must be a list")
             volumes = []
         valid_volumes: list[dict[str, object]] = []
+        expected_volumes = _expected_volumes(expected)
+        seen_targets: list[str] = []
         for volume in volumes:
             if type(volume) is not dict:
                 errors.append(f"{name}: volume entries must be objects")
                 continue
             valid_volumes.append(volume)
+            if set(volume) - {"type", "source", "target", "read_only", "bind"}:
+                errors.append(f"{name}: volume fields differ from runtime contract")
             if volume.get("type") != "bind":
                 errors.append(f"{name}: all mounts must be bind mounts")
             bind = volume.get("bind")
-            if type(bind) is not dict or bind.get("create_host_path") is not False:
+            if type(bind) is not dict:
+                errors.append(f"{name}: bind mount must set create_host_path false")
+            elif set(bind) != {"create_host_path"}:
+                errors.append(f"{name}: bind fields differ from runtime contract")
+            if type(bind) is dict and bind.get("create_host_path") is not False:
                 errors.append(f"{name}: bind mount must set create_host_path false")
             target = volume.get("target")
             if type(target) is not str:
                 errors.append(f"{name}: volume target must be a string")
                 continue
+            seen_targets.append(target)
             if target == "/freqtrade/user_data" and volume.get("read_only") is not True:
                 errors.append(f"{name}: whole user_data cannot be writable")
-            if target in READ_ONLY_TARGETS and volume.get("read_only") is not True:
-                errors.append(f"{name}: {target} must be read-only")
             if "docker.sock" in str(volume.get("source", "")).lower():
                 errors.append(f"{name}: Docker socket mount is forbidden")
+            specification = expected_volumes.get(target)
+            if specification is None:
+                continue
+            expected_source, expected_read_only, expected_kind = specification
+            read_only = volume.get("read_only")
+            if expected_read_only:
+                if read_only is not True:
+                    errors.append(f"{name}: read_only must be an exact boolean")
+                    errors.append(f"{name}: {target} must be read-only")
+            elif "read_only" in volume and read_only is not False:
+                errors.append(f"{name}: read_only must be an exact boolean")
+            source_error = _path_error(
+                volume.get("source"),
+                expected_source,
+                repo_root,
+                expected_kind,
+            )
+            if source_error:
+                errors.append(f"{name}: {source_error}")
+                if target == "/freqtrade/config/runtime.json":
+                    errors.append(f"{name}: config source differs from runtime manifest")
+                if target == "/freqtrade/state":
+                    errors.append(f"{name}: state source differs from runtime manifest")
+
+        if set(seen_targets) != set(expected_volumes) or len(seen_targets) != len(
+            expected_volumes
+        ):
+            errors.append(f"{name}: volume set differs from runtime contract")
+            errors.append(f"{name}: writable mount targets differ from runtime contract")
 
         state = [
             volume for volume in valid_volumes if volume.get("target") == "/freqtrade/state"
         ]
         if len(state) != 1 or state[0].get("read_only") is True:
             errors.append(f"{name}: expected one writable state mount")
-        else:
-            state_source = state[0].get("source")
-            if not _source_matches(state_source, expected.get("state_root")):
-                errors.append(f"{name}: state source differs from runtime manifest")
-            if type(state_source) is str:
-                normalized_state = posixpath.normpath(state_source.replace("\\", "/"))
-                if normalized_state in state_sources:
-                    errors.append(f"{name}: state source must be unique")
-                state_sources.add(normalized_state)
+        elif type(state[0].get("source")) is str:
+            normalized_state = os.path.normcase(str(Path(state[0]["source"]).absolute()))
+            if normalized_state in state_sources:
+                errors.append(f"{name}: state source must be unique")
+            state_sources.add(normalized_state)
 
         role = expected.get("role")
-        writable_targets = {
-            target
-            for volume in valid_volumes
-            if volume.get("read_only") is not True
-            for target in [volume.get("target")]
-            if type(target) is str
-        }
-        expected_writable = {"/freqtrade/state"}
-        if role == "research":
-            expected_writable |= {
-                "/freqtrade/user_data/data",
-                "/freqtrade/user_data/backtest_results",
-            }
-        if writable_targets != expected_writable:
-            errors.append(f"{name}: writable mount targets differ from runtime contract")
-
-        required_sources = {
-            "/freqtrade/config/runtime.json": expected.get("config_path"),
-            "/freqtrade/user_data/strategies": "ft_userdata/user_data/strategies",
-        }
-        if role == "trading":
-            required_sources["/freqtrade/config/trading-safety.json"] = (
-                "ops/config/trading-safety.json"
-            )
-        else:
-            required_sources["/freqtrade/user_data/research_data"] = (
-                "ft_userdata/user_data/research_data"
-            )
-            state_root = expected.get("state_root")
-            if type(state_root) is str:
-                required_sources["/freqtrade/user_data/data"] = f"{state_root}/data"
-                required_sources["/freqtrade/user_data/backtest_results"] = (
-                    f"{state_root}/backtest_results"
-                )
-        for target, expected_source in required_sources.items():
-            matches = [volume for volume in valid_volumes if volume.get("target") == target]
-            if len(matches) != 1 or not _source_matches(
-                matches[0].get("source"), expected_source
-            ):
-                label = (
-                    "config source differs from runtime manifest"
-                    if target == "/freqtrade/config/runtime.json"
-                    else f"{target} source differs from runtime contract"
-                )
-                errors.append(f"{name}: {label}")
 
         mounted_secrets = service.get("secrets")
         actual_secret_mapping: dict[str, str] = {}
+        seen_secret_pairs: set[tuple[str, str]] = set()
         if type(mounted_secrets) is not list:
             errors.append(f"{name}: secrets must be a list")
         else:
+            if len(mounted_secrets) != 3:
+                errors.append(f"{name}: expected exactly three API secrets")
             for secret in mounted_secrets:
                 if type(secret) is not dict:
                     errors.append(f"{name}: secret entries must be objects")
                     continue
+                if set(secret) != {"source", "target"}:
+                    errors.append(
+                        f"{name}: secret entry fields differ from runtime contract"
+                    )
                 source = secret.get("source")
                 target = secret.get("target")
-                if type(source) is str and type(target) is str:
-                    actual_secret_mapping[source] = target
-                    owner = secret_owners.setdefault(source, name)
-                    if owner != name:
-                        errors.append(f"{name}: secret source must be used by one service")
+                if type(source) is not str or type(target) is not str:
+                    errors.append(
+                        f"{name}: secret entry fields differ from runtime contract"
+                    )
+                    continue
+                pair = (source, target)
+                if pair in seen_secret_pairs or source in actual_secret_mapping:
+                    errors.append(f"{name}: secret entries must be unique")
+                seen_secret_pairs.add(pair)
+                actual_secret_mapping[source] = target
+                owner = secret_owners.setdefault(source, name)
+                if owner != name:
+                    errors.append(f"{name}: secret source must be used by one service")
         if actual_secret_mapping != _expected_secret_mapping(name):
             errors.append(f"{name}: API secret mapping differs from runtime contract")
 
@@ -389,6 +573,8 @@ def validate_compose(manifest: dict[str, object], compose: dict[str, object]) ->
             errors.append(f"{name}: port mapping differs from runtime contract")
         else:
             port = ports[0]
+            if set(port) != EXPECTED_PORT_FIELDS:
+                errors.append(f"{name}: port fields differ from runtime contract")
             if port.get("host_ip") != "127.0.0.1":
                 errors.append(f"{name}: host port must bind 127.0.0.1")
             published = port.get("published")
@@ -415,13 +601,26 @@ def validate_compose(manifest: dict[str, object], compose: dict[str, object]) ->
                     errors.append(f"{name}: published host port must be unique")
                 published_ports.add(published_text)
 
-        tokens = _command_tokens(service.get("command"))
-        if tokens is None:
+        raw_command = service.get("command")
+        if type(raw_command) is str and any(
+            ord(character) < 32 for character in raw_command
+        ):
+            errors.append(f"{name}: logfile must be a normalized state log path")
+            continue
+        tokens = _command_tokens(raw_command)
+        if not tokens:
             errors.append(f"{name}: command must be a valid string or string list")
             continue
+        if role == "trading" and tokens[0] != "trade":
+            errors.append(f"{name}: trading command must start with trade")
+        if role == "research" and tokens[0] != "webserver":
+            errors.append(f"{name}: research command must start with webserver")
         logs = option_values(tokens, "--logfile")
-        if len(logs) != 1 or not logs[0].startswith("/freqtrade/state/logs/"):
+        if len(logs) != 1 or not _is_normalized_container_child(
+            logs[0], "/freqtrade/state/logs"
+        ):
             errors.append(f"{name}: logfile must live below /freqtrade/state/logs")
+            errors.append(f"{name}: logfile must be a normalized state log path")
         databases = option_values(tokens, "--db-url")
         strategies = option_values(tokens, "--strategy")
         if role == "trading":
@@ -431,6 +630,7 @@ def validate_compose(manifest: dict[str, object], compose: dict[str, object]) ->
             expected_database = f"sqlite:////freqtrade/state/{database_filename}"
             if databases != [expected_database]:
                 errors.append(f"{name}: database must live below /freqtrade/state")
+                errors.append(f"{name}: database must be a normalized state path")
             if strategies != [expected.get("strategy")]:
                 errors.append(f"{name}: strategy differs from runtime manifest")
         else:
