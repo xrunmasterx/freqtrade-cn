@@ -1,95 +1,90 @@
 # Docker local run
 
 This repository is organized as a top-level Docker project around the `freqtrade`,
-`frequi`, and `freqtrade-strategies` submodules.
+`frequi`, and `freqtrade-strategies` submodules. The supported P0 runtime services
+are `freqtrade`, `freqtrade-futures`, and `freqtrade-research`.
 
 ## First setup
 
-Clone with submodules:
+Clone with submodules, create the ignored environment file, and bootstrap the
+local operational configuration, per-service credentials, and writable state:
 
 ```powershell
 git clone --recurse-submodules https://github.com/xrunmasterx/freqtrade-cn.git
-cd freqtrade-cn
-```
+Set-Location freqtrade-cn
 
-Create local config files:
-
-```powershell
 Copy-Item .env.example .env
-Copy-Item ft_userdata\user_data\config.example.json ft_userdata\user_data\config.json
-Copy-Item ft_userdata\user_data\config.research.example.json ft_userdata\user_data\config.research.json
+python tools/bootstrap_runtime.py init
+python tools/bootstrap_runtime.py sanitize-api-configs
+python tools/bootstrap_runtime.py verify
+python tools/runtime_contract.py --check-configs-only
+python tools/compose_runtime.py --profile trading --profile research config --quiet
 ```
 
-Edit `ft_userdata\user_data\config.json` and `ft_userdata\user_data\config.research.json` before running:
+Bootstrap is idempotent: it does not overwrite an existing operational config or
+secret. API credential fields in operational config must retain the repository
+sentinel; the real API password, JWT secret, and WebSocket token are separate
+ignored files below `ft_userdata/secrets/<service>/`. A UI username may come from
+the template, but the repository provides no UI password. Never write login
+information to logs or paste it into an issue, chat, or screenshot.
 
-- Replace the API password.
-- Replace the proxy port if your local HTTP proxy is not `12639`.
-- For Docker Desktop on Windows/macOS, use `host.docker.internal` to reach a proxy running on the host.
-- For native venv runs, use `127.0.0.1` instead.
+QQE is not part of the formal root runtime contract. Adding it requires one
+reviewed change that includes its manifest entry, template, strategy, tests, and
+Compose service. Do not treat a local QQE service or database as P0 runtime state.
+
+If the host HTTP proxy is not on port `12639`, update the ignored local
+operational config. Docker Desktop on Windows/macOS reaches a host proxy through
+`host.docker.internal`; a native virtual environment normally uses `127.0.0.1`.
+
+See [Runtime secrets](docs/operations/runtime-secrets.md) before rotating
+credentials and [SQLite backup and restore](docs/operations/sqlite-backup-and-restore.md)
+before migrating state.
 
 ## Run
 
-```powershell
-docker compose build freqtrade
-docker compose up -d freqtrade
-```
-
-Open the trading UI:
-
-```text
-http://127.0.0.1:8081/trade
-```
-
-Start only the research webserver:
+Build and start Spot, then inspect its status:
 
 ```powershell
-docker compose build freqtrade-research
-docker compose up -d freqtrade-research
+python tools/compose_runtime.py up --detach --build freqtrade
+python tools/compose_runtime.py ps freqtrade
 ```
 
-Open the research UI:
+Open the trading UI at `http://127.0.0.1:8081/trade`.
 
-```text
-http://127.0.0.1:8083/research
-```
-
-Services are assigned to compose profiles. Running `docker compose up -d`
-without a profile or an explicit service name will not start profiled services.
-To start every trading service, use:
+Build and start only the research webserver:
 
 ```powershell
-docker compose --profile trading build
-docker compose --profile trading up -d
+python tools/compose_runtime.py up --detach --build freqtrade-research
+python tools/compose_runtime.py ps freqtrade-research
 ```
 
-To start the research webserver, use:
+Open the research UI at `http://127.0.0.1:8083/research`.
+
+Services are assigned to profiles. To build and start all formal services, use:
 
 ```powershell
-docker compose --profile research build
-docker compose --profile research up -d
+python tools/compose_runtime.py --profile trading --profile research up --detach --build
+python tools/compose_runtime.py --profile trading --profile research ps
 ```
 
-Default example login:
-
-```text
-username: freqtrader
-password: change-me
-```
+The wrapper verifies bootstrap state and permits only the supported project,
+profiles, services, actions, and options. It is the formal runtime entrypoint.
 
 ## Stop
 
+Stopping active Bots is an operational action and requires explicit approval for
+that maintenance window. After approval, stop and inspect all formal services:
+
 ```powershell
-docker compose down
+python tools/compose_runtime.py --profile trading --profile research stop
+python tools/compose_runtime.py --profile trading --profile research ps
 ```
 
 ## Current defaults
 
 - Exchange: `bitget`
-- Trading mode: `spot`
-- Run mode: `dry_run`
-- Timeframe: `5m`
-- Pairs: `BTC/USDT`, `ETH/USDT`
-- Strategy: `SampleStrategy`
-- Host UI port: `8081`
+- Trading mode: Spot for `freqtrade`; Futures for `freqtrade-futures`
+- Run mode: `dry_run` for every P0 trading service
+- Main trading UI port: `8081`
 - Research UI port: `8083`
 - Container API/UI port: `8080`
