@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
@@ -54,10 +55,7 @@ ALLOWED_SERVICE_FIELDS = {
     "healthcheck",
     "image",
     "init",
-    "ipc",
-    "network_mode",
     "networks",
-    "pid",
     "ports",
     "privileged",
     "profiles",
@@ -65,12 +63,56 @@ ALLOWED_SERVICE_FIELDS = {
     "secrets",
     "security_opt",
     "user",
-    "userns_mode",
-    "uts",
     "volumes",
 }
 EXPECTED_PORT_FIELDS = {"mode", "target", "published", "host_ip", "protocol"}
+EXPECTED_TOP_LEVEL_FIELDS = {
+    "name",
+    "networks",
+    "secrets",
+    "services",
+    "x-freqtrade-common",
+}
+EXPECTED_HEALTHCHECK = {
+    "test": [
+        "CMD-SHELL",
+        "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1",
+    ],
+    "timeout": "5s",
+    "interval": "30s",
+    "retries": 3,
+    "start_period": "30s",
+}
+EXPECTED_EXTENSION = {
+    "build": {"context": ".", "dockerfile": "Dockerfile"},
+    "cap_drop": ["ALL"],
+    "extra_hosts": ["host.docker.internal:host-gateway"],
+    "image": "freqtrade-cn:local",
+    "init": True,
+    "restart": "unless-stopped",
+    "security_opt": ["no-new-privileges:true"],
+}
+EXPECTED_CONTAINER_NAMES = {
+    "freqtrade": "freqtrade-cn",
+    "freqtrade-futures": "freqtrade-cn-futures",
+    "freqtrade-research": "freqtrade-cn-research",
+}
 USER_PATTERN = re.compile(r"[1-9][0-9]*:[1-9][0-9]*\Z")
+
+
+def _exact_value(actual: object, expected: object) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if type(expected) is dict:
+        return set(actual) == set(expected) and all(
+            _exact_value(actual[key], expected[key]) for key in expected
+        )
+    if type(expected) is list:
+        return len(actual) == len(expected) and all(
+            _exact_value(actual_value, expected_value)
+            for actual_value, expected_value in zip(actual, expected)
+        )
+    return actual == expected
 
 
 def _load_json_blob(blob: bytes) -> dict[str, Any] | None:
@@ -98,6 +140,11 @@ def _parse_index_record(record: bytes) -> tuple[str, str] | None:
     pure_path = PurePosixPath(path)
     if (
         not path
+        or any(
+            unicodedata.category(character).startswith("C")
+            or unicodedata.category(character) in {"Zl", "Zp"}
+            for character in path
+        )
         or "\\" in path
         or pure_path.is_absolute()
         or pure_path.as_posix() != path
@@ -162,7 +209,7 @@ def _index_blobs(repo_root: Path) -> tuple[dict[str, bytes], list[str]]:
 
 def validate_tracked_configs(repo_root: Path) -> list[str]:
     blobs, errors = _index_blobs(repo_root)
-    if not blobs and errors == ["tracked config inventory failed"]:
+    if not blobs and errors:
         return errors
     policy_path = "ops/config/trading-safety.json"
     for path, blob in blobs.items():
@@ -350,6 +397,17 @@ def validate_compose(
         return ["runtime manifest services must be objects"]
     if type(compose) is not dict:
         return ["rendered Compose must be an object"]
+    if set(compose) != EXPECTED_TOP_LEVEL_FIELDS:
+        errors.append("top-level fields differ from runtime contract")
+    if compose.get("name") != "freqtrade-cn":
+        errors.append("Compose project name differs from runtime contract")
+    expected_networks = {
+        "default": {"name": "freqtrade-cn_default", "ipam": {}}
+    }
+    if not _exact_value(compose.get("networks"), expected_networks):
+        errors.append("top-level networks differ from runtime contract")
+    if not _exact_value(compose.get("x-freqtrade-common"), EXPECTED_EXTENSION):
+        errors.append("Compose extension differs from runtime contract")
     compose_services = compose.get("services")
     if type(compose_services) is not dict:
         return ["rendered Compose services must be an object"]
@@ -401,6 +459,29 @@ def validate_compose(
         if set(service) - ALLOWED_SERVICE_FIELDS:
             errors.append(f"{name}: service fields differ from runtime contract")
 
+        if "entrypoint" not in service or service.get("entrypoint") is not None:
+            errors.append(f"{name}: entrypoint must be null")
+        expected_build = {
+            "context": str(repo_root.resolve()),
+            "dockerfile": "Dockerfile",
+        }
+        if not _exact_value(service.get("build"), expected_build):
+            errors.append(f"{name}: build differs from runtime contract")
+        if service.get("image") != "freqtrade-cn:local":
+            errors.append(f"{name}: image differs from runtime contract")
+        if service.get("container_name") != EXPECTED_CONTAINER_NAMES.get(name):
+            errors.append(f"{name}: container name differs from runtime contract")
+        if service.get("restart") != "unless-stopped":
+            errors.append(f"{name}: restart policy differs from runtime contract")
+        if not _exact_value(
+            service.get("extra_hosts"), ["host.docker.internal=host-gateway"]
+        ):
+            errors.append(f"{name}: extra_hosts differs from runtime contract")
+        if not _exact_value(service.get("healthcheck"), EXPECTED_HEALTHCHECK):
+            errors.append(f"{name}: healthcheck differs from runtime contract")
+        if not _exact_value(service.get("networks"), {"default": None}):
+            errors.append(f"{name}: service networks differ from runtime contract")
+
         if "fullstake" in name.lower():
             errors.append(f"{name}: fullstake service is forbidden")
 
@@ -420,8 +501,7 @@ def validate_compose(
             if field in service:
                 errors.append(f"{name}: privilege escalation field is forbidden")
         for field in ("network_mode", "pid", "ipc", "uts", "userns_mode"):
-            value = service.get(field)
-            if type(value) is str and value.lower() == "host":
+            if field in service:
                 errors.append(f"{name}: privilege escalation field is forbidden")
 
         user = service.get("user")

@@ -65,6 +65,11 @@ def safe_service(
 ) -> dict[str, object]:
     name = str(entry["name"])
     role = entry["role"]
+    container_names = {
+        "freqtrade": "freqtrade-cn",
+        "freqtrade-futures": "freqtrade-cn-futures",
+        "freqtrade-research": "freqtrade-cn-research",
+    }
     volumes: list[dict[str, object]] = [
         {
             "type": "bind",
@@ -147,8 +152,25 @@ def safe_service(
             "--config /freqtrade/config/runtime.json"
         )
     return {
+        "build": {"context": str(repo_root.resolve()), "dockerfile": "Dockerfile"},
+        "container_name": container_names.get(name, f"freqtrade-cn-{name}"),
+        "entrypoint": None,
+        "extra_hosts": ["host.docker.internal=host-gateway"],
+        "healthcheck": {
+            "test": [
+                "CMD-SHELL",
+                "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1",
+            ],
+            "timeout": "5s",
+            "interval": "30s",
+            "retries": 3,
+            "start_period": "30s",
+        },
+        "image": "freqtrade-cn:local",
         "user": user,
         "init": True,
+        "networks": {"default": None},
+        "restart": "unless-stopped",
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true"],
         "profiles": [entry["profile"]],
@@ -218,7 +240,23 @@ def build_safe_contract(repo_root: Path) -> tuple[dict[str, object], dict[str, o
             secret_path = repo_root / "ft_userdata/secrets" / name / filename
             secret_path.parent.mkdir(parents=True, exist_ok=True)
             secret_path.touch()
-    return manifest, {"services": compose_services, "secrets": compose_secrets}
+    return manifest, {
+        "name": "freqtrade-cn",
+        "networks": {
+            "default": {"name": "freqtrade-cn_default", "ipam": {}}
+        },
+        "secrets": compose_secrets,
+        "services": compose_services,
+        "x-freqtrade-common": {
+            "build": {"context": ".", "dockerfile": "Dockerfile"},
+            "cap_drop": ["ALL"],
+            "extra_hosts": ["host.docker.internal:host-gateway"],
+            "image": "freqtrade-cn:local",
+            "init": True,
+            "restart": "unless-stopped",
+            "security_opt": ["no-new-privileges:true"],
+        },
+    }
 
 
 def find_volume(compose: dict[str, object], service_name: str, target: str) -> dict[str, object]:
@@ -411,11 +449,11 @@ class RuntimeComposeContractTests(unittest.TestCase):
             "devices": ["/dev/private-device"],
             "device_cgroup_rules": ["a *:* rwm"],
             "volumes_from": ["private-container"],
-            "network_mode": "host",
-            "pid": "host",
-            "ipc": "host",
-            "uts": "host",
-            "userns_mode": "host",
+            "network_mode": "bridge",
+            "pid": "service:freqtrade-futures",
+            "ipc": "shareable",
+            "uts": "private-uts",
+            "userns_mode": "private-userns",
             "gpus": "all",
             "runtime": "private-runtime",
         }
@@ -510,6 +548,77 @@ class RuntimeComposeContractTests(unittest.TestCase):
         self.assertIn("port fields differ from runtime contract", text)
         self.assertNotIn("private-service-value", text)
         self.assertNotIn("private-port-value", text)
+
+    def test_rejects_canonical_service_value_drift(self) -> None:
+        cases = (
+            ("entrypoint", ["/bin/private-shell"], "entrypoint must be null"),
+            ("image", "private-image", "image differs from runtime contract"),
+            (
+                "build",
+                {"context": str(self.root / "private"), "dockerfile": "Dockerfile"},
+                "build differs from runtime contract",
+            ),
+            ("container_name", "private-container", "container name differs"),
+            ("restart", "always", "restart policy differs"),
+            ("extra_hosts", ["private-host=host-gateway"], "extra_hosts differs"),
+            ("networks", {"private": None}, "service networks differ"),
+        )
+        for field, value, expected_error in cases:
+            with self.subTest(field=field):
+                _, compose = build_safe_contract(self.root)
+                compose["services"]["freqtrade"][field] = value
+                text = "\n".join(self.validate(compose=compose))
+                self.assertIn(expected_error, text)
+                self.assertNotIn("private", text)
+
+        self.compose["services"]["freqtrade"].pop("entrypoint")
+        self.assertIn("entrypoint must be null", self.errors())
+
+    def test_rejects_healthcheck_secret_exfiltration_and_schema_drift(self) -> None:
+        healthcheck = self.compose["services"]["freqtrade"]["healthcheck"]
+        healthcheck["test"] = ["CMD-SHELL", "send CLI_HEALTH_SECRET_MARKER"]
+        healthcheck["retries"] = True
+        healthcheck["start_interval"] = "1s"
+        text = self.errors()
+        self.assertIn("healthcheck differs from runtime contract", text)
+        self.assertNotIn("CLI_HEALTH_SECRET_MARKER", text)
+
+    def test_rejects_top_level_network_and_schema_drift(self) -> None:
+        self.compose["name"] = "private-project"
+        self.compose["networks"] = {
+            "default": {"name": "private-network", "external": True}
+        }
+        self.compose["volumes"] = {"private-volume": {"external": True}}
+        self.compose["configs"] = {"private-config": {"file": "private"}}
+        self.compose["version"] = "3.9"
+        self.compose["x-freqtrade-common"]["image"] = "private-image"
+        text = self.errors()
+        self.assertIn("top-level fields differ from runtime contract", text)
+        self.assertIn("Compose project name differs from runtime contract", text)
+        self.assertIn("top-level networks differ from runtime contract", text)
+        self.assertIn("Compose extension differs from runtime contract", text)
+        self.assertNotIn("private", text)
+
+    def test_nested_canonical_schema_types_never_raise(self) -> None:
+        mutations = (
+            ("build", []),
+            ("healthcheck", "private-healthcheck"),
+            ("networks", []),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                _, compose = build_safe_contract(self.root)
+                compose["services"]["freqtrade"][field] = value
+                text = "\n".join(self.validate(compose=compose))
+                self.assertIn("runtime contract", text)
+                self.assertNotIn("private-healthcheck", text)
+
+        _, compose = build_safe_contract(self.root)
+        compose["networks"] = []
+        compose["x-freqtrade-common"] = []
+        text = "\n".join(self.validate(compose=compose))
+        self.assertIn("top-level networks differ from runtime contract", text)
+        self.assertIn("Compose extension differs from runtime contract", text)
 
     def test_rejects_safety_config_not_loaded_last_and_bad_database_or_log(self) -> None:
         service = self.compose["services"]["freqtrade"]
@@ -811,6 +920,31 @@ class TrackedConfigContractTests(unittest.TestCase):
                     text = "\n".join(runtime_contract.validate_tracked_configs(self.root))
                 self.assertIn("tracked config index is malformed", text)
                 self.assertNotIn("private-record", text)
+
+    def test_rejects_unicode_control_and_format_characters_in_index_paths(self) -> None:
+        markers = ("\n", "\r", "\t", "\x1b", "\x7f", "\u202e", "\ue000", "\u0378")
+        for marker in markers:
+            with self.subTest(codepoint=f"U+{ord(marker):04X}"):
+                path = f"ft_userdata/user_data/config.{marker}.example.json".encode(
+                    "utf-8"
+                )
+                record = b"100644 " + b"0" * 40 + b" 0\t" + path + b"\0"
+                completed = subprocess.CompletedProcess(
+                    [], 0, stdout=record, stderr=b""
+                )
+                with mock.patch.object(
+                    runtime_contract.subprocess, "run", return_value=completed
+                ):
+                    errors = runtime_contract.validate_tracked_configs(self.root)
+                self.assertEqual(errors, ["tracked config index is malformed"])
+
+    def test_verified_unicode_path_error_is_single_line(self) -> None:
+        path = Path("ft_userdata/user_data/config.安全.json")
+        self.write_json(path, self.safe_template)
+        errors = self.validate()
+        matching = [error for error in errors if "tracked operational config" in error]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].splitlines(), [matching[0]])
 
     def test_rejects_policy_malformed_wrong_shape_bool_as_int_or_extra_keys(self) -> None:
         policy_path = self.root / "ops/config/trading-safety.json"
