@@ -43,7 +43,7 @@ jobs:
       - name: Install backend development dependencies
         run: |
           uv venv .venv
-          uv pip install --python .venv/bin/python -e "./freqtrade[develop]"
+          uv pip install --python .venv/bin/python -e "./freqtrade[develop,hyperopt]"
           echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
 
       - name: Run root unit tests

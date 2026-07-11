@@ -12,6 +12,11 @@ SETUP_COMPOSE_ACTION = (
 
 
 class RootSafetyWorkflowTests(unittest.TestCase):
+    def test_installs_backend_test_runtime_dependencies(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('-e "./freqtrade[develop,hyperopt]"', workflow)
+
     def test_pins_compatible_compose_before_first_compose_consumer(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         setup = (
