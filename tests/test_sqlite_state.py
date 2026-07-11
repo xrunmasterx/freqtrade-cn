@@ -39,6 +39,7 @@ class SQLiteStateTests(unittest.TestCase):
         self.create_database(self.spot_source)
         self.create_database(self.futures_source)
         self.output_root = self.root / "backups"
+        self.output_root.mkdir()
         self.fixed_now = datetime(2026, 7, 11, tzinfo=UTC)
 
     def create_database(
@@ -180,6 +181,47 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertEqual(verified.archive_label, "qqe-research")
         expected = "power-loss-posix" if sqlite_state._is_posix() else "atomic-process-crash"
         self.assertEqual(verified.durability, expected)
+
+    def test_service_backup_rejects_missing_output_root_before_creation_lock(self) -> None:
+        missing_ancestor = self.root / "missing-service-backup-parent"
+        missing_output_root = missing_ancestor / "backups"
+
+        with mock.patch.object(sqlite_state, "_acquire_creation_lock") as acquire_lock:
+            with self.assertRaisesRegex(
+                sqlite_state.StateBundleError,
+                "backup output root does not exist or is not a directory",
+            ):
+                sqlite_state._create_service_backup(
+                    service="freqtrade",
+                    output_root=missing_output_root,
+                    now=self.fixed_now,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+
+        self.assertFalse(missing_ancestor.exists())
+        self.assertFalse(missing_output_root.exists())
+        acquire_lock.assert_not_called()
+
+    def test_archive_rejects_missing_output_root_before_creation_lock(self) -> None:
+        missing_ancestor = self.root / "missing-archive-parent"
+        missing_output_root = missing_ancestor / "backups"
+
+        with mock.patch.object(sqlite_state, "_acquire_creation_lock") as acquire_lock:
+            with self.assertRaisesRegex(
+                sqlite_state.StateBundleError,
+                "backup output root does not exist or is not a directory",
+            ):
+                sqlite_state.create_archive(
+                    label="qqe-research",
+                    source=self.spot_source,
+                    output_root=missing_output_root,
+                    now=self.fixed_now,
+                )
+
+        self.assertFalse(missing_ancestor.exists())
+        self.assertFalse(missing_output_root.exists())
+        acquire_lock.assert_not_called()
 
     def test_schema2_manifest_accepts_only_atomic_process_crash(self) -> None:
         bundle = self.create_service_bundle()
@@ -835,6 +877,7 @@ class SQLiteStateTests(unittest.TestCase):
         for target in sync_points:
             with self.subTest(target=target):
                 shutil.rmtree(self.output_root, ignore_errors=True)
+                self.output_root.mkdir()
                 events: list[str] = []
                 directory_sync_count = 0
                 injected = False
@@ -1185,6 +1228,7 @@ class SQLiteStateTests(unittest.TestCase):
             self.assertTrue(bundle.is_dir())
 
         shutil.rmtree(self.output_root)
+        self.output_root.mkdir()
         with mock.patch.object(
             sqlite_state, "online_backup", side_effect=OSError("injected construction failure")
         ):
@@ -1194,6 +1238,7 @@ class SQLiteStateTests(unittest.TestCase):
             pass
 
         shutil.rmtree(self.output_root)
+        self.output_root.mkdir()
         directory_sync_count = 0
 
         def fail_after_publication(_path: Path) -> None:
@@ -1339,6 +1384,7 @@ class SQLiteStateTests(unittest.TestCase):
         for target in ("failure-file", "failure-directory"):
             with self.subTest(target=target):
                 shutil.rmtree(self.output_root, ignore_errors=True)
+                self.output_root.mkdir()
                 directory_sync_count = 0
                 failure_file_seen = False
 
@@ -1519,6 +1565,7 @@ class SQLiteStateTests(unittest.TestCase):
         for fault in ("partial-enospc", "fsync"):
             with self.subTest(fault=fault):
                 shutil.rmtree(self.output_root, ignore_errors=True)
+                self.output_root.mkdir()
                 original_write = os.write
                 original_fsync = os.fsync
                 success_partial_written = False
@@ -1589,6 +1636,7 @@ class SQLiteStateTests(unittest.TestCase):
         for fault in faults:
             with self.subTest(fault=fault):
                 shutil.rmtree(self.output_root, ignore_errors=True)
+                self.output_root.mkdir()
                 directory_sync_count = 0
                 failure_transition = False
                 original_write_text = Path.write_text
@@ -1804,7 +1852,6 @@ class SQLiteStateTests(unittest.TestCase):
 
     def test_body_failure_remains_original_when_unlock_and_close_report_errors(self) -> None:
         lock_path = self.output_root / ".body-failure.creation.lock"
-        self.output_root.mkdir(parents=True)
         real_close = os.close
 
         def real_close_then_raise(descriptor: int) -> None:
@@ -1829,7 +1876,6 @@ class SQLiteStateTests(unittest.TestCase):
 
     def test_sidecar_open_rejects_symlink_and_non_regular_entry(self) -> None:
         target = self.output_root / "target.lock"
-        target.parent.mkdir(parents=True)
         target.write_bytes(b"safe")
         symlink = self.output_root / ".20260711T000000Z-freqtrade.creation.lock"
         try:

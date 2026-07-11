@@ -804,7 +804,8 @@ def _create_bundle(
         raise StateBundleError("backup source is not a file")
     created_at = now.astimezone(UTC).replace(microsecond=0)
     timestamp = created_at.strftime("%Y%m%dT%H%M%SZ")
-    output_root.mkdir(parents=True, exist_ok=True)
+    if not output_root.is_dir():
+        raise StateBundleError("backup output root does not exist or is not a directory")
     final_bundle = output_root / f"{timestamp}-{identity}"
     if final_bundle.parent != output_root:
         raise StateBundleError("backup bundle already exists or has an invalid path")
