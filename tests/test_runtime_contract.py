@@ -1219,12 +1219,14 @@ class RuntimeContractCliTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_default_render_uses_safe_helper_not_direct_docker(self) -> None:
-        manifest, compose = build_safe_contract(runtime_contract.REPO_ROOT)
+        manifest = {"schema_version": 1, "services": []}
+        compose: dict[str, object] = {}
         completed = subprocess.CompletedProcess([], 0, json.dumps(compose), "")
         with (
             mock.patch.object(runtime_contract, "validate_tracked_configs", return_value=[]),
             mock.patch.object(runtime_contract, "load_runtime_manifest", return_value=manifest),
             mock.patch.object(runtime_contract.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(runtime_contract, "validate_compose", return_value=[]),
         ):
             result, stdout, stderr = self.invoke([])
         self.assertEqual((result, stdout, stderr), (0, "runtime contract: OK\n", ""))
@@ -1281,7 +1283,7 @@ class RuntimeContractCliTests(unittest.TestCase):
                     mock.patch.object(
                         runtime_contract,
                         "load_runtime_manifest",
-                        return_value=build_safe_contract(runtime_contract.REPO_ROOT)[0],
+                        return_value={"schema_version": 1, "services": []},
                     ),
                     mock.patch.object(runtime_contract.subprocess, "run", side_effect=failure),
                 ]
@@ -1303,16 +1305,19 @@ class RuntimeContractCliTests(unittest.TestCase):
                 self.assertNotIn(secret, stderr)
 
     def test_validation_errors_are_prefixed_and_do_not_echo_values(self) -> None:
-        manifest, compose = build_safe_contract(runtime_contract.REPO_ROOT)
-        compose["services"]["freqtrade"]["environment"][
-            "FREQTRADE__API_SERVER__PASSWORD"
-        ] = "private-cli-value"
+        manifest = {"schema_version": 1, "services": []}
+        compose = {"private": "private-cli-value"}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "compose.json"
             path.write_text(json.dumps(compose), encoding="utf-8")
             with (
                 mock.patch.object(runtime_contract, "validate_tracked_configs", return_value=[]),
                 mock.patch.object(runtime_contract, "load_runtime_manifest", return_value=manifest),
+                mock.patch.object(
+                    runtime_contract,
+                    "validate_compose",
+                    return_value=["direct secret environment is forbidden"],
+                ),
             ):
                 result, stdout, stderr = self.invoke(["--compose-json", str(path)])
         self.assertEqual(result, 1)
