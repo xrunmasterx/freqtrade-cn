@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import sqlite3
@@ -77,6 +77,13 @@ class VerifiedBundle:
     metadata: dict[str, object]
 
 
+@dataclass(frozen=True)
+class _PathIdentity:
+    resolved: Path
+    device: int
+    inode: int
+
+
 def open_read_only(path: Path) -> sqlite3.Connection:
     uri = path.resolve().as_uri() + "?mode=ro"
     return sqlite3.connect(uri, uri=True)
@@ -129,14 +136,21 @@ def _is_exact_int(value: object) -> bool:
     return type(value) is int
 
 
+def _is_portable_basename(value: object) -> bool:
+    if type(value) is not str or not value or value in {".", ".."}:
+        return False
+    if "/" in value or "\\" in value or ":" in value or "\0" in value:
+        return False
+    windows_path = PureWindowsPath(value)
+    return not windows_path.drive and not windows_path.root
+
+
 def _validate_common_manifest(manifest: dict[str, object]) -> None:
     if (
         type(manifest["created_at_utc"]) is not str
         or not UTC_TIMESTAMP_PATTERN.fullmatch(manifest["created_at_utc"])
         or type(manifest["sqlite_version"]) is not str
-        or type(manifest["source_filename"]) is not str
-        or not manifest["source_filename"]
-        or Path(manifest["source_filename"]).name != manifest["source_filename"]
+        or not _is_portable_basename(manifest["source_filename"])
         or type(manifest["database_sha256"]) is not str
         or not SHA256_PATTERN.fullmatch(manifest["database_sha256"])
         or not _is_exact_int(manifest["database_size"])
@@ -185,11 +199,14 @@ def _verified_manifest(manifest: object) -> VerifiedBundle:
         archive_label = manifest["archive_label"]
         creation_platform = manifest["creation_platform"]
         durability = manifest["durability"]
-        if purpose not in {"service-state", "archive"}:
+        if type(purpose) is not str or purpose not in {"service-state", "archive"}:
             raise StateBundleError("invalid state bundle purpose")
-        if creation_platform not in {"posix", "windows"}:
+        if type(creation_platform) is not str or creation_platform not in {
+            "posix",
+            "windows",
+        }:
             raise StateBundleError("invalid state bundle creation platform")
-        if durability not in {
+        if type(durability) is not str or durability not in {
             "unknown",
             "atomic-process-crash",
             "power-loss-posix",
@@ -260,11 +277,62 @@ def _contained_path(root: Path, relative: str, description: str) -> Path:
     return candidate
 
 
-def resolve_service_lane(
-    *, service: str, root: Path = REPO_ROOT, manifest_path: Path | None = None
+def _capture_path_identity(
+    path: Path, *, description: str, expected_kind: Literal["file", "directory"]
+) -> _PathIdentity:
+    try:
+        resolved = path.resolve(strict=True)
+        status = resolved.stat()
+    except OSError as error:
+        raise StateBundleError(f"formal {description} is unavailable") from error
+    kind_matches = resolved.is_file() if expected_kind == "file" else resolved.is_dir()
+    if not kind_matches:
+        raise StateBundleError(f"formal {description} is not a {expected_kind}")
+    return _PathIdentity(resolved, status.st_dev, status.st_ino)
+
+
+def _revalidate_path_identity(
+    path: Path,
+    expected: _PathIdentity,
+    *,
+    description: str,
+    expected_kind: Literal["file", "directory"],
+) -> None:
+    current = _capture_path_identity(
+        path, description=description, expected_kind=expected_kind
+    )
+    if current != expected:
+        raise StateBundleError(f"formal {description} changed during operation")
+
+
+def _cleanup_restore_temporary(
+    temporary: Path,
+    *,
+    cleanup_root: Path,
+    destination_parent_identity: _PathIdentity,
+) -> None:
+    temporary.unlink(missing_ok=True)
+    for candidate in cleanup_root.rglob(temporary.name):
+        try:
+            candidate_parent_identity = _capture_path_identity(
+                candidate.parent,
+                description="temporary restore parent",
+                expected_kind="directory",
+            )
+        except StateBundleError:
+            continue
+        if (
+            candidate_parent_identity.device == destination_parent_identity.device
+            and candidate_parent_identity.inode == destination_parent_identity.inode
+        ):
+            candidate.unlink(missing_ok=True)
+
+
+def _resolve_service_lane(
+    *, service: str, root: Path, manifest_path: Path
 ) -> ServiceLane:
     try:
-        manifest = load_runtime_manifest(manifest_path or (root / "ops/runtime-services.json"))
+        manifest = load_runtime_manifest(manifest_path)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise StateBundleError("invalid runtime service manifest") from error
     selected = next(
@@ -287,6 +355,14 @@ def resolve_service_lane(
     return ServiceLane(service, legacy_source, destination)
 
 
+def resolve_service_lane(*, service: str) -> ServiceLane:
+    return _resolve_service_lane(
+        service=service,
+        root=REPO_ROOT,
+        manifest_path=REPO_ROOT / "ops/runtime-services.json",
+    )
+
+
 def _creation_platform() -> CreationPlatform:
     return "windows" if os.name == "nt" else "posix"
 
@@ -298,6 +374,8 @@ def _create_bundle(
     source: Path,
     output_root: Path,
     now: datetime,
+    source_identity: _PathIdentity | None = None,
+    source_parent_identity: _PathIdentity | None = None,
 ) -> Path:
     if type(identity) is not str or not IDENTITY_PATTERN.fullmatch(identity):
         raise StateBundleError("invalid bundle identity")
@@ -314,6 +392,20 @@ def _create_bundle(
     staging = Path(tempfile.mkdtemp(prefix=f".{identity}-", dir=output_root))
     database = staging / "database.sqlite"
     try:
+        if source_parent_identity is not None:
+            _revalidate_path_identity(
+                source.parent,
+                source_parent_identity,
+                description="source parent",
+                expected_kind="directory",
+            )
+        if source_identity is not None:
+            _revalidate_path_identity(
+                source,
+                source_identity,
+                description="backup source",
+                expected_kind="file",
+            )
         online_backup(source, database)
         inspected = inspect_database(database)
         manifest = {
@@ -343,21 +435,45 @@ def _create_bundle(
         raise
 
 
-def create_service_backup(
+def _create_service_backup(
     *,
     service: str,
     output_root: Path,
     now: datetime,
-    root: Path = REPO_ROOT,
-    manifest_path: Path | None = None,
+    root: Path,
+    manifest_path: Path,
 ) -> Path:
-    lane = resolve_service_lane(service=service, root=root, manifest_path=manifest_path)
+    lane = _resolve_service_lane(
+        service=service, root=root, manifest_path=manifest_path
+    )
+    source_parent_identity = _capture_path_identity(
+        lane.legacy_source.parent,
+        description="source parent",
+        expected_kind="directory",
+    )
+    source_identity = _capture_path_identity(
+        lane.legacy_source, description="backup source", expected_kind="file"
+    )
     return _create_bundle(
         purpose="service-state",
         identity=lane.service,
         source=lane.legacy_source,
         output_root=output_root,
         now=now,
+        source_identity=source_identity,
+        source_parent_identity=source_parent_identity,
+    )
+
+
+def create_service_backup(
+    *, service: str, output_root: Path, now: datetime
+) -> Path:
+    return _create_service_backup(
+        service=service,
+        output_root=output_root,
+        now=now,
+        root=REPO_ROOT,
+        manifest_path=REPO_ROOT / "ops/runtime-services.json",
     )
 
 
@@ -371,16 +487,34 @@ def create_archive(*, label: str, source: Path, output_root: Path, now: datetime
     )
 
 
-def _restore_verified_bundle(bundle: Path, destination: Path, verified: VerifiedBundle) -> None:
+def _restore_verified_bundle(
+    bundle: Path,
+    destination: Path,
+    verified: VerifiedBundle,
+    destination_parent_identity: _PathIdentity,
+    cleanup_root: Path,
+) -> None:
+    _revalidate_path_identity(
+        destination.parent,
+        destination_parent_identity,
+        description="destination parent",
+        expected_kind="directory",
+    )
     if os.path.lexists(destination):
         raise StateBundleError(f"restore destination already exists: {destination}")
     if not destination.parent.is_dir():
         raise StateBundleError("restore destination parent does not exist")
+    _revalidate_path_identity(
+        destination.parent,
+        destination_parent_identity,
+        description="destination parent",
+        expected_kind="directory",
+    )
     descriptor, temporary_text = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
     )
     os.close(descriptor)
-    temporary = Path(temporary_text)
+    temporary = Path(temporary_text).resolve(strict=True)
     published = False
     try:
         shutil.copyfile(bundle / "database.sqlite", temporary)
@@ -392,6 +526,12 @@ def _restore_verified_bundle(bundle: Path, destination: Path, verified: Verified
         for key, expected in verified.metadata.items():
             if inspected[key] != expected:
                 raise StateBundleError(f"restored database metadata mismatch: {key}")
+        _revalidate_path_identity(
+            destination.parent,
+            destination_parent_identity,
+            description="destination parent",
+            expected_kind="directory",
+        )
         try:
             os.link(temporary, destination)
         except FileExistsError as error:
@@ -407,19 +547,30 @@ def _restore_verified_bundle(bundle: Path, destination: Path, verified: Verified
             ) from error
     except BaseException:
         if not published:
-            temporary.unlink(missing_ok=True)
+            _cleanup_restore_temporary(
+                temporary,
+                cleanup_root=cleanup_root,
+                destination_parent_identity=destination_parent_identity,
+            )
         raise
 
 
-def restore_service(
+def _restore_service(
     *,
     service: str,
     bundle: Path,
-    root: Path = REPO_ROOT,
-    manifest_path: Path | None = None,
+    root: Path,
+    manifest_path: Path,
     allow_legacy_schema1: bool = False,
 ) -> Path:
-    lane = resolve_service_lane(service=service, root=root, manifest_path=manifest_path)
+    lane = _resolve_service_lane(
+        service=service, root=root, manifest_path=manifest_path
+    )
+    destination_parent_identity = _capture_path_identity(
+        lane.destination.parent,
+        description="destination parent",
+        expected_kind="directory",
+    )
     verified = verify_bundle(bundle)
     if verified.purpose == "archive":
         raise StateBundleError("archive bundles cannot restore to formal services")
@@ -429,8 +580,26 @@ def restore_service(
         raise StateBundleError("state bundle service does not match destination service")
     if verified.source_filename != lane.legacy_source.name:
         raise StateBundleError("state bundle source filename does not match service lane")
-    _restore_verified_bundle(bundle, lane.destination, verified)
+    _restore_verified_bundle(
+        bundle,
+        lane.destination,
+        verified,
+        destination_parent_identity,
+        root,
+    )
     return lane.destination
+
+
+def restore_service(
+    *, service: str, bundle: Path, allow_legacy_schema1: bool = False
+) -> Path:
+    return _restore_service(
+        service=service,
+        bundle=bundle,
+        root=REPO_ROOT,
+        manifest_path=REPO_ROOT / "ops/runtime-services.json",
+        allow_legacy_schema1=allow_legacy_schema1,
+    )
 
 
 def compare_structure(source: Path, candidate: Path) -> None:

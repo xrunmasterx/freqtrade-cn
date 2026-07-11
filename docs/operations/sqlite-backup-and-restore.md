@@ -6,6 +6,16 @@ source may remain online for the initial read-only backup; committed WAL state i
 included and uncommitted work is excluded. `verify` checks the bundle hash,
 SQLite integrity, foreign keys, and core table counts.
 
+Formal service source and destination paths are fixed by the repository's
+`ops/runtime-services.json`; the public API and CLI provide no root, manifest,
+source, or destination override for those lanes. The tool records the resolved
+path and filesystem identity, then revalidates the formal source immediately
+before backup I/O and the destination parent before temporary-file creation and
+again before publication. If a checked path changes, the operation fails without
+printing success and cleans its temporary output. These checks close supported
+same-process mutation windows; they do not claim protection against a
+continuously racing, same-authority privileged local actor between boundaries.
+
 The document itself grants no operational authority. Read-only backup and bundle
 verification may be automated. Stopping a current Bot or restoring/replacing its
 current database requires explicit operator authorization for that exact
