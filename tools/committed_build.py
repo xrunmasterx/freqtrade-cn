@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -105,13 +106,17 @@ def verify_committed_checkout(root: Path, identity: CommitIdentity) -> None:
         checked_out_commit = _git_text(submodule, "rev-parse", "--verify", "HEAD")
         if checked_out_commit != getattr(identity, identity_field):
             raise ValueError("Submodule checkout does not match the committed Git link")
+    try:
+        _run_git(root, "diff", "--cached", "--quiet", "HEAD", "--")
+    except ValueError:
+        raise ValueError("Committed build checkout is not clean") from None
     _require_clean_repository(root)
     for directory, _identity_field in _SUBMODULES:
         _require_clean_repository(root / directory)
 
 
 def _has_control_characters(value: str) -> bool:
-    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+    return any(unicodedata.category(character) == "Cc" for character in value)
 
 
 def _validated_parts(value: str) -> tuple[str, ...]:
@@ -123,7 +128,7 @@ def _validated_parts(value: str) -> tuple[str, ...]:
     ):
         raise ValueError("Archive contains an unsafe path")
     parts = tuple(part for part in PurePosixPath(value).parts if part not in ("", "."))
-    if not parts or ".." in parts or ":" in parts[0]:
+    if not parts or ".." in parts or any(":" in part for part in parts):
         raise ValueError("Archive contains an unsafe path")
     return parts
 
@@ -141,7 +146,7 @@ def _resolved_link_parts(
     resolved = list(member_parts[:-1] if relative_to_parent else ())
     link_parts = PurePosixPath(linkname).parts
     normalized_link_parts = tuple(part for part in link_parts if part not in ("", "."))
-    if normalized_link_parts and ":" in normalized_link_parts[0]:
+    if any(":" in part for part in normalized_link_parts):
         raise ValueError("Archive contains an unsafe link")
     for part in link_parts:
         if part in ("", "."):
@@ -224,6 +229,14 @@ def _extract_member(
     os.chmod(path, member.mode & 0o777)
 
 
+def _clear_directory(directory: Path) -> None:
+    for path in directory.iterdir():
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+
+
 def extract_git_archive(stream: BinaryIO, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     if any(destination.iterdir()):
@@ -247,9 +260,13 @@ def extract_git_archive(stream: BinaryIO, destination: Path) -> None:
                         target_parts = _resolved_link_parts(
                             parts, member.linkname, relative_to_parent=False
                         )
+                        path.parent.mkdir(parents=True, exist_ok=True)
                         os.link(destination.joinpath(*target_parts), path)
         except (tarfile.TarError, EOFError):
             raise ValueError("Git archive is invalid") from None
+        except OSError:
+            _clear_directory(destination)
+            raise ValueError("Git archive extraction failed") from None
 
 
 def _extract_commit(repository: Path, commit: str, destination: Path) -> None:

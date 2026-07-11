@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.committed_build import (
     committed_build_context,
@@ -111,6 +112,25 @@ class CommittedBuildTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify_committed_checkout(self.fixture.root, identity)
 
+    def test_rejects_staged_gitlink_index_change(self) -> None:
+        identity = resolve_commit_identity(self.fixture.root)
+        _write(self.fixture.backend_source, "later.txt", "later\n")
+        _git(self.fixture.backend_source, "add", "later.txt")
+        _git(self.fixture.backend_source, "commit", "-qm", "later")
+        staged_commit = _git(self.fixture.backend_source, "rev-parse", "HEAD")
+        _git(
+            self.fixture.root,
+            "update-index",
+            "--cacheinfo",
+            f"160000,{staged_commit},freqtrade",
+        )
+
+        self.assertEqual(resolve_commit_identity(self.fixture.root), identity)
+        checked_out_backend = _git(self.fixture.root / "freqtrade", "rev-parse", "HEAD")
+        self.assertEqual(checked_out_backend, identity.backend)
+        with self.assertRaises(ValueError):
+            verify_committed_checkout(self.fixture.root, identity)
+
     def test_rejects_tracked_root_backend_or_frontend_changes(self) -> None:
         for relative_repository, filename in (
             (Path(), "root.txt"),
@@ -186,6 +206,8 @@ class CommittedBuildTests(unittest.TestCase):
             "../escape",
             "ok/../../escape",
             "bad\x01name",
+            "bad\x85name",
+            "directory/file:stream",
         ):
             cases.append(tarfile.TarInfo(name))
         fifo = tarfile.TarInfo("fifo")
@@ -201,12 +223,14 @@ class CommittedBuildTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as destination:
                     with self.assertRaises(ValueError):
                         extract_git_archive(_tar_bytes([(member, b"")]), Path(destination))
+                    self.assertEqual(list(Path(destination).iterdir()), [])
         with tempfile.TemporaryDirectory() as destination:
             with self.assertRaises(ValueError):
                 extract_git_archive(
                     _tar_bytes([(conflict_file, b"x"), (conflict_child, b"y")]),
                     Path(destination),
                 )
+            self.assertEqual(list(Path(destination).iterdir()), [])
         occupied = tarfile.TarInfo("existing")
         with tempfile.TemporaryDirectory() as destination:
             _write(Path(destination), "existing", "existing\n")
@@ -226,6 +250,61 @@ class CommittedBuildTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as destination:
                     with self.assertRaises(ValueError):
                         extract_git_archive(_tar_bytes([(member, b"")]), Path(destination))
+                    self.assertEqual(list(Path(destination).iterdir()), [])
+
+        ads_symlink = tarfile.TarInfo("link")
+        ads_symlink.type = tarfile.SYMTYPE
+        ads_symlink.linkname = "directory/target:stream"
+        ads_target = tarfile.TarInfo("directory/target:stream")
+        ads_target.size = 1
+        ads_hardlink = tarfile.TarInfo("nested/hardlink")
+        ads_hardlink.type = tarfile.LNKTYPE
+        ads_hardlink.linkname = "directory/target:stream"
+        regular_target = tarfile.TarInfo("directory/target")
+        regular_target.size = 1
+        ads_target_only_hardlink = tarfile.TarInfo("nested/hardlink")
+        ads_target_only_hardlink.type = tarfile.LNKTYPE
+        ads_target_only_hardlink.linkname = "directory/target:stream"
+        for entries in (
+            [(ads_symlink, b"")],
+            [(ads_target, b"x"), (ads_hardlink, b"")],
+            [(regular_target, b"x"), (ads_target_only_hardlink, b"")],
+        ):
+            with self.subTest(entries=[member.name for member, _contents in entries]):
+                with tempfile.TemporaryDirectory() as destination:
+                    with self.assertRaises(ValueError):
+                        extract_git_archive(_tar_bytes(entries), Path(destination))
+                    self.assertEqual(list(Path(destination).iterdir()), [])
+
+    def test_extracts_nested_hardlink(self) -> None:
+        source = tarfile.TarInfo("source")
+        source.size = len(b"committed")
+        hardlink = tarfile.TarInfo("nested/path/copy")
+        hardlink.type = tarfile.LNKTYPE
+        hardlink.linkname = "source"
+
+        with tempfile.TemporaryDirectory() as destination:
+            root = Path(destination)
+            extract_git_archive(_tar_bytes([(source, b"committed"), (hardlink, b"")]), root)
+
+            self.assertEqual((root / "nested/path/copy").read_bytes(), b"committed")
+            self.assertTrue((root / "source").samefile(root / "nested/path/copy"))
+
+    def test_extraction_failure_removes_partial_writes(self) -> None:
+        source = tarfile.TarInfo("source")
+        source.size = len(b"committed")
+        hardlink = tarfile.TarInfo("nested/copy")
+        hardlink.type = tarfile.LNKTYPE
+        hardlink.linkname = "source"
+
+        with tempfile.TemporaryDirectory() as destination:
+            root = Path(destination)
+            with patch("tools.committed_build.os.link", side_effect=OSError("link failure")):
+                with self.assertRaises(ValueError):
+                    extract_git_archive(
+                        _tar_bytes([(source, b"committed"), (hardlink, b"")]), root
+                    )
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_context_is_removed_after_success_and_exception(self) -> None:
         identity = resolve_commit_identity(self.fixture.root)
