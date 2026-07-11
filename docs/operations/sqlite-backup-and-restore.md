@@ -22,6 +22,27 @@ close supported same-process mutation windows; they do not claim protection
 against a continuously racing, same-authority privileged local actor between
 boundaries.
 
+Every successful schema 2 bundle records the durability contract of the host
+that created it. On POSIX, `power-loss-posix` is reported only after the backup
+database and manifest files are synced, the staged bundle verifies, the staging
+directory is synced, publication is renamed into place, and the output root is
+synced. A POSIX restore syncs the temporary database before verification, creates
+the no-clobber hard link, syncs the destination parent, retains the temporary
+name as the binding Scheme A same-inode quarantine, and then performs the
+approved second parent-directory sync. The historical durability-plan step that
+said "unlink" does not apply: restore never removes the quarantine through a
+pathname, and the second barrier records the deliberately retained namespace
+state rather than claiming an unlink occurred.
+
+On Windows, the database, manifest, and restore temporary files are synced, but
+directories are not. Schema 2 therefore reports only `atomic-process-crash` and
+does not claim power-loss or hard-reset durability. Any failed barrier makes the
+operation fail. A failure before backup publication removes the safely owned
+staging directory; a failure after publication retains the published bundle as
+evidence. Restore failures retain any created temporary quarantine, and failures
+after hard-link publication retain both names. A failed command is never a
+durability success, even when published or quarantined evidence remains.
+
 The document itself grants no operational authority. Read-only backup and bundle
 verification may be automated. Stopping a current Bot or restoring/replacing its
 current database requires explicit operator authorization for that exact

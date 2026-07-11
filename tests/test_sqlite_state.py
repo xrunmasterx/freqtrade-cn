@@ -159,8 +159,8 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertEqual(manifest["service"], "freqtrade")
         self.assertIsNone(manifest["archive_label"])
         self.assertEqual(manifest["source_filename"], "tradesv3.sqlite")
-        self.assertIn(manifest["creation_platform"], {"posix", "windows"})
-        self.assertEqual(manifest["durability"], "atomic-process-crash")
+        self.assertEqual(manifest["creation_platform"], sqlite_state._creation_platform())
+        self.assertEqual(manifest["durability"], sqlite_state._new_bundle_durability())
         verified = sqlite_state.verify_bundle(bundle)
         self.assertIsInstance(verified, sqlite_state.VerifiedBundle)
         self.assertEqual(verified.service, "freqtrade")
@@ -171,7 +171,7 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertEqual(verified.purpose, "archive")
         self.assertIsNone(verified.service)
         self.assertEqual(verified.archive_label, "qqe-research")
-        self.assertEqual(verified.durability, "atomic-process-crash")
+        self.assertEqual(verified.durability, sqlite_state._new_bundle_durability())
 
     def test_schema1_verifies_with_unknown_durability_and_requires_legacy_flag(self) -> None:
         bundle = self.create_service_bundle()
@@ -583,6 +583,280 @@ class SQLiteStateTests(unittest.TestCase):
                 )
         self.assertFalse(self.spot_destination.exists())
         self.assertEqual(len(list(self.spot_destination.parent.glob("*.tmp"))), 1)
+
+    def test_posix_backup_orders_file_and_directory_sync_before_success(self) -> None:
+        events: list[str] = []
+        original_verify = sqlite_state.verify_bundle
+        original_replace = os.replace
+
+        def record_file_sync(path: Path) -> None:
+            events.append(f"file:{path.name}")
+
+        def record_directory_sync(path: Path) -> None:
+            point = (
+                "directory:staging"
+                if path.name.startswith(".freqtrade-")
+                else "directory:output"
+            )
+            events.append(point)
+
+        def record_verify(bundle: Path) -> sqlite_state.VerifiedBundle:
+            events.append("verify")
+            return original_verify(bundle)
+
+        def record_replace(source: Path, destination: Path) -> None:
+            events.append("replace")
+            original_replace(source, destination)
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file", side_effect=record_file_sync),
+            mock.patch.object(
+                sqlite_state, "_sync_directory", side_effect=record_directory_sync
+            ),
+            mock.patch.object(sqlite_state, "verify_bundle", side_effect=record_verify),
+            mock.patch.object(os, "replace", side_effect=record_replace),
+        ):
+            bundle = self.create_service_bundle()
+
+        self.assertEqual(
+            events,
+            [
+                "file:database.sqlite",
+                "file:manifest.json",
+                "verify",
+                "directory:staging",
+                "replace",
+                "directory:output",
+            ],
+        )
+        manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["durability"], "power-loss-posix")
+
+    def test_posix_restore_orders_file_and_directory_sync_before_success(self) -> None:
+        bundle = self.create_service_bundle()
+        verified = sqlite_state.verify_bundle(bundle)
+        parent_identity = sqlite_state._capture_path_identity(
+            self.spot_destination.parent,
+            description="destination parent",
+            expected_kind="directory",
+        )
+        events: list[str] = []
+        original_link = os.link
+
+        def record_file_sync(path: Path) -> None:
+            events.append("file:temporary")
+
+        def record_directory_sync(path: Path) -> None:
+            self.assertEqual(path, self.spot_destination.parent)
+            events.append("directory:parent")
+
+        def record_link(source: Path, destination: Path) -> None:
+            events.append("link")
+            original_link(source, destination)
+
+        original_inspect = sqlite_state.inspect_database
+
+        def record_inspect(path: Path) -> dict[str, object]:
+            events.append("verify")
+            return original_inspect(path)
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file", side_effect=record_file_sync),
+            mock.patch.object(
+                sqlite_state, "_sync_directory", side_effect=record_directory_sync
+            ),
+            mock.patch.object(sqlite_state, "inspect_database", side_effect=record_inspect),
+            mock.patch.object(os, "link", side_effect=record_link),
+        ):
+            sqlite_state._restore_verified_bundle(
+                bundle,
+                self.spot_destination,
+                verified,
+                parent_identity,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "file:temporary",
+                "verify",
+                "link",
+                "directory:parent",
+                "directory:parent",
+            ],
+        )
+        quarantined = list(self.spot_destination.parent.glob("*.tmp"))
+        self.assertEqual(len(quarantined), 1)
+        self.assertTrue(os.path.samefile(quarantined[0], self.spot_destination))
+
+    def test_posix_backup_output_root_sync_failure_raises_and_quarantines_published_bundle(
+        self,
+    ) -> None:
+        directory_sync_count = 0
+
+        def fail_output_root_sync(_path: Path) -> None:
+            nonlocal directory_sync_count
+            directory_sync_count += 1
+            if directory_sync_count == 2:
+                raise OSError("injected output root sync failure")
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file"),
+            mock.patch.object(
+                sqlite_state, "_sync_directory", side_effect=fail_output_root_sync
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "output root sync"):
+                self.create_service_bundle()
+
+        published = list(self.output_root.glob("*-freqtrade"))
+        self.assertEqual(len(published), 1)
+        self.assertTrue((published[0] / "database.sqlite").is_file())
+        self.assertTrue((published[0] / "manifest.json").is_file())
+
+    def test_posix_restore_first_parent_sync_failure_raises_and_quarantines_destination(
+        self,
+    ) -> None:
+        bundle = self.create_service_bundle()
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file"),
+            mock.patch.object(
+                sqlite_state,
+                "_sync_directory",
+                side_effect=OSError("injected first parent sync failure"),
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "first parent sync"):
+                sqlite_state._restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+
+        self.assertTrue(self.spot_destination.is_file())
+        quarantined = list(self.spot_destination.parent.glob("*.tmp"))
+        self.assertEqual(len(quarantined), 1)
+        self.assertTrue(os.path.samefile(quarantined[0], self.spot_destination))
+
+    def test_windows_schema2_reports_atomic_process_crash(self) -> None:
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=False),
+            mock.patch.object(sqlite_state, "_sync_file") as sync_file,
+            mock.patch.object(sqlite_state, "_sync_directory") as sync_directory,
+        ):
+            bundle = self.create_service_bundle()
+            manifest = json.loads(
+                (bundle / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["durability"], "atomic-process-crash")
+            self.assertEqual(
+                [call.args[0].name for call in sync_file.call_args_list],
+                ["database.sqlite", "manifest.json"],
+            )
+            sync_directory.assert_not_called()
+
+            sqlite_state._restore_service(
+                service="freqtrade",
+                bundle=bundle,
+                root=self.root,
+                manifest_path=self.manifest_path,
+            )
+            self.assertTrue(sync_file.call_args_list[-1].args[0].name.endswith(".tmp"))
+            sync_directory.assert_not_called()
+
+    def test_posix_backup_each_sync_failure_fails_closed(self) -> None:
+        sync_points = ("database", "manifest", "staging", "output")
+        for target in sync_points:
+            with self.subTest(target=target):
+                shutil.rmtree(self.output_root, ignore_errors=True)
+                events: list[str] = []
+
+                def maybe_fail_file(path: Path) -> None:
+                    point = "database" if path.name == "database.sqlite" else "manifest"
+                    events.append(point)
+                    if point == target:
+                        raise OSError(f"injected {target} sync failure")
+
+                def maybe_fail_directory(path: Path) -> None:
+                    point = "staging" if path.name.startswith(".freqtrade-") else "output"
+                    events.append(point)
+                    if point == target:
+                        raise OSError(f"injected {target} sync failure")
+
+                with (
+                    mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+                    mock.patch.object(
+                        sqlite_state, "_sync_file", side_effect=maybe_fail_file
+                    ),
+                    mock.patch.object(
+                        sqlite_state,
+                        "_sync_directory",
+                        side_effect=maybe_fail_directory,
+                    ),
+                ):
+                    with self.assertRaisesRegex(OSError, f"{target} sync"):
+                        self.create_service_bundle()
+
+                self.assertIn(target, events)
+                published = list(self.output_root.glob("*-freqtrade"))
+                staging = list(self.output_root.glob(".freqtrade-*"))
+                self.assertEqual(staging, [])
+                self.assertEqual(len(published), 1 if target == "output" else 0)
+
+    def test_posix_restore_each_sync_failure_fails_closed_with_quarantine(self) -> None:
+        bundle = self.create_service_bundle()
+        for target_call in (1, 2, 3):
+            with self.subTest(target_call=target_call):
+                if self.spot_destination.exists():
+                    self.spot_destination.unlink()
+                for temporary in self.spot_destination.parent.glob("*.tmp"):
+                    temporary.unlink()
+                sync_call = 0
+
+                def maybe_fail(_path: Path) -> None:
+                    nonlocal sync_call
+                    sync_call += 1
+                    if sync_call == target_call:
+                        raise OSError(f"injected restore sync {target_call} failure")
+
+                with (
+                    mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+                    mock.patch.object(sqlite_state, "_sync_file", side_effect=maybe_fail),
+                    mock.patch.object(
+                        sqlite_state, "_sync_directory", side_effect=maybe_fail
+                    ),
+                ):
+                    with self.assertRaisesRegex(OSError, f"restore sync {target_call}"):
+                        sqlite_state._restore_service(
+                            service="freqtrade",
+                            bundle=bundle,
+                            root=self.root,
+                            manifest_path=self.manifest_path,
+                        )
+
+                quarantined = list(self.spot_destination.parent.glob("*.tmp"))
+                self.assertEqual(len(quarantined), 1)
+                self.assertEqual(self.spot_destination.exists(), target_call > 1)
+                if target_call > 1:
+                    self.assertTrue(
+                        os.path.samefile(quarantined[0], self.spot_destination)
+                    )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX durability helper smoke")
+    def test_posix_real_file_and_directory_sync_helpers_accept_temp_paths(self) -> None:
+        sync_root = self.root / "sync-smoke"
+        sync_root.mkdir()
+        sync_file = sync_root / "file.txt"
+        sync_file.write_text("durable", encoding="utf-8")
+
+        sqlite_state._sync_file(sync_file)
+        sqlite_state._sync_directory(sync_root)
 
     def test_compare_structure_detects_count_mismatch_and_accepts_match(self) -> None:
         matching = self.root / "matching.sqlite"

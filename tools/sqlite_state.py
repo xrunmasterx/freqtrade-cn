@@ -349,6 +349,31 @@ def _creation_platform() -> CreationPlatform:
     return "windows" if os.name == "nt" else "posix"
 
 
+def _is_posix() -> bool:
+    return os.name == "posix"
+
+
+def _sync_file(path: Path) -> None:
+    access = os.O_RDONLY if _is_posix() else os.O_RDWR
+    descriptor = os.open(path, access | getattr(os, "O_BINARY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _new_bundle_durability() -> DurabilityLevel:
+    return "power-loss-posix" if _is_posix() else "atomic-process-crash"
+
+
 def _create_bundle(
     *,
     purpose: BundlePurpose,
@@ -390,6 +415,7 @@ def _create_bundle(
             )
         online_backup(source, database)
         inspected = inspect_database(database)
+        _sync_file(database)
         manifest = {
             "schema_version": 2,
             "purpose": purpose,
@@ -397,20 +423,26 @@ def _create_bundle(
             "archive_label": identity if purpose == "archive" else None,
             "created_at_utc": created_at.isoformat().replace("+00:00", "Z"),
             "creation_platform": _creation_platform(),
-            "durability": "atomic-process-crash",
+            "durability": _new_bundle_durability(),
             "sqlite_version": sqlite3.sqlite_version,
             "source_filename": source.name,
             "database_sha256": sha256_file(database),
             "database_size": database.stat().st_size,
             **inspected,
         }
-        (staging / "manifest.json").write_text(
+        manifest_path = staging / "manifest.json"
+        manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
             newline="\n",
         )
+        _sync_file(manifest_path)
         verify_bundle(staging)
+        if _is_posix():
+            _sync_directory(staging)
         os.replace(staging, final_bundle)
+        if _is_posix():
+            _sync_directory(output_root)
         return final_bundle
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -508,6 +540,7 @@ def _restore_verified_bundle(
         expected_kind="file",
     )
     shutil.copyfile(bundle / "database.sqlite", temporary)
+    _sync_file(temporary)
     if sha256_file(temporary) != verified.database_sha256:
         raise StateBundleError("restored database metadata mismatch: hash")
     if temporary.stat().st_size != verified.database_size:
@@ -534,6 +567,10 @@ def _restore_verified_bundle(
         raise StateBundleError(
             f"restore destination already exists: {destination}"
         ) from error
+    if _is_posix():
+        _sync_directory(destination.parent)
+        # Scheme A intentionally retains the temporary hard link as quarantine.
+        _sync_directory(destination.parent)
 
 
 def _restore_service(
