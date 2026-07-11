@@ -162,6 +162,10 @@ class ComposeRuntimeTests(unittest.TestCase):
                         "show-trades",
                         "--db-url",
                         "sqlite:////freqtrade/state/trades.sqlite",
+                        "--config",
+                        "/freqtrade/config/runtime.json",
+                        "--config",
+                        "/freqtrade/config/trading-safety.json",
                         "--print-json",
                     ],
                 )

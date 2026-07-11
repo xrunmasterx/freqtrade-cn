@@ -95,6 +95,10 @@ def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> lis
             "show-trades",
             "--db-url",
             "sqlite:////freqtrade/state/trades.sqlite",
+            "--config",
+            "/freqtrade/config/runtime.json",
+            "--config",
+            "/freqtrade/config/trading-safety.json",
             "--print-json",
         ]
     if index >= len(tokens) or tokens[index] not in ALLOWED_ACTIONS:
