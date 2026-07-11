@@ -212,6 +212,7 @@ class TradingConfigSafetyTests(unittest.TestCase):
         self.assertNotIn("--strategy", tokens)
         self.assertNotIn("--db-url", tokens)
 
+    @unittest.skipIf(sys.flags.no_site, "requires backend runtime dependencies")
     def test_actual_research_profile_paths_resolve_below_read_only_input(self) -> None:
         config = json.loads(
             (REPO_ROOT / "ft_userdata/user_data/config.research.example.json").read_text(

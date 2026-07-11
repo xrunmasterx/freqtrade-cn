@@ -31,6 +31,9 @@ jobs:
         with:
           version: v5.1.4
 
+      - name: Run standard-library root unit tests
+        run: python -S -m unittest discover -s tests -p "test_*.py" -v
+
       - name: Enforce tracked config policy
         run: python tools/runtime_contract.py --check-configs-only
 
@@ -40,17 +43,14 @@ jobs:
           python tools/bootstrap_runtime.py sanitize-api-configs
           python tools/bootstrap_runtime.py verify
 
+      - name: Enforce full runtime contract
+        run: python tools/runtime_contract.py
+
       - name: Install backend development dependencies
         run: |
           uv venv .venv
           uv pip install --python .venv/bin/python -e "./freqtrade[develop,hyperopt]"
           echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
-
-      - name: Run root unit tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
-
-      - name: Enforce full runtime contract
-        run: python tools/runtime_contract.py
 
       - name: Run backend P0 regressions
         working-directory: freqtrade
@@ -69,6 +69,9 @@ jobs:
             freqtrade/commands/build_config_commands.py \
             tests/freqtradebot/test_freqtradebot.py \
             tests/test_directory_operations.py
+
+      - name: Run runtime-dependent root selector
+        run: python -m unittest tests.test_trading_config_safety.TradingConfigSafetyTests.test_actual_research_profile_paths_resolve_below_read_only_input -v
 
       - name: Install pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
