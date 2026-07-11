@@ -25,30 +25,47 @@ boundaries.
 Every schema 2 manifest records only the weaker `atomic-process-crash` baseline.
 On POSIX, `verify` derives `power-loss-posix` only from a separate
 `durability-complete.json` record whose exact schema binds it to the manifest
-hash, POSIX creation platform, and final bundle directory name. The database and
-weak manifest files are synced first, the staged bundle verifies, and the
-staging directory is synced.
+hash, POSIX creation platform, final bundle directory name, and transaction
+nonce. The database and weak manifest files are synced first, the staged bundle
+verifies, and the staging directory is synced.
 Publication then renames the uniquely owned staging directory into its final
 name and syncs the output root while the bundle is still weak. A hidden
 completion candidate is written and file-synced, atomically renamed to
 `durability-complete.json`, and followed by a final bundle-directory sync. Only
 then is the completed bundle verified and returned. A missing, malformed,
-changed, or name-mismatched completion record cannot promote the weak manifest
-to `power-loss-posix`.
+changed, or identity-mismatched completion record cannot promote the weak
+manifest to `power-loss-posix`.
 
-Creation also holds an exclusive operating-system lock in a persistent hidden
-sidecar named for the intended final bundle. The lock spans construction,
-publication, every completion barrier, and any failure-state transition.
-`verify` opens that existing sidecar and requests a shared nonblocking lock
-before it reads completion state. If a creator still holds the lock, verification
-fails with the fixed creation-in-progress result; a missing sidecar or an
-unavailable lock implementation fails closed. POSIX uses `flock`
-and Windows uses `msvcrt.locking`; no in-process-only fallback exists. The
-backup root must therefore be a local or mounted filesystem that documents
-reliable cross-process support for the host locking primitive. Network,
-distributed, or userspace filesystems without that guarantee are unsupported,
-and this tool does not turn advisory locks into protection against a privileged
-actor that can replace filesystem objects.
+The persistent hidden sidecar named for the intended final bundle is both the
+operating-system lock and the authoritative transaction receipt. Creation holds
+its exclusive lock across construction, publication, every completion barrier,
+receipt transition, and failure-state transition. Before construction it writes
+and fsyncs an exact `pending` receipt containing a new transaction nonce and the
+original final basename. Only after all bundle and completion barriers succeed
+does it replace the receipt contents through the already locked descriptor with
+an exact, fsynced `success` receipt bound to the same nonce, manifest hash,
+platform, and original basename. Any pre-success failure first attempts an exact,
+fsynced `failed` receipt. A partial, missing, pending, failed, malformed, or
+unmatched receipt fails closed.
+
+`verify` first accepts only an exact normal bundle basename or the exact hidden
+`.<original>.quarantine-<16 lowercase hex>` form and derives the original identity
+without reading bundle state. It then opens the corresponding existing sidecar
+without following symlinks, requires the opened object and pathname entry to be
+the same regular file, and requests a shared nonblocking lock. Only while that
+lock is held does it read the receipt through the descriptor and then read the
+bundle. Strong POSIX verification requires an exact `success` receipt and exact
+completion record with matching nonce, manifest hash, platform, and original
+basename. The sidecar and bundle are one verification unit; copying or moving a
+bundle without its matching sidecar is not a verified backup.
+
+If a creator still holds the lock, verification fails with the fixed
+creation-in-progress result. A missing sidecar or unavailable lock implementation
+also fails closed. POSIX uses `flock` and Windows uses `msvcrt.locking`; no
+in-process-only fallback exists. An explicit unlock error followed by successful
+descriptor close is a safe release. If creator-side close fails, the still-open
+descriptor is used to downgrade any success receipt to failed before another
+close attempt, and the command fails closed.
 
 If any explicit barrier or completion check fails after final-name publication,
 the tool writes and file-syncs an exact `creation-failed.json` record and syncs
@@ -58,12 +75,23 @@ rejects this intrinsic failure record even if the quarantine directory is later
 renamed back to the intended final basename; it does not rely on a quarantine
 substring. A failure in a failure-record barrier still returns failure, retains
 the installed failure evidence where possible, attempts quarantine, and never
-reports strong durability. The tool tracks whether final publication occurred
-and never recursively deletes the vacated staging pathname; an unrelated
-replacement at that old name is left untouched. Failures before final
-publication retain the unique hidden staging artifact for identity-aware
-disposition rather than performing pathname-based recursive cleanup under
-ambiguity.
+reports strong durability because the authoritative sidecar remains pending,
+failed, or malformed. The intrinsic record is defense in depth, not the sole
+failure authority. The tool tracks whether final publication occurred and never
+recursively deletes the vacated staging pathname; an unrelated replacement at
+that old name is left untouched. Failures before final publication retain the
+unique hidden staging artifact for identity-aware disposition rather than
+performing pathname-based recursive cleanup under ambiguity.
+
+The backup root must be a local or mounted filesystem that documents reliable
+cross-process support for the host locking primitive and must exclude every
+concurrent actor capable of replacing, unlinking, or renaming entries in that
+directory. Network, distributed, or userspace filesystems without the locking
+guarantee are unsupported. `O_NOFOLLOW` where available plus regular-file
+identity checks reject sidecar symlinks and replacement already visible at open
+time, but this tool does
+not claim protection against a same-authority or privileged actor that can race
+directory-entry replacement after those checks.
 
 A POSIX restore syncs the temporary database before verification, creates the
 no-clobber hard link, syncs the destination parent, retains the temporary name

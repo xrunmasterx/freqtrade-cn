@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 from typing import Iterator, Literal
@@ -58,6 +59,7 @@ COMPLETION_FIELDS = {
     "durability",
     "manifest_sha256",
     "creation_platform",
+    "transaction_nonce",
     "bundle_name",
 }
 FAILURE_FILENAME = "creation-failed.json"
@@ -68,6 +70,23 @@ FAILURE_FIELDS = {
     "creation_platform",
     "bundle_name",
 }
+RECEIPT_FIELDS = {
+    "schema_version",
+    "state",
+    "transaction_nonce",
+    "bundle_name",
+    "manifest_sha256",
+    "creation_platform",
+}
+TRANSACTION_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+FINAL_BUNDLE_PATTERN = re.compile(
+    r"\d{8}T\d{6}Z-[A-Za-z0-9][A-Za-z0-9._-]*\Z"
+)
+QUARANTINE_BUNDLE_PATTERN = re.compile(
+    r"\.(?P<bundle>\d{8}T\d{6}Z-[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"\.quarantine-[0-9a-f]{16}\Z"
+)
+MAX_RECEIPT_BYTES = 4096
 
 
 class StateBundleError(RuntimeError):
@@ -259,7 +278,12 @@ def _verified_manifest(manifest: object) -> VerifiedBundle:
     )
 
 
-def _verify_bundle_contents(bundle: Path) -> VerifiedBundle:
+def _verify_bundle_contents(
+    bundle: Path,
+    *,
+    receipt: dict[str, object] | None = None,
+    original_bundle_name: str | None = None,
+) -> VerifiedBundle:
     failure_path = bundle / FAILURE_FILENAME
     if failure_path.exists():
         _load_failure(failure_path)
@@ -273,6 +297,16 @@ def _verify_bundle_contents(bundle: Path) -> VerifiedBundle:
     except (json.JSONDecodeError, UnicodeError, OSError, RecursionError) as error:
         raise StateBundleError("invalid state bundle manifest") from error
     verified = _verified_manifest(manifest_data)
+    manifest_sha256 = sha256_file(manifest_path)
+    if receipt is not None and (
+        receipt["manifest_sha256"] != manifest_sha256
+        or (
+            verified.schema_version == 2
+            and receipt["creation_platform"] != verified.creation_platform
+        )
+        or receipt["bundle_name"] != original_bundle_name
+    ):
+        raise StateBundleError("invalid state bundle transaction receipt")
     if sha256_file(database_path) != verified.database_sha256:
         raise StateBundleError("state bundle database hash mismatch")
     if database_path.stat().st_size != verified.database_size:
@@ -289,24 +323,37 @@ def _verify_bundle_contents(bundle: Path) -> VerifiedBundle:
         verified.schema_version != 2
         or verified.creation_platform != "posix"
         or verified.durability != "atomic-process-crash"
-        or completion["manifest_sha256"] != sha256_file(manifest_path)
+        or receipt is None
+        or original_bundle_name is None
+        or bundle.name != original_bundle_name
+        or completion["manifest_sha256"] != manifest_sha256
         or completion["creation_platform"] != verified.creation_platform
-        or completion["bundle_name"] != bundle.name
+        or completion["transaction_nonce"] != receipt["transaction_nonce"]
+        or completion["bundle_name"] != original_bundle_name
     ):
         raise StateBundleError("invalid state bundle durability completion")
     return replace(verified, durability="power-loss-posix")
 
 
 def verify_bundle(bundle: Path) -> VerifiedBundle:
-    failure_path = bundle / FAILURE_FILENAME
-    if failure_path.exists():
-        failure = _load_failure(failure_path)
-        lock_name = failure["bundle_name"]
-    else:
-        lock_name = bundle.name
-    lock_path = bundle.parent / f".{lock_name}.creation.lock"
-    with _bundle_lock(lock_path, exclusive=False, blocking=False, create=False):
-        return _verify_bundle_contents(bundle)
+    original_bundle_name = _original_bundle_name(bundle.name)
+    lock_path = bundle.parent / f".{original_bundle_name}.creation.lock"
+    with _bundle_lock(
+        lock_path, exclusive=False, blocking=False, create=False
+    ) as descriptor:
+        return _verify_locked_bundle(bundle, descriptor)
+
+
+def _verify_locked_bundle(bundle: Path, descriptor: int) -> VerifiedBundle:
+    receipt = _read_receipt(descriptor)
+    original_bundle_name = _original_bundle_name(bundle.name)
+    if receipt["state"] != "success" or receipt["bundle_name"] != original_bundle_name:
+        raise StateBundleError("state bundle transaction is not complete")
+    return _verify_bundle_contents(
+        bundle,
+        receipt=receipt,
+        original_bundle_name=original_bundle_name,
+    )
 
 
 def _load_completion(path: Path) -> dict[str, object]:
@@ -325,10 +372,102 @@ def _load_completion(path: Path) -> dict[str, object]:
         or not SHA256_PATTERN.fullmatch(completion["manifest_sha256"])
         or type(completion["creation_platform"]) is not str
         or completion["creation_platform"] != "posix"
+        or type(completion["transaction_nonce"]) is not str
+        or not TRANSACTION_NONCE_PATTERN.fullmatch(completion["transaction_nonce"])
         or not _is_portable_basename(completion["bundle_name"])
     ):
         raise StateBundleError("invalid state bundle durability completion")
     return completion
+
+
+def _validated_receipt(receipt: object) -> dict[str, object]:
+    if (
+        type(receipt) is not dict
+        or set(receipt) != RECEIPT_FIELDS
+        or not _is_exact_int(receipt["schema_version"])
+        or receipt["schema_version"] != 1
+        or type(receipt["state"]) is not str
+        or receipt["state"] not in {"pending", "success", "failed"}
+        or type(receipt["transaction_nonce"]) is not str
+        or not TRANSACTION_NONCE_PATTERN.fullmatch(receipt["transaction_nonce"])
+        or not _is_portable_basename(receipt["bundle_name"])
+        or not FINAL_BUNDLE_PATTERN.fullmatch(receipt["bundle_name"])
+        or type(receipt["creation_platform"]) is not str
+        or receipt["creation_platform"] not in {"posix", "windows"}
+    ):
+        raise StateBundleError("invalid state bundle transaction receipt")
+    manifest_sha256 = receipt["manifest_sha256"]
+    if receipt["state"] == "success":
+        if type(manifest_sha256) is not str or not SHA256_PATTERN.fullmatch(
+            manifest_sha256
+        ):
+            raise StateBundleError("invalid state bundle transaction receipt")
+    elif manifest_sha256 is not None:
+        raise StateBundleError("invalid state bundle transaction receipt")
+    return receipt
+
+
+def _read_receipt(descriptor: int) -> dict[str, object]:
+    size = os.fstat(descriptor).st_size
+    if size < 1 or size > MAX_RECEIPT_BYTES:
+        raise StateBundleError("invalid state bundle transaction receipt")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    contents = bytearray()
+    while len(contents) < size:
+        chunk = os.read(descriptor, size - len(contents))
+        if not chunk:
+            raise StateBundleError("invalid state bundle transaction receipt")
+        contents.extend(chunk)
+    try:
+        receipt = json.loads(contents.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as error:
+        raise StateBundleError("invalid state bundle transaction receipt") from error
+    return _validated_receipt(receipt)
+
+
+def _write_receipt(descriptor: int, receipt: dict[str, object]) -> None:
+    _validated_receipt(receipt)
+    encoded = (
+        json.dumps(receipt, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_RECEIPT_BYTES:
+        raise StateBundleError("invalid state bundle transaction receipt")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    written = 0
+    while written < len(encoded):
+        count = os.write(descriptor, encoded[written:])
+        if count <= 0:
+            raise StateBundleError("state bundle transaction receipt write failed")
+        written += count
+    os.ftruncate(descriptor, len(encoded))
+    os.fsync(descriptor)
+
+
+def _receipt(
+    *,
+    state: Literal["pending", "success", "failed"],
+    transaction_nonce: str,
+    bundle_name: str,
+    creation_platform: CreationPlatform,
+    manifest_sha256: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "state": state,
+        "transaction_nonce": transaction_nonce,
+        "bundle_name": bundle_name,
+        "manifest_sha256": manifest_sha256,
+        "creation_platform": creation_platform,
+    }
+
+
+def _original_bundle_name(name: str) -> str:
+    if FINAL_BUNDLE_PATTERN.fullmatch(name):
+        return name
+    quarantine = QUARANTINE_BUNDLE_PATTERN.fullmatch(name)
+    if quarantine is not None:
+        return quarantine.group("bundle")
+    raise StateBundleError("invalid state bundle name")
 
 
 def _load_failure(path: Path) -> dict[str, object]:
@@ -526,11 +665,57 @@ def _is_lock_contention(error: OSError) -> bool:
     ) in {33, 36}
 
 
+def _release_and_close_lock(
+    module: object,
+    descriptor: int,
+    *,
+    invalidate_success_on_close_failure: bool = False,
+) -> None:
+    unlock_failed = False
+    try:
+        _release_lock(module, descriptor)
+    except (AttributeError, OSError):
+        unlock_failed = True
+    try:
+        os.close(descriptor)
+        return
+    except OSError as close_error:
+        if invalidate_success_on_close_failure:
+            try:
+                if not unlock_failed:
+                    _acquire_lock(descriptor, exclusive=True, blocking=True)
+                receipt = _read_receipt(descriptor)
+                if receipt["state"] == "success":
+                    _write_receipt(
+                        descriptor,
+                        {
+                            **receipt,
+                            "state": "failed",
+                            "manifest_sha256": None,
+                        },
+                    )
+            except (OSError, StateBundleError):
+                pass
+        try:
+            _release_lock(module, descriptor)
+        except (AttributeError, OSError):
+            pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise StateBundleError("state bundle lock close failed") from close_error
+
+
 @contextmanager
 def _bundle_lock(
     path: Path, *, exclusive: bool, blocking: bool, create: bool = True
-) -> Iterator[None]:
-    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+) -> Iterator[int]:
+    flags = (
+        os.O_RDWR
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     if create:
         flags |= os.O_CREAT
     try:
@@ -539,10 +724,15 @@ def _bundle_lock(
         raise StateBundleError("state bundle locking unavailable") from error
     module: object | None = None
     try:
-        if os.fstat(descriptor).st_size == 0:
-            if not create:
-                raise StateBundleError("state bundle locking unavailable")
-            os.write(descriptor, b"\0")
+        descriptor_status = os.fstat(descriptor)
+        path_status = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(descriptor_status.st_mode)
+            or not stat.S_ISREG(path_status.st_mode)
+            or descriptor_status.st_dev != path_status.st_dev
+            or descriptor_status.st_ino != path_status.st_ino
+        ):
+            raise StateBundleError("state bundle locking unavailable")
         try:
             module = _acquire_lock(
                 descriptor, exclusive=exclusive, blocking=blocking
@@ -551,15 +741,15 @@ def _bundle_lock(
             if not blocking and _is_lock_contention(error):
                 raise StateBundleError("state bundle creation in progress") from error
             raise StateBundleError("state bundle locking unavailable") from error
-        yield
+        yield descriptor
     finally:
-        try:
-            if module is not None:
-                try:
-                    _release_lock(module, descriptor)
-                except (AttributeError, OSError) as error:
-                    raise StateBundleError("state bundle locking unavailable") from error
-        finally:
+        if module is not None:
+            _release_and_close_lock(
+                module,
+                descriptor,
+                invalidate_success_on_close_failure=exclusive,
+            )
+        else:
             os.close(descriptor)
 
 
@@ -614,9 +804,28 @@ def _create_bundle(
     if final_bundle.parent != output_root:
         raise StateBundleError("backup bundle already exists or has an invalid path")
     lock_path = output_root / f".{final_bundle.name}.creation.lock"
-    with _acquire_creation_lock(lock_path):
+    with _acquire_creation_lock(lock_path) as lock_descriptor:
         if final_bundle.exists():
             raise StateBundleError("backup bundle already exists or has an invalid path")
+        transaction_nonce = secrets.token_hex(16)
+        creation_platform = _creation_platform()
+        pending_receipt = _receipt(
+            state="pending",
+            transaction_nonce=transaction_nonce,
+            bundle_name=final_bundle.name,
+            creation_platform=creation_platform,
+        )
+        try:
+            _write_receipt(lock_descriptor, pending_receipt)
+        except BaseException:
+            try:
+                _write_receipt(
+                    lock_descriptor,
+                    {**pending_receipt, "state": "failed"},
+                )
+            except BaseException:
+                pass
+            raise
         return _create_bundle_under_lock(
             purpose=purpose,
             identity=identity,
@@ -624,6 +833,9 @@ def _create_bundle(
             output_root=output_root,
             created_at=created_at,
             final_bundle=final_bundle,
+            lock_descriptor=lock_descriptor,
+            transaction_nonce=transaction_nonce,
+            creation_platform=creation_platform,
             source_identity=source_identity,
             source_parent_identity=source_parent_identity,
         )
@@ -637,6 +849,9 @@ def _create_bundle_under_lock(
     output_root: Path,
     created_at: datetime,
     final_bundle: Path,
+    lock_descriptor: int,
+    transaction_nonce: str,
+    creation_platform: CreationPlatform,
     source_identity: _PathIdentity | None,
     source_parent_identity: _PathIdentity | None,
 ) -> Path:
@@ -667,7 +882,7 @@ def _create_bundle_under_lock(
             "service": identity if purpose == "service-state" else None,
             "archive_label": identity if purpose == "archive" else None,
             "created_at_utc": created_at.isoformat().replace("+00:00", "Z"),
-            "creation_platform": _creation_platform(),
+            "creation_platform": creation_platform,
             "durability": _new_bundle_durability(),
             "sqlite_version": sqlite3.sqlite_version,
             "source_filename": source.name,
@@ -700,6 +915,7 @@ def _create_bundle_under_lock(
                         "durability": "power-loss-posix",
                         "manifest_sha256": sha256_file(manifest_path),
                         "creation_platform": "posix",
+                        "transaction_nonce": transaction_nonce,
                         "bundle_name": final_bundle.name,
                     },
                     indent=2,
@@ -717,13 +933,43 @@ def _create_bundle_under_lock(
             if (
                 completion["manifest_sha256"] != sha256_file(manifest_path)
                 or completion["creation_platform"] != "posix"
+                or completion["transaction_nonce"] != transaction_nonce
                 or completion["bundle_name"] != final_bundle.name
             ):
                 raise StateBundleError("invalid state bundle durability completion")
-            if _verify_bundle_contents(final_bundle).durability != "power-loss-posix":
-                raise StateBundleError("state bundle durability completion failed")
+        manifest_sha256 = sha256_file(final_bundle / "manifest.json")
+        success_receipt = _receipt(
+            state="success",
+            transaction_nonce=transaction_nonce,
+            bundle_name=final_bundle.name,
+            creation_platform=creation_platform,
+            manifest_sha256=manifest_sha256,
+        )
+        if _is_posix() and _verify_bundle_contents(
+            final_bundle,
+            receipt=success_receipt,
+            original_bundle_name=final_bundle.name,
+        ).durability != "power-loss-posix":
+            raise StateBundleError("state bundle durability completion failed")
+        _write_receipt(
+            lock_descriptor,
+            success_receipt,
+        )
         return final_bundle
     except BaseException:
+        receipt_error: BaseException | None = None
+        try:
+            _write_receipt(
+                lock_descriptor,
+                _receipt(
+                    state="failed",
+                    transaction_nonce=transaction_nonce,
+                    bundle_name=final_bundle.name,
+                    creation_platform=creation_platform,
+                ),
+            )
+        except BaseException as error:
+            receipt_error = error
         if published_final:
             quarantine = output_root / (
                 f".{final_bundle.name}.quarantine-{secrets.token_hex(8)}"
@@ -743,6 +989,10 @@ def _create_bundle_under_lock(
                 raise StateBundleError(
                     "state bundle failure recording failed"
                 ) from failure_error
+        if receipt_error is not None:
+            raise StateBundleError(
+                "state bundle transaction recording failed"
+            ) from receipt_error
         raise
 
 
