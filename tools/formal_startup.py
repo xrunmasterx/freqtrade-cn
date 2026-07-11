@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -29,6 +30,182 @@ TRADING_STARTUP_MILESTONES = (
     "Using user-data directory: /freqtrade/state ...",
     "Checking exchange...",
     "Instance is running with dry_run enabled",
+)
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+LOG_LINE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - "
+    r"(?P<logger>[a-z0-9_.]+) - (?P<level>INFO|WARNING|ERROR) - (?P<message>.+)$"
+)
+APPROVED_LOG_RECORDS = {
+    (
+        "freqtrade.configuration.load_config",
+        "INFO",
+        "Using config: /freqtrade/config/runtime.json ...",
+    ),
+    (
+        "freqtrade.configuration.load_config",
+        "INFO",
+        "Using config: /freqtrade/config/trading-safety.json ...",
+    ),
+    ("freqtrade.loggers", "INFO", "Enabling colorized output."),
+    ("freqtrade.loggers", "INFO", "Logfile configured"),
+    ("freqtrade.loggers", "INFO", "Verbosity set to 0"),
+    ("freqtrade.configuration.configuration", "INFO", "Runmode set to dry_run."),
+    (
+        "freqtrade.configuration.configuration",
+        "INFO",
+        "Using additional Strategy lookup path: /freqtrade/user_data/strategies",
+    ),
+    ("freqtrade.configuration.configuration", "INFO", "Parameter --db-url detected ..."),
+    ("freqtrade.configuration.configuration", "INFO", "Dry run is enabled"),
+    (
+        "freqtrade.configuration.configuration",
+        "INFO",
+        'Using DB: "sqlite:////freqtrade/state/trades.sqlite"',
+    ),
+    (
+        "freqtrade.configuration.configuration",
+        "INFO",
+        "Using user-data directory: /freqtrade/state ...",
+    ),
+    (
+        "freqtrade.configuration.directory_operations",
+        "INFO",
+        "Created data directory: None",
+    ),
+    ("freqtrade.exchange.check_exchange", "INFO", "Checking exchange..."),
+    ("freqtrade.configuration.configuration", "INFO", "Using pairlist from configuration."),
+    ("freqtrade.exchange.exchange", "INFO", "Instance is running with dry_run enabled"),
+    ("freqtrade.exchange.exchange", "ERROR", "Could not load markets."),
+    ("freqtrade.freqtradebot", "INFO", "Cleaning up modules ..."),
+    (
+        "freqtrade.freqtradebot",
+        "WARNING",
+        "Exception during cleanup: AttributeError type object 'Trade' has no attribute 'session'",
+    ),
+    ("freqtrade", "ERROR", EXTERNAL_NETWORK_BOUNDARY),
+}
+APPROVED_LOG_RECORD_PATTERNS = (
+    re.compile(r"^freqtrade\|INFO\|freqtrade 2026\.7-dev$"),
+    re.compile(r"^numexpr\.utils\|INFO\|Note: NumExpr detected \d+ cores but "
+               r'"NUMEXPR_MAX_THREADS" not set, so enforcing safe limit of \d+\.$'),
+    re.compile(r"^numexpr\.utils\|INFO\|NumExpr defaulting to \d+ threads\.$"),
+    re.compile(r"^freqtrade\.worker\|INFO\|Starting worker 2026\.7-dev$"),
+    re.compile(
+        r"^freqtrade\.configuration\.environment_vars\|INFO\|Loading variable "
+        r"'FREQTRADE__API_SERVER__(?:JWT_SECRET_KEY|PASSWORD|WS_TOKEN)'$"
+    ),
+    re.compile(
+        r"^freqtrade\.configuration\.environment_vars\|INFO\|Key parts: "
+        r"\['API_SERVER', '(?:JWT_SECRET_KEY|PASSWORD|WS_TOKEN)'\]$"
+    ),
+    re.compile(
+        r"^freqtrade\.configuration\.configuration\|INFO\|"
+        r"Using max_open_trades: [23] \.\.\.$"
+    ),
+    re.compile(
+        r"^freqtrade\.configuration\.configuration\|INFO\|Using data directory: "
+        r"/freqtrade/state/data/(?:bitget|okx) \.\.\.$"
+    ),
+    re.compile(
+        r'^freqtrade\.exchange\.check_exchange\|INFO\|Exchange "(?:bitget|okx)" '
+        r"is officially supported by the Freqtrade development team\.$"
+    ),
+    re.compile(r"^freqtrade\.exchange\.exchange\|INFO\|Using CCXT 4\.5\.61$"),
+    re.compile(
+        r"^freqtrade\.exchange\.exchange\|INFO\|Applying additional ccxt config: "
+        r"(?:\{'httpsProxy': 'http://host\.docker\.internal:12639', "
+        r"'wsProxy': 'http://host\.docker\.internal:12639',|"
+        r"\{'options': \{'defaultType': 'swap', 'fetchMarkets': "
+        r"\{'types': \['swap'\]\}\}, 'httpsProxy':)$"
+    ),
+    re.compile(r'^freqtrade\.exchange\.exchange\|INFO\|Using Exchange "(?:Bitget|OKX)"$'),
+    re.compile(
+        r"^freqtrade\.exchange\.common\|WARNING\|_load_async_markets\(\) returned "
+        r"exception: \"Error in reload_markets due to ExchangeNotAvailable\. "
+        r"Message: (?:bitget|okx) GET$"
+    ),
+)
+APPROVED_RAW_LINES = {
+    "'options': {'defaultType': 'spot', 'fetchMarkets': {'types': ['spot']}}}",
+    "'http://host.docker.internal:12639', 'wsProxy': 'http://host.docker.internal:12639'}",
+    "Traceback (most recent call last):",
+    "The above exception was the direct cause of the following exception:",
+    "    resp = await self._resolver.getaddrinfo(",
+    "    ...<5 lines>...",
+    "    )",
+    "    hosts = await self._resolve_host(host, port, traces=traces)",
+    "    return await asyncio.shield(resolved_host_task)",
+    "    addrs = await self._resolver.resolve(host, port, family=self._family)",
+    "    raise OSError(None, msg) from exc",
+    "    async with session_method(yarl.URL(url, encoded=True),",
+    "                              data=encoded_body,",
+    "                              headers=request_headers,",
+    "                              timeout=(self.timeout / 1000),",
+    "                              proxy=final_proxy) as response:",
+    "    self._resp: _RetType_co = await self._coro",
+    "    resp = await handler(req)",
+    "    conn = await self._connector.connect(",
+    "        req, traces=traces, timeout=real_timeout",
+    "    proto = await self._create_connection(req, traces, timeout)",
+    "    _, proto = await self._create_proxy_connection(req, traces, timeout)",
+    "    transport, proto = await self._create_direct_connection(",
+    "        proxy_req, [], timeout, client_error=ClientProxyConnectionError",
+    "    raise ClientConnectorDNSError(req.connection_key, exc) from exc",
+    "    await self._api_async.load_markets(reload=reload, params={})",
+    "    raise e",
+    "    result = await self.markets_loading",
+    "    currencies = await self.fetch_currencies()",
+    "    response = await self.publicSpotGetV2SpotPublicCoins(params)",
+    "    markets = await self.fetch_markets(params)",
+    "    promises = await asyncio.gather(*promises)",
+    "    response = await self.publicGetPublicInstruments(self.extend(request, params))",
+    "    return await self.fetch2(path, api, method, params, headers, body, config)",
+    "    return await self.fetch(request['url'], request['method'], "
+    "request['headers'], request['body'])",
+    "    raise ExchangeNotAvailable(details) from e",
+    "    retrier(self._load_async_markets, retries=retries)(reload=True)",
+    "    return wrapper(*args, **kwargs)",
+    "    raise ex",
+    "    return f(*args, **kwargs)",
+    "    markets = self.loop.run_until_complete(self._api_reload_markets(reload=reload))",
+    "    return future.result()",
+    "    raise TemporaryError(",
+    '        f"Error in reload_markets due to {e.__class__.__name__}. Message: {e}"',
+    "    ) from e",
+}
+APPROVED_RAW_LINE_PATTERNS = (
+    re.compile(r"^\s*[\^~]+$"),
+    re.compile(
+        r'^  File "(?:/home/ftuser/\.local/lib/python3\.14/site-packages/'
+        r"(?:aiohttp/(?:resolver|connector|client)\.py|ccxt/async_support/"
+        r"(?:base/exchange|bitget|okx)\.py)|/freqtrade/freqtrade/exchange/"
+        r"(?:exchange|common)\.py|/usr/local/lib/python3\.14/asyncio/base_events\.py)"
+        r'", line \d+, in [a-zA-Z0-9_]+$'
+    ),
+    re.compile(r"^aiodns\.error\.DNSError: \(11, 'Could not contact DNS servers'\)$"),
+    re.compile(r"^OSError: \[Errno None\] Could not contact DNS servers$"),
+    re.compile(
+        r"^aiohttp\.client_exceptions\.ClientConnectorDNSError: Cannot connect to "
+        r"host host\.docker\.internal:12639 ssl:default "
+        r"\[Could not contact DNS servers\]$"
+    ),
+    re.compile(
+        r"^(?:https://api\.bitget\.com/api/v2/spot/public/coins|"
+        r"https://www\.okx\.com/api/v5/public/instruments\?instType=SWAP)\"\. "
+        r"(?:Retrying still for [123] times|Giving up)\.$"
+    ),
+    re.compile(
+        r"^ccxt\.base\.errors\.ExchangeNotAvailable: (?:bitget GET "
+        r"https://api\.bitget\.com/api/v2/spot/public/coins|okx GET "
+        r"https://www\.okx\.com/api/v5/public/instruments\?instType=SWAP)$"
+    ),
+    re.compile(
+        r"^freqtrade\.exceptions\.TemporaryError: Error in reload_markets due to "
+        r"ExchangeNotAvailable\. Message: (?:bitget GET "
+        r"https://api\.bitget\.com/api/v2/spot/public/coins|okx GET "
+        r"https://www\.okx\.com/api/v5/public/instruments\?instType=SWAP)$"
+    ),
 )
 
 
@@ -215,15 +392,45 @@ def _is_expected_trading_boundary(
     if returncode == 0 or len(expectation.accepted_network_error_markers) != 1:
         return False
     boundary = expectation.accepted_network_error_markers[0]
-    if not output.rstrip().endswith(boundary):
+    lines = [
+        ANSI_ESCAPE.sub("", line).rstrip()
+        for line in output.splitlines()
+        if ANSI_ESCAPE.sub("", line).strip()
+    ]
+    if not lines or not all(_is_approved_trading_line(line) for line in lines):
         return False
+    final_record = LOG_LINE.fullmatch(lines[-1])
+    if final_record is None or (
+        final_record.group("logger"),
+        final_record.group("level"),
+        final_record.group("message"),
+    ) != ("freqtrade", "ERROR", boundary):
+        return False
+    normalized_output = "\n".join(lines)
     search_from = 0
     for milestone in (*TRADING_STARTUP_MILESTONES, boundary):
-        position = output.find(milestone, search_from)
+        position = normalized_output.find(milestone, search_from)
         if position < 0:
             return False
         search_from = position + len(milestone)
     return True
+
+
+def _is_approved_trading_line(line: str) -> bool:
+    log_record = LOG_LINE.fullmatch(line)
+    if log_record is not None:
+        record = (
+            log_record.group("logger"),
+            log_record.group("level"),
+            log_record.group("message"),
+        )
+        if record in APPROVED_LOG_RECORDS:
+            return True
+        encoded = "|".join(record)
+        return any(pattern.fullmatch(encoded) for pattern in APPROVED_LOG_RECORD_PATTERNS)
+    if line in APPROVED_RAW_LINES:
+        return True
+    return any(pattern.fullmatch(line) for pattern in APPROVED_RAW_LINE_PATTERNS)
 
 
 def verify_formal_startup(

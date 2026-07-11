@@ -16,19 +16,28 @@ ROOT_SAFETY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "root-safety.yml"
 
 
 def accepted_trading_transcript() -> str:
+    timestamp = "2026-07-11 09:30:19,000"
     return "\n".join(
         (
-            "Starting worker 2026.7-dev",
+            f"{timestamp} - freqtrade.worker - INFO - Starting worker 2026.7-dev",
+            f"{timestamp} - freqtrade.configuration.load_config - INFO - "
             "Using config: /freqtrade/config/runtime.json ...",
+            f"{timestamp} - freqtrade.configuration.load_config - INFO - "
             "Using config: /freqtrade/config/trading-safety.json ...",
+            f"{timestamp} - freqtrade.configuration.configuration - INFO - "
             "Runmode set to dry_run.",
+            f"{timestamp} - freqtrade.configuration.configuration - INFO - "
             "Using additional Strategy lookup path: /freqtrade/user_data/strategies",
+            f'{timestamp} - freqtrade.configuration.configuration - INFO - '
             'Using DB: "sqlite:////freqtrade/state/trades.sqlite"',
+            f"{timestamp} - freqtrade.configuration.configuration - INFO - "
             "Using user-data directory: /freqtrade/state ...",
-            "Checking exchange...",
+            f"{timestamp} - freqtrade.exchange.check_exchange - INFO - Checking exchange...",
+            f"{timestamp} - freqtrade.exchange.exchange - INFO - "
             "Instance is running with dry_run enabled",
-            "Could not load markets, therefore cannot start. "
-            "Please investigate the above error for more details.",
+            f"{timestamp} - freqtrade - ERROR - "
+            "Could not load markets, therefore cannot start. Please investigate "
+            "the above error for more details.",
         )
     )
 
@@ -179,6 +188,17 @@ class FormalStartupUnitTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     formal_startup.verify_startup_result(expectation, completed)
 
+        approved_lines = accepted_trading_transcript().splitlines()
+        for insertion in range(len(approved_lines) + 1):
+            with self.subTest(unapproved_line_position=insertion):
+                mutated_lines = approved_lines.copy()
+                mutated_lines.insert(insertion, "UNAPPROVED STARTUP OUTPUT")
+                completed = subprocess.CompletedProcess(
+                    [], 2, "\n".join(mutated_lines), ""
+                )
+                with self.assertRaises(RuntimeError):
+                    formal_startup.verify_startup_result(expectation, completed)
+
     def test_research_requires_ping_and_bounded_clean_stop(self) -> None:
         expectation = replace(
             formal_startup.STARTUP_EXPECTATIONS["freqtrade-research"],
@@ -200,8 +220,20 @@ class FormalStartupUnitTests(unittest.TestCase):
 
     def test_cleanup_stop_or_remove_failure_rejects_success_without_leaking(self) -> None:
         secret = "cleanup-secret-that-must-not-leak"
-        for stop_status, remove_status in ((1, 0), (0, 1)):
-            with self.subTest(stop_status=stop_status, remove_status=remove_status):
+        success = subprocess.CompletedProcess([], 0, "", "")
+        failures = (
+            (subprocess.CompletedProcess([], 1, "", secret), success),
+            (success, subprocess.CompletedProcess([], 1, "", secret)),
+            (subprocess.TimeoutExpired(["docker", "stop"], 10), success),
+            (OSError(secret), success),
+            (success, subprocess.TimeoutExpired(["docker", "rm"], 10)),
+            (success, OSError(secret)),
+        )
+        for stop_result, remove_result in failures:
+            with self.subTest(
+                stop_result=type(stop_result).__name__,
+                remove_result=type(remove_result).__name__,
+            ):
                 rendered = subprocess.CompletedProcess(
                     [],
                     0,
@@ -212,8 +244,8 @@ class FormalStartupUnitTests(unittest.TestCase):
                 )
                 results = (
                     rendered,
-                    subprocess.CompletedProcess([], stop_status, "", secret),
-                    subprocess.CompletedProcess([], remove_status, "", secret),
+                    stop_result,
+                    remove_result,
                 )
 
                 def mark_launched(
@@ -252,6 +284,53 @@ class FormalStartupUnitTests(unittest.TestCase):
                     str(caught.exception), "freqtrade formal startup verification failed"
                 )
                 self.assertNotIn(secret, str(caught.exception))
+
+    def test_primary_verification_failure_precedes_cleanup_failures(self) -> None:
+        rendered = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps({"services": {"freqtrade": {"command": ["trade"]}}}),
+            "",
+        )
+        primary = RuntimeError("freqtrade formal startup verification failed")
+
+        def fail_after_launch(
+            expectation: formal_startup.StartupExpectation,
+            *,
+            command: list[str],
+            cid_path: Path,
+            timeout_seconds: int,
+        ) -> None:
+            cid_path.write_text("container-id", encoding="utf-8")
+            raise primary
+
+        cleanup_secret = "cleanup-output-that-must-not-leak"
+        results = (
+            rendered,
+            subprocess.CompletedProcess([], 1, "", cleanup_secret),
+            OSError(cleanup_secret),
+        )
+        with mock.patch.object(
+            formal_startup.subprocess, "run", side_effect=results
+        ) as run, mock.patch.object(
+            formal_startup, "_prepare_probe"
+        ), mock.patch.object(
+            formal_startup, "build_offline_docker_command", return_value=[]
+        ), mock.patch.object(
+            formal_startup, "_verify_trading_startup", side_effect=fail_after_launch
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                formal_startup.verify_formal_startup(
+                    "freqtrade", image="freqtrade-cn:local", repo_root=REPO_ROOT
+                )
+
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(
+            run.call_args_list[2].args[0],
+            ["docker", "rm", "--force", "container-id"],
+        )
+        self.assertNotIn(cleanup_secret, str(caught.exception))
 
     def test_failure_output_is_secret_and_row_safe(self) -> None:
         expectation = formal_startup.STARTUP_EXPECTATIONS["freqtrade"]
