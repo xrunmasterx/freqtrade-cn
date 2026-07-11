@@ -16,7 +16,19 @@ from typing import Any, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXTERNAL_NETWORK_BOUNDARY = (
-    "Could not load markets, therefore cannot start. Please investigate the above error"
+    "Could not load markets, therefore cannot start. "
+    "Please investigate the above error for more details."
+)
+TRADING_STARTUP_MILESTONES = (
+    "Starting worker ",
+    "Using config: /freqtrade/config/runtime.json ...",
+    "Using config: /freqtrade/config/trading-safety.json ...",
+    "Runmode set to dry_run.",
+    "Using additional Strategy lookup path: /freqtrade/user_data/strategies",
+    'Using DB: "sqlite:////freqtrade/state/trades.sqlite"',
+    "Using user-data directory: /freqtrade/state ...",
+    "Checking exchange...",
+    "Instance is running with dry_run enabled",
 )
 
 
@@ -192,11 +204,26 @@ def verify_startup_result(
     if expectation.requires_healthcheck:
         if completed.returncode == 0:
             return
-    elif completed.returncode != 0 and any(
-        marker in output for marker in expectation.accepted_network_error_markers
-    ):
+    elif _is_expected_trading_boundary(expectation, completed.returncode, output):
         return
     raise RuntimeError(f"{expectation.service} formal startup verification failed")
+
+
+def _is_expected_trading_boundary(
+    expectation: StartupExpectation, returncode: int, output: str
+) -> bool:
+    if returncode == 0 or len(expectation.accepted_network_error_markers) != 1:
+        return False
+    boundary = expectation.accepted_network_error_markers[0]
+    if not output.rstrip().endswith(boundary):
+        return False
+    search_from = 0
+    for milestone in (*TRADING_STARTUP_MILESTONES, boundary):
+        position = output.find(milestone, search_from)
+        if position < 0:
+            return False
+        search_from = position + len(milestone)
+    return True
 
 
 def verify_formal_startup(
@@ -270,24 +297,34 @@ def verify_formal_startup(
             if cid_path.is_file():
                 container_id = cid_path.read_text(encoding="utf-8").strip()
                 if container_id:
-                    stopped = subprocess.run(
-                        ["docker", "stop", "--time", "5", container_id],
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                        timeout=10,
-                    )
-                    subprocess.run(
-                        ["docker", "rm", "--force", container_id],
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                        timeout=10,
-                    )
-                    if verification_succeeded and stopped.returncode != 0:
-                        raise RuntimeError(
-                            f"{expectation.service} formal startup verification failed"
-                        )
+                    try:
+                        _cleanup_container(expectation.service, container_id)
+                    except RuntimeError:
+                        if verification_succeeded:
+                            raise
+
+
+def _cleanup_container(service: str, container_id: str) -> None:
+    failed = False
+    commands = (
+        ["docker", "stop", "--time", "5", container_id],
+        ["docker", "rm", "--force", container_id],
+    )
+    for command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            failed = True
+        else:
+            failed = failed or completed.returncode != 0
+    if failed:
+        raise RuntimeError(f"{service} formal startup verification failed")
 
 
 def _prepare_probe(

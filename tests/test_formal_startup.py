@@ -1,16 +1,36 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from tools import formal_startup
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROOT_SAFETY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "root-safety.yml"
+
+
+def accepted_trading_transcript() -> str:
+    return "\n".join(
+        (
+            "Starting worker 2026.7-dev",
+            "Using config: /freqtrade/config/runtime.json ...",
+            "Using config: /freqtrade/config/trading-safety.json ...",
+            "Runmode set to dry_run.",
+            "Using additional Strategy lookup path: /freqtrade/user_data/strategies",
+            'Using DB: "sqlite:////freqtrade/state/trades.sqlite"',
+            "Using user-data directory: /freqtrade/state ...",
+            "Checking exchange...",
+            "Instance is running with dry_run enabled",
+            "Could not load markets, therefore cannot start. "
+            "Please investigate the above error for more details.",
+        )
+    )
 
 
 def local_image_available() -> bool:
@@ -133,12 +153,27 @@ class FormalStartupUnitTests(unittest.TestCase):
         named_boundary = subprocess.CompletedProcess(
             [],
             2,
-            "Could not load markets, therefore cannot start. Please investigate the above error",
+            accepted_trading_transcript(),
             "",
         )
         formal_startup.verify_startup_result(expectation, named_boundary)
 
-        for output in ("unexpected failure", "ExchangeNotAvailable", "Permission denied"):
+        contaminated = (
+            "Traceback (most recent call last):\nRuntimeError: unrelated failure",
+            "AssertionError: startup invariant failed",
+            "ConfigurationError: malformed unrelated setting",
+            "unknown startup failure",
+        )
+        failures = (
+            "unexpected failure",
+            "ExchangeNotAvailable",
+            "Permission denied",
+            *(
+                f"{accepted_trading_transcript()}\n{mutation}"
+                for mutation in contaminated
+            ),
+        )
+        for output in failures:
             with self.subTest(output=output):
                 completed = subprocess.CompletedProcess([], 2, output, "")
                 with self.assertRaises(RuntimeError):
@@ -162,6 +197,61 @@ class FormalStartupUnitTests(unittest.TestCase):
             )
         self.assertIn("--detach", command)
         self.assertIn("--cidfile", command)
+
+    def test_cleanup_stop_or_remove_failure_rejects_success_without_leaking(self) -> None:
+        secret = "cleanup-secret-that-must-not-leak"
+        for stop_status, remove_status in ((1, 0), (0, 1)):
+            with self.subTest(stop_status=stop_status, remove_status=remove_status):
+                rendered = subprocess.CompletedProcess(
+                    [],
+                    0,
+                    json.dumps(
+                        {"services": {"freqtrade": {"command": ["trade"]}}}
+                    ),
+                    "",
+                )
+                results = (
+                    rendered,
+                    subprocess.CompletedProcess([], stop_status, "", secret),
+                    subprocess.CompletedProcess([], remove_status, "", secret),
+                )
+
+                def mark_launched(
+                    expectation: formal_startup.StartupExpectation,
+                    *,
+                    command: list[str],
+                    cid_path: Path,
+                    timeout_seconds: int,
+                ) -> None:
+                    cid_path.write_text("container-id", encoding="utf-8")
+
+                with mock.patch.object(
+                    formal_startup.subprocess, "run", side_effect=results
+                ) as run, mock.patch.object(
+                    formal_startup, "_prepare_probe"
+                ), mock.patch.object(
+                    formal_startup, "build_offline_docker_command", return_value=[]
+                ), mock.patch.object(
+                    formal_startup, "_verify_trading_startup", side_effect=mark_launched
+                ):
+                    with self.assertRaises(RuntimeError) as caught:
+                        formal_startup.verify_formal_startup(
+                            "freqtrade", image="freqtrade-cn:local", repo_root=REPO_ROOT
+                        )
+
+                self.assertEqual(run.call_count, 3)
+                self.assertEqual(
+                    run.call_args_list[1].args[0],
+                    ["docker", "stop", "--time", "5", "container-id"],
+                )
+                self.assertEqual(
+                    run.call_args_list[2].args[0],
+                    ["docker", "rm", "--force", "container-id"],
+                )
+                self.assertEqual(
+                    str(caught.exception), "freqtrade formal startup verification failed"
+                )
+                self.assertNotIn(secret, str(caught.exception))
 
     def test_failure_output_is_secret_and_row_safe(self) -> None:
         expectation = formal_startup.STARTUP_EXPECTATIONS["freqtrade"]
