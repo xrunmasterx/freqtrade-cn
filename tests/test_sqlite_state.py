@@ -174,6 +174,19 @@ class SQLiteStateTests(unittest.TestCase):
         expected = "power-loss-posix" if sqlite_state._is_posix() else "atomic-process-crash"
         self.assertEqual(verified.durability, expected)
 
+    def test_schema2_manifest_accepts_only_atomic_process_crash(self) -> None:
+        bundle = self.create_service_bundle()
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        (bundle / sqlite_state.COMPLETION_FILENAME).unlink(missing_ok=True)
+
+        for durability in ("unknown", "power-loss-posix"):
+            with self.subTest(durability=durability):
+                manifest["durability"] = durability
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaisesRegex(sqlite_state.StateBundleError, "durability"):
+                    sqlite_state.verify_bundle(bundle)
+
     def test_schema1_verifies_with_unknown_durability_and_requires_legacy_flag(self) -> None:
         bundle = self.create_service_bundle()
         manifest_path = bundle / "manifest.json"
@@ -589,7 +602,7 @@ class SQLiteStateTests(unittest.TestCase):
 
     def test_posix_backup_orders_file_and_directory_sync_before_success(self) -> None:
         events: list[str] = []
-        original_verify = sqlite_state.verify_bundle
+        original_verify = sqlite_state._verify_bundle_contents
         original_replace = os.replace
 
         def record_file_sync(path: Path) -> None:
@@ -624,7 +637,9 @@ class SQLiteStateTests(unittest.TestCase):
             mock.patch.object(
                 sqlite_state, "_sync_directory", side_effect=record_directory_sync
             ),
-            mock.patch.object(sqlite_state, "verify_bundle", side_effect=record_verify),
+            mock.patch.object(
+                sqlite_state, "_verify_bundle_contents", side_effect=record_verify
+            ),
             mock.patch.object(os, "replace", side_effect=record_replace),
         ):
             bundle = self.create_service_bundle()
@@ -804,6 +819,7 @@ class SQLiteStateTests(unittest.TestCase):
                 injected = False
 
                 def maybe_fail_file(path: Path) -> None:
+                    nonlocal injected
                     if path.name == "database.sqlite":
                         point = "database"
                     elif path.name == "manifest.json":
@@ -811,7 +827,8 @@ class SQLiteStateTests(unittest.TestCase):
                     else:
                         point = "completion"
                     events.append(point)
-                    if point == target:
+                    if point == target and not injected:
+                        injected = True
                         raise OSError(f"injected {target} sync failure")
 
                 def maybe_fail_directory(_path: Path) -> None:
@@ -1062,6 +1079,325 @@ class SQLiteStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(sqlite_state.StateBundleError, "completion"):
             sqlite_state.verify_bundle(bundle)
+
+    def test_completion_record_rejects_exact_field_type_hash_platform_and_name_mutations(
+        self,
+    ) -> None:
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file"),
+            mock.patch.object(sqlite_state, "_sync_directory"),
+        ):
+            bundle = self.create_service_bundle()
+        completion_path = bundle / sqlite_state.COMPLETION_FILENAME
+        original = json.loads(completion_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(original), sqlite_state.COMPLETION_FIELDS)
+        self.assertEqual(original["creation_platform"], "posix")
+        mutations = {
+            "extra-field": {**original, "extra": "value"},
+            "schema-type": {**original, "schema_version": True},
+            "durability-type": {**original, "durability": True},
+            "hash": {**original, "manifest_sha256": "0" * 64},
+            "platform": {**original, "creation_platform": "windows"},
+            "platform-type": {**original, "creation_platform": True},
+            "name": {**original, "bundle_name": "another-bundle"},
+            "name-type": {**original, "bundle_name": True},
+        }
+
+        for label, completion in mutations.items():
+            with self.subTest(label=label):
+                completion_path.write_text(json.dumps(completion), encoding="utf-8")
+                with self.assertRaisesRegex(sqlite_state.StateBundleError, "completion"):
+                    sqlite_state.verify_bundle(bundle)
+        completion_path.write_text(json.dumps(original), encoding="utf-8")
+        self.assertEqual(sqlite_state.verify_bundle(bundle).durability, "power-loss-posix")
+
+    def test_verify_fails_creation_in_progress_while_creator_holds_final_barrier_lock(
+        self,
+    ) -> None:
+        reached_boundaries: list[str] = []
+        observed_contention: list[str] = []
+        original_replace = os.replace
+
+        def observe_final_barrier(path: Path) -> None:
+            if path.name.endswith("-freqtrade"):
+                reached_boundaries.append("final-fsync")
+                try:
+                    sqlite_state.verify_bundle(path)
+                except sqlite_state.StateBundleError as error:
+                    observed_contention.append(str(error))
+
+        def observe_completion_rename(source: Path, destination: Path) -> None:
+            original_replace(source, destination)
+            if destination.name == sqlite_state.COMPLETION_FILENAME:
+                reached_boundaries.append("completion-rename")
+                try:
+                    sqlite_state.verify_bundle(destination.parent)
+                except sqlite_state.StateBundleError as error:
+                    observed_contention.append(str(error))
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file"),
+            mock.patch.object(
+                sqlite_state, "_sync_directory", side_effect=observe_final_barrier
+            ),
+            mock.patch.object(os, "replace", side_effect=observe_completion_rename),
+        ):
+            bundle = self.create_service_bundle()
+
+        self.assertEqual(reached_boundaries, ["completion-rename", "final-fsync"])
+        self.assertEqual(
+            observed_contention,
+            ["state bundle creation in progress", "state bundle creation in progress"],
+        )
+        self.assertEqual(sqlite_state.verify_bundle(bundle).durability, "power-loss-posix")
+
+    def test_creation_lock_releases_after_success_and_every_exception(self) -> None:
+        final_name = "20260711T000000Z-freqtrade"
+        lock_path = self.output_root / f".{final_name}.creation.lock"
+
+        bundle = self.create_service_bundle()
+        with sqlite_state._bundle_lock(lock_path, exclusive=True, blocking=False):
+            self.assertTrue(bundle.is_dir())
+
+        shutil.rmtree(self.output_root)
+        with mock.patch.object(
+            sqlite_state, "online_backup", side_effect=OSError("injected construction failure")
+        ):
+            with self.assertRaisesRegex(OSError, "construction failure"):
+                self.create_service_bundle()
+        with sqlite_state._bundle_lock(lock_path, exclusive=True, blocking=False):
+            pass
+
+        shutil.rmtree(self.output_root)
+        directory_sync_count = 0
+
+        def fail_after_publication(_path: Path) -> None:
+            nonlocal directory_sync_count
+            directory_sync_count += 1
+            if directory_sync_count == 2:
+                raise OSError("injected publication failure")
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file"),
+            mock.patch.object(
+                sqlite_state, "_sync_directory", side_effect=fail_after_publication
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "publication failure"):
+                self.create_service_bundle()
+        with sqlite_state._bundle_lock(lock_path, exclusive=True, blocking=False):
+            pass
+
+    def test_unsupported_creation_lock_fails_before_staging(self) -> None:
+        with mock.patch.object(sqlite_state.os, "name", "unsupported"):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "locking unavailable"):
+                self.create_service_bundle()
+        self.assertEqual(list(self.output_root.glob(".freqtrade-*")), [])
+        self.assertEqual(list(self.output_root.glob("*-freqtrade")), [])
+
+    def test_intrinsic_failure_record_rejects_quarantine_and_restored_original_name(
+        self,
+    ) -> None:
+        directory_sync_count = 0
+
+        def fail_completion_directory(_path: Path) -> None:
+            nonlocal directory_sync_count
+            directory_sync_count += 1
+            if directory_sync_count == 3:
+                raise OSError("injected completion directory failure")
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file"),
+            mock.patch.object(
+                sqlite_state, "_sync_directory", side_effect=fail_completion_directory
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "completion directory failure"):
+                self.create_service_bundle()
+
+        quarantine = next(self.output_root.glob("*.quarantine-*"))
+        failure_path = quarantine / sqlite_state.FAILURE_FILENAME
+        failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        self.assertEqual(failure["state"], "failed")
+        self.assertEqual(failure["creation_platform"], "posix")
+        with self.assertRaisesRegex(sqlite_state.StateBundleError, "failed"):
+            sqlite_state.verify_bundle(quarantine)
+
+        original = self.output_root / failure["bundle_name"]
+        quarantine.rename(original)
+        with self.assertRaisesRegex(sqlite_state.StateBundleError, "failed"):
+            sqlite_state.verify_bundle(original)
+
+    def test_failure_state_file_and_directory_barriers_precede_quarantine(self) -> None:
+        events: list[str] = []
+        directory_sync_count = 0
+        original_replace = os.replace
+
+        def record_file(path: Path) -> None:
+            if path.name == sqlite_state.FAILURE_FILENAME:
+                events.append("file:failure")
+
+        def fail_then_record_directories(path: Path) -> None:
+            nonlocal directory_sync_count
+            directory_sync_count += 1
+            if directory_sync_count == 3:
+                events.append("failure-trigger")
+                raise OSError("injected completion barrier failure")
+            if path.name.endswith("-freqtrade") and "failure-trigger" in events:
+                events.append("directory:failure")
+            elif path == self.output_root and "replace:quarantine" in events:
+                events.append("directory:quarantine-root")
+
+        def record_replace(source: Path, destination: Path) -> None:
+            if ".quarantine-" in destination.name:
+                events.append("replace:quarantine")
+            original_replace(source, destination)
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file", side_effect=record_file),
+            mock.patch.object(
+                sqlite_state, "_sync_directory", side_effect=fail_then_record_directories
+            ),
+            mock.patch.object(os, "replace", side_effect=record_replace),
+        ):
+            with self.assertRaisesRegex(OSError, "completion barrier failure"):
+                self.create_service_bundle()
+
+        self.assertEqual(
+            events[-5:],
+            [
+                "failure-trigger",
+                "file:failure",
+                "directory:failure",
+                "replace:quarantine",
+                "directory:quarantine-root",
+            ],
+        )
+
+    def test_quarantine_root_sync_failure_keeps_intrinsic_failure_and_releases_lock(
+        self,
+    ) -> None:
+        directory_sync_count = 0
+
+        def fail_completion_and_quarantine_root(_path: Path) -> None:
+            nonlocal directory_sync_count
+            directory_sync_count += 1
+            if directory_sync_count == 3:
+                raise OSError("injected completion failure")
+            if directory_sync_count == 5:
+                raise OSError("injected quarantine root failure")
+
+        with (
+            mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+            mock.patch.object(sqlite_state, "_sync_file"),
+            mock.patch.object(
+                sqlite_state,
+                "_sync_directory",
+                side_effect=fail_completion_and_quarantine_root,
+            ),
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "quarantine failed"):
+                self.create_service_bundle()
+
+        quarantine = next(self.output_root.glob("*.quarantine-*"))
+        self.assertTrue((quarantine / sqlite_state.FAILURE_FILENAME).is_file())
+        lock_path = self.output_root / ".20260711T000000Z-freqtrade.creation.lock"
+        with sqlite_state._bundle_lock(lock_path, exclusive=True, blocking=False):
+            pass
+
+    def test_failure_record_file_and_directory_barrier_failures_remain_nonpromotable(
+        self,
+    ) -> None:
+        for target in ("failure-file", "failure-directory"):
+            with self.subTest(target=target):
+                shutil.rmtree(self.output_root, ignore_errors=True)
+                directory_sync_count = 0
+                failure_file_seen = False
+
+                def maybe_fail_file(path: Path) -> None:
+                    nonlocal failure_file_seen
+                    if path.name == sqlite_state.FAILURE_FILENAME:
+                        failure_file_seen = True
+                        if target == "failure-file":
+                            raise OSError("injected failure record file barrier")
+
+                def maybe_fail_directory(path: Path) -> None:
+                    nonlocal directory_sync_count
+                    directory_sync_count += 1
+                    if directory_sync_count == 3:
+                        raise OSError("injected completion directory barrier")
+                    if (
+                        target == "failure-directory"
+                        and failure_file_seen
+                        and path.name.endswith("-freqtrade")
+                    ):
+                        raise OSError("injected failure record directory barrier")
+
+                with (
+                    mock.patch.object(sqlite_state, "_is_posix", return_value=True),
+                    mock.patch.object(
+                        sqlite_state, "_sync_file", side_effect=maybe_fail_file
+                    ),
+                    mock.patch.object(
+                        sqlite_state,
+                        "_sync_directory",
+                        side_effect=maybe_fail_directory,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        sqlite_state.StateBundleError, "failure recording failed"
+                    ):
+                        self.create_service_bundle()
+
+                quarantine = next(self.output_root.glob("*.quarantine-*"))
+                self.assertTrue((quarantine / sqlite_state.FAILURE_FILENAME).is_file())
+                with self.assertRaisesRegex(sqlite_state.StateBundleError, "failed"):
+                    sqlite_state.verify_bundle(quarantine)
+                lock_path = (
+                    self.output_root / ".20260711T000000Z-freqtrade.creation.lock"
+                )
+                with sqlite_state._bundle_lock(
+                    lock_path, exclusive=True, blocking=False
+                ):
+                    pass
+
+    def test_low_level_lock_adapters_use_shared_exclusive_nonblocking_and_release(self) -> None:
+        posix = mock.Mock()
+        posix.LOCK_EX = 1
+        posix.LOCK_SH = 2
+        posix.LOCK_NB = 4
+        posix.LOCK_UN = 8
+        sqlite_state._acquire_posix_lock(posix, 17, exclusive=True, blocking=True)
+        sqlite_state._acquire_posix_lock(posix, 17, exclusive=False, blocking=False)
+        sqlite_state._release_posix_lock(posix, 17)
+        self.assertEqual(
+            posix.flock.call_args_list,
+            [mock.call(17, 1), mock.call(17, 2 | 4), mock.call(17, posix.LOCK_UN)],
+        )
+
+        windows = mock.Mock()
+        windows.LK_LOCK = 1
+        windows.LK_NBLCK = 2
+        windows.LK_NBRLCK = 3
+        windows.LK_UNLCK = 4
+        with mock.patch.object(os, "lseek") as seek:
+            sqlite_state._acquire_windows_lock(
+                windows, 23, exclusive=True, blocking=True
+            )
+            sqlite_state._acquire_windows_lock(
+                windows, 23, exclusive=False, blocking=False
+            )
+            sqlite_state._release_windows_lock(windows, 23)
+        self.assertEqual(seek.call_args_list, [mock.call(23, 0, os.SEEK_SET)] * 3)
+        self.assertEqual(
+            windows.locking.call_args_list,
+            [mock.call(23, 1, 1), mock.call(23, 3, 1), mock.call(23, 4, 1)],
+        )
 
     def test_compare_structure_detects_count_mismatch_and_accepts_match(self) -> None:
         matching = self.root / "matching.sqlite"

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import errno
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from typing import Literal
+from typing import Iterator, Literal
 
 if __package__:
     from tools.runtime_manifest import REPO_ROOT, load_runtime_manifest
@@ -56,6 +57,15 @@ COMPLETION_FIELDS = {
     "schema_version",
     "durability",
     "manifest_sha256",
+    "creation_platform",
+    "bundle_name",
+}
+FAILURE_FILENAME = "creation-failed.json"
+FAILURE_FIELDS = {
+    "schema_version",
+    "state",
+    "manifest_sha256",
+    "creation_platform",
     "bundle_name",
 }
 
@@ -214,11 +224,7 @@ def _verified_manifest(manifest: object) -> VerifiedBundle:
             "windows",
         }:
             raise StateBundleError("invalid state bundle creation platform")
-        if type(durability) is not str or durability not in {
-            "unknown",
-            "atomic-process-crash",
-            "power-loss-posix",
-        }:
+        if type(durability) is not str or durability != "atomic-process-crash":
             raise StateBundleError("invalid state bundle durability")
         service_identity_valid = (
             purpose == "service-state" and service is not None and archive_label is None
@@ -253,9 +259,11 @@ def _verified_manifest(manifest: object) -> VerifiedBundle:
     )
 
 
-def verify_bundle(bundle: Path) -> VerifiedBundle:
-    if ".quarantine-" in bundle.name:
-        raise StateBundleError("quarantined state bundle is not promotable")
+def _verify_bundle_contents(bundle: Path) -> VerifiedBundle:
+    failure_path = bundle / FAILURE_FILENAME
+    if failure_path.exists():
+        _load_failure(failure_path)
+        raise StateBundleError("quarantined or failed state bundle is not promotable")
     manifest_path = bundle / "manifest.json"
     database_path = bundle / "database.sqlite"
     if not manifest_path.is_file() or not database_path.is_file():
@@ -282,10 +290,23 @@ def verify_bundle(bundle: Path) -> VerifiedBundle:
         or verified.creation_platform != "posix"
         or verified.durability != "atomic-process-crash"
         or completion["manifest_sha256"] != sha256_file(manifest_path)
+        or completion["creation_platform"] != verified.creation_platform
         or completion["bundle_name"] != bundle.name
     ):
         raise StateBundleError("invalid state bundle durability completion")
     return replace(verified, durability="power-loss-posix")
+
+
+def verify_bundle(bundle: Path) -> VerifiedBundle:
+    failure_path = bundle / FAILURE_FILENAME
+    if failure_path.exists():
+        failure = _load_failure(failure_path)
+        lock_name = failure["bundle_name"]
+    else:
+        lock_name = bundle.name
+    lock_path = bundle.parent / f".{lock_name}.creation.lock"
+    with _bundle_lock(lock_path, exclusive=False, blocking=False, create=False):
+        return _verify_bundle_contents(bundle)
 
 
 def _load_completion(path: Path) -> dict[str, object]:
@@ -299,12 +320,37 @@ def _load_completion(path: Path) -> dict[str, object]:
         or not _is_exact_int(completion["schema_version"])
         or completion["schema_version"] != 1
         or completion["durability"] != "power-loss-posix"
+        or type(completion["durability"]) is not str
         or type(completion["manifest_sha256"]) is not str
         or not SHA256_PATTERN.fullmatch(completion["manifest_sha256"])
+        or type(completion["creation_platform"]) is not str
+        or completion["creation_platform"] != "posix"
         or not _is_portable_basename(completion["bundle_name"])
     ):
         raise StateBundleError("invalid state bundle durability completion")
     return completion
+
+
+def _load_failure(path: Path) -> dict[str, object]:
+    try:
+        failure = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError, OSError, RecursionError) as error:
+        raise StateBundleError("invalid state bundle failure record") from error
+    if (
+        type(failure) is not dict
+        or set(failure) != FAILURE_FIELDS
+        or not _is_exact_int(failure["schema_version"])
+        or failure["schema_version"] != 1
+        or type(failure["state"]) is not str
+        or failure["state"] != "failed"
+        or type(failure["manifest_sha256"]) is not str
+        or not SHA256_PATTERN.fullmatch(failure["manifest_sha256"])
+        or type(failure["creation_platform"]) is not str
+        or failure["creation_platform"] not in {"posix", "windows"}
+        or not _is_portable_basename(failure["bundle_name"])
+    ):
+        raise StateBundleError("invalid state bundle failure record")
+    return failure
 
 
 def _contained_path(root: Path, relative: str, description: str) -> Path:
@@ -415,6 +461,136 @@ def _new_bundle_durability() -> DurabilityLevel:
     return "atomic-process-crash"
 
 
+def _acquire_posix_lock(
+    module: object, descriptor: int, *, exclusive: bool, blocking: bool
+) -> None:
+    operation = module.LOCK_EX if exclusive else module.LOCK_SH
+    if not blocking:
+        operation |= module.LOCK_NB
+    module.flock(descriptor, operation)
+
+
+def _release_posix_lock(module: object, descriptor: int) -> None:
+    module.flock(descriptor, module.LOCK_UN)
+
+
+def _acquire_windows_lock(
+    module: object, descriptor: int, *, exclusive: bool, blocking: bool
+) -> None:
+    if blocking:
+        operation = module.LK_LOCK
+    else:
+        operation = module.LK_NBLCK if exclusive else module.LK_NBRLCK
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    module.locking(descriptor, operation, 1)
+
+
+def _release_windows_lock(module: object, descriptor: int) -> None:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    module.locking(descriptor, module.LK_UNLCK, 1)
+
+
+def _acquire_lock(descriptor: int, *, exclusive: bool, blocking: bool) -> object:
+    try:
+        if os.name == "posix":
+            import fcntl
+
+            _acquire_posix_lock(
+                fcntl, descriptor, exclusive=exclusive, blocking=blocking
+            )
+            return fcntl
+        if os.name == "nt":
+            import msvcrt
+
+            _acquire_windows_lock(
+                msvcrt, descriptor, exclusive=exclusive, blocking=blocking
+            )
+            return msvcrt
+    except ImportError as error:
+        raise StateBundleError("state bundle locking unavailable") from error
+    raise StateBundleError("state bundle locking unavailable")
+
+
+def _release_lock(module: object, descriptor: int) -> None:
+    if os.name == "posix":
+        _release_posix_lock(module, descriptor)
+    elif os.name == "nt":
+        _release_windows_lock(module, descriptor)
+    else:
+        raise StateBundleError("state bundle locking unavailable")
+
+
+def _is_lock_contention(error: OSError) -> bool:
+    return error.errno in {errno.EACCES, errno.EAGAIN} or getattr(
+        error, "winerror", None
+    ) in {33, 36}
+
+
+@contextmanager
+def _bundle_lock(
+    path: Path, *, exclusive: bool, blocking: bool, create: bool = True
+) -> Iterator[None]:
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    if create:
+        flags |= os.O_CREAT
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise StateBundleError("state bundle locking unavailable") from error
+    module: object | None = None
+    try:
+        if os.fstat(descriptor).st_size == 0:
+            if not create:
+                raise StateBundleError("state bundle locking unavailable")
+            os.write(descriptor, b"\0")
+        try:
+            module = _acquire_lock(
+                descriptor, exclusive=exclusive, blocking=blocking
+            )
+        except OSError as error:
+            if not blocking and _is_lock_contention(error):
+                raise StateBundleError("state bundle creation in progress") from error
+            raise StateBundleError("state bundle locking unavailable") from error
+        yield
+    finally:
+        try:
+            if module is not None:
+                try:
+                    _release_lock(module, descriptor)
+                except (AttributeError, OSError) as error:
+                    raise StateBundleError("state bundle locking unavailable") from error
+        finally:
+            os.close(descriptor)
+
+
+def _acquire_creation_lock(path: Path) -> object:
+    return _bundle_lock(path, exclusive=True, blocking=True)
+
+
+def _write_failure_record(bundle: Path, bundle_name: str) -> None:
+    manifest_path = bundle / "manifest.json"
+    failure_path = bundle / FAILURE_FILENAME
+    failure_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state": "failed",
+                "manifest_sha256": sha256_file(manifest_path),
+                "creation_platform": _creation_platform(),
+                "bundle_name": bundle_name,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _sync_file(failure_path)
+    if _is_posix():
+        _sync_directory(bundle)
+
+
 def _create_bundle(
     *,
     purpose: BundlePurpose,
@@ -435,8 +611,35 @@ def _create_bundle(
     timestamp = created_at.strftime("%Y%m%dT%H%M%SZ")
     output_root.mkdir(parents=True, exist_ok=True)
     final_bundle = output_root / f"{timestamp}-{identity}"
-    if final_bundle.parent != output_root or final_bundle.exists():
+    if final_bundle.parent != output_root:
         raise StateBundleError("backup bundle already exists or has an invalid path")
+    lock_path = output_root / f".{final_bundle.name}.creation.lock"
+    with _acquire_creation_lock(lock_path):
+        if final_bundle.exists():
+            raise StateBundleError("backup bundle already exists or has an invalid path")
+        return _create_bundle_under_lock(
+            purpose=purpose,
+            identity=identity,
+            source=source,
+            output_root=output_root,
+            created_at=created_at,
+            final_bundle=final_bundle,
+            source_identity=source_identity,
+            source_parent_identity=source_parent_identity,
+        )
+
+
+def _create_bundle_under_lock(
+    *,
+    purpose: BundlePurpose,
+    identity: str,
+    source: Path,
+    output_root: Path,
+    created_at: datetime,
+    final_bundle: Path,
+    source_identity: _PathIdentity | None,
+    source_parent_identity: _PathIdentity | None,
+) -> Path:
     staging = Path(tempfile.mkdtemp(prefix=f".{identity}-", dir=output_root))
     database = staging / "database.sqlite"
     published_final = False
@@ -479,7 +682,7 @@ def _create_bundle(
             newline="\n",
         )
         _sync_file(manifest_path)
-        verify_bundle(staging)
+        _verify_bundle_contents(staging)
         if _is_posix():
             _sync_directory(staging)
         os.replace(staging, final_bundle)
@@ -496,6 +699,7 @@ def _create_bundle(
                         "schema_version": 1,
                         "durability": "power-loss-posix",
                         "manifest_sha256": sha256_file(manifest_path),
+                        "creation_platform": "posix",
                         "bundle_name": final_bundle.name,
                     },
                     indent=2,
@@ -512,10 +716,11 @@ def _create_bundle(
             completion = _load_completion(completion_path)
             if (
                 completion["manifest_sha256"] != sha256_file(manifest_path)
+                or completion["creation_platform"] != "posix"
                 or completion["bundle_name"] != final_bundle.name
             ):
                 raise StateBundleError("invalid state bundle durability completion")
-            if verify_bundle(final_bundle).durability != "power-loss-posix":
+            if _verify_bundle_contents(final_bundle).durability != "power-loss-posix":
                 raise StateBundleError("state bundle durability completion failed")
         return final_bundle
     except BaseException:
@@ -523,12 +728,21 @@ def _create_bundle(
             quarantine = output_root / (
                 f".{final_bundle.name}.quarantine-{secrets.token_hex(8)}"
             )
+            failure_error: BaseException | None = None
+            try:
+                _write_failure_record(final_bundle, final_bundle.name)
+            except BaseException as error:
+                failure_error = error
             try:
                 os.replace(final_bundle, quarantine)
                 if _is_posix():
                     _sync_directory(output_root)
             except BaseException as quarantine_error:
                 raise StateBundleError("state bundle quarantine failed") from quarantine_error
+            if failure_error is not None:
+                raise StateBundleError(
+                    "state bundle failure recording failed"
+                ) from failure_error
         raise
 
 
