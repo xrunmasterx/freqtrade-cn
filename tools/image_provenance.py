@@ -62,8 +62,8 @@ def build_committed_image(
         subprocess.run(
             command,
             check=True,
-            stdout=None,
-            stderr=None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             timeout=timeout_seconds,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):

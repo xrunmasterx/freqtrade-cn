@@ -114,9 +114,12 @@ jobs:
             tests/component/BotControls.spec.ts
 
       - name: Render and enforce Compose
+        shell: bash
         run: |
-          python tools/compose_runtime.py --profile trading --profile research config --format json > compose.rendered.json
-          python tools/runtime_contract.py --compose-json compose.rendered.json
+          set -euo pipefail
+          compose_rendered="${RUNNER_TEMP}/compose.rendered.json"
+          python tools/compose_runtime.py --profile trading --profile research config --format json > "${compose_rendered}"
+          python tools/runtime_contract.py --compose-json "${compose_rendered}"
           python tools/compose_runtime.py --profile trading --profile research config --quiet
 
       - name: Build integrated image

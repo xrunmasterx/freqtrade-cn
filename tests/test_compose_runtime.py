@@ -17,6 +17,7 @@ SERVICES = ["freqtrade", "freqtrade-futures", "freqtrade-research"]
 MANIFEST = {"services": [{"name": name} for name in SERVICES]}
 IDENTITY = {"FREQTRADE_RUNTIME_UID": 1001, "FREQTRADE_RUNTIME_GID": 1002}
 COMMIT_IDENTITY = CommitIdentity("a" * 40, "b" * 40, "c" * 40)
+CHANGED_COMMIT_IDENTITY = CommitIdentity("e" * 40, "b" * 40, "c" * 40)
 INSPECTED_IMAGE = InspectedImage(
     "sha256:" + "d" * 64,
     "freqtrade-cn:p0-aaaaaaaaaaaa-bbbbbbbbbbbb-cccccccccccc",
@@ -135,8 +136,11 @@ class ComposeRuntimeTests(unittest.TestCase):
                 compose_runtime, "load_runtime_manifest", return_value=MANIFEST
             ),
             mock.patch.object(
-                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
-            ),
+                compose_runtime,
+                "resolve_commit_identity",
+                side_effect=[COMMIT_IDENTITY, COMMIT_IDENTITY],
+            ) as resolve,
+            mock.patch.object(compose_runtime, "verify_committed_checkout") as verify,
             mock.patch.object(
                 compose_runtime, "committed_build_context"
             ) as committed_context,
@@ -153,25 +157,197 @@ class ComposeRuntimeTests(unittest.TestCase):
         self.assertIs(result, completed)
         committed_context.assert_called_once_with(self.root.resolve(), COMMIT_IDENTITY)
         build.assert_called_once_with(context, COMMIT_IDENTITY)
+        self.assertEqual(resolve.call_count, 2)
+        verify.assert_called_once_with(self.root.resolve(), COMMIT_IDENTITY)
         launch.assert_called_once_with(
-            "freqtrade", self.root.resolve(), MANIFEST, INSPECTED_IMAGE.image_id
+            "freqtrade",
+            self.root.resolve(),
+            MANIFEST,
+            INSPECTED_IMAGE.image_id,
+            COMMIT_IDENTITY,
         )
 
+    def test_up_rejects_identity_change_during_build_before_preflight(self) -> None:
+        with (
+            mock.patch.object(
+                compose_runtime, "load_runtime_manifest", return_value=MANIFEST
+            ),
+            mock.patch.object(
+                compose_runtime,
+                "resolve_commit_identity",
+                side_effect=[COMMIT_IDENTITY, CHANGED_COMMIT_IDENTITY],
+            ),
+            mock.patch.object(compose_runtime, "committed_build_context") as context,
+            mock.patch.object(
+                compose_runtime, "build_and_inspect_image", return_value=INSPECTED_IMAGE
+            ),
+            mock.patch.object(compose_runtime, "_launch_inspected_image") as launch,
+        ):
+            context.return_value.__enter__.return_value = self.root / "committed"
+            with self.assertRaises(ValueError):
+                compose_runtime.launch_reviewed_service("freqtrade", self.root)
+        launch.assert_not_called()
+
     def test_up_uses_fixed_recreate_no_build_no_deps_flags(self) -> None:
+        rendered_text = '{"services":{"freqtrade":{"image":"sha256:' + "d" * 64 + '"}}}'
         completed = subprocess.CompletedProcess([], 0, "", "")
+        final_snapshot: Path | None = None
+
+        def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal final_snapshot
+            if command[0] == "git":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if command[-3:] == ["config", "--format", "json"]:
+                return subprocess.CompletedProcess(command, 0, rendered_text, "")
+            final_snapshot = Path(command[command.index("-f") + 1])
+            self.assertTrue(final_snapshot.is_file())
+            self.assertEqual(final_snapshot.read_text(encoding="utf-8"), rendered_text)
+            self.assertNotIn(str(self.root / "docker-compose.yml"), command)
+            self.assertIsNone(kwargs["input"])
+            return completed
+
         with (
             mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
-            mock.patch.object(compose_runtime, "_validate_launch"),
-            mock.patch.object(compose_runtime.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(compose_runtime, "validate_tracked_configs", return_value=[]),
+            mock.patch.object(compose_runtime, "validate_compose", return_value=[]),
+            mock.patch.object(
+                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+            ),
+            mock.patch.object(compose_runtime, "verify_committed_checkout"),
+            mock.patch.object(compose_runtime.subprocess, "run", side_effect=run) as run_mock,
         ):
             result = compose_runtime._launch_inspected_image(
-                "freqtrade", self.root, MANIFEST, INSPECTED_IMAGE.image_id
+                "freqtrade",
+                self.root,
+                MANIFEST,
+                INSPECTED_IMAGE.image_id,
+                COMMIT_IDENTITY,
             )
         self.assertIs(result, completed)
+        self.assertIsNotNone(final_snapshot)
+        self.assertFalse(final_snapshot.exists())
         self.assertEqual(
-            run.call_args.args[0][-6:],
+            run_mock.call_args.args[0][-6:],
             ["up", "--detach", "--force-recreate", "--no-build", "--no-deps", "freqtrade"],
         )
+
+    def test_launch_uses_validated_snapshot_when_live_compose_changes(self) -> None:
+        rendered_text = '{"name":"validated-snapshot"}'
+        final_bytes: list[str] = []
+
+        def verify(root: Path, identity: CommitIdentity) -> None:
+            (root / "docker-compose.yml").write_text("mutated live source", encoding="utf-8")
+
+        def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if command[0] == "git":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if command[-3:] == ["config", "--format", "json"]:
+                return subprocess.CompletedProcess(command, 0, rendered_text, "")
+            snapshot = Path(command[command.index("-f") + 1])
+            final_bytes.append(snapshot.read_text(encoding="utf-8"))
+            self.assertNotIn(str(self.root / "docker-compose.yml"), command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime, "validate_tracked_configs", return_value=[]),
+            mock.patch.object(compose_runtime, "validate_compose", return_value=[]),
+            mock.patch.object(
+                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+            ),
+            mock.patch.object(
+                compose_runtime, "verify_committed_checkout", side_effect=verify
+            ),
+            mock.patch.object(compose_runtime.subprocess, "run", side_effect=run),
+        ):
+            compose_runtime._launch_inspected_image(
+                "freqtrade", self.root, MANIFEST, INSPECTED_IMAGE.image_id, COMMIT_IDENTITY
+            )
+        self.assertEqual(final_bytes, [rendered_text])
+
+    def test_launch_rejects_identity_drift_after_snapshot_validation(self) -> None:
+        rendered = subprocess.CompletedProcess([], 0, '{"services":{}}', "")
+        with (
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime, "validate_tracked_configs", return_value=[]),
+            mock.patch.object(compose_runtime, "validate_compose", return_value=[]),
+            mock.patch.object(
+                compose_runtime, "resolve_commit_identity", return_value=CHANGED_COMMIT_IDENTITY
+            ),
+            mock.patch.object(compose_runtime.subprocess, "run", return_value=rendered) as run,
+        ):
+            with self.assertRaises(ValueError):
+                compose_runtime._launch_inspected_image(
+                    "freqtrade",
+                    self.root,
+                    MANIFEST,
+                    INSPECTED_IMAGE.image_id,
+                    COMMIT_IDENTITY,
+                )
+        self.assertFalse(any(call.args[0][-1] == "freqtrade" for call in run.call_args_list))
+
+    def test_launch_rejects_control_drift_after_snapshot_validation(self) -> None:
+        rendered = subprocess.CompletedProcess([], 0, '{"services":{}}', "")
+        controls = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            rendered,
+            subprocess.CompletedProcess([], 1, "", ""),
+        ]
+        with (
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime, "validate_tracked_configs", return_value=[]),
+            mock.patch.object(compose_runtime, "validate_compose", return_value=[]),
+            mock.patch.object(
+                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+            ),
+            mock.patch.object(compose_runtime, "verify_committed_checkout"),
+            mock.patch.object(
+                compose_runtime.subprocess, "run", side_effect=controls
+            ) as run,
+        ):
+            with self.assertRaises(ValueError):
+                compose_runtime._launch_inspected_image(
+                    "freqtrade",
+                    self.root,
+                    MANIFEST,
+                    INSPECTED_IMAGE.image_id,
+                    COMMIT_IDENTITY,
+                )
+        self.assertEqual(run.call_count, 3)
+
+    def test_launch_snapshot_is_cleaned_when_final_compose_fails(self) -> None:
+        rendered = subprocess.CompletedProcess([], 0, '{"services":{}}', "")
+        snapshot: Path | None = None
+
+        def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal snapshot
+            if command[0] == "git":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if command[-3:] == ["config", "--format", "json"]:
+                return rendered
+            snapshot = Path(command[command.index("-f") + 1])
+            raise OSError("final compose failed")
+
+        with (
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime, "validate_tracked_configs", return_value=[]),
+            mock.patch.object(compose_runtime, "validate_compose", return_value=[]),
+            mock.patch.object(
+                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+            ),
+            mock.patch.object(compose_runtime, "verify_committed_checkout"),
+            mock.patch.object(compose_runtime.subprocess, "run", side_effect=run),
+        ):
+            with self.assertRaises(OSError):
+                compose_runtime._launch_inspected_image(
+                    "freqtrade",
+                    self.root,
+                    MANIFEST,
+                    INSPECTED_IMAGE.image_id,
+                    COMMIT_IDENTITY,
+                )
+        self.assertIsNotNone(snapshot)
+        self.assertFalse(snapshot.exists())
 
     def test_up_never_launches_when_build_inspect_or_label_validation_fails(self) -> None:
         for failure in (OSError("build"), ValueError("inspect"), ValueError("labels")):
@@ -537,6 +713,7 @@ class ComposeRuntimeTests(unittest.TestCase):
             mock.patch.object(
                 compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
             ),
+            mock.patch.object(compose_runtime, "verify_committed_checkout"),
             mock.patch.object(compose_runtime, "committed_build_context") as context,
             mock.patch.object(
                 compose_runtime, "build_and_inspect_image", return_value=INSPECTED_IMAGE

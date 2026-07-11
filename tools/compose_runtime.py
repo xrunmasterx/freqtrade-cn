@@ -4,12 +4,18 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 if __package__:
     from tools.bootstrap_runtime import build_compose_identity, verify_runtime
-    from tools.committed_build import committed_build_context, resolve_commit_identity
+    from tools.committed_build import (
+        CommitIdentity,
+        committed_build_context,
+        resolve_commit_identity,
+        verify_committed_checkout,
+    )
     from tools.image_provenance import build_and_inspect_image
     from tools.runtime_contract import (
         EXPECTED_USER_DATA_DIR,
@@ -19,7 +25,12 @@ if __package__:
     from tools.runtime_manifest import load_runtime_manifest
 else:
     from bootstrap_runtime import build_compose_identity, verify_runtime
-    from committed_build import committed_build_context, resolve_commit_identity
+    from committed_build import (
+        CommitIdentity,
+        committed_build_context,
+        resolve_commit_identity,
+        verify_committed_checkout,
+    )
     from image_provenance import build_and_inspect_image
     from runtime_contract import (
         EXPECTED_USER_DATA_DIR,
@@ -165,6 +176,8 @@ def _validate_launch(
     environment: dict[str, str],
     service: str,
     image_id: str,
+    snapshot: Path,
+    commit_identity: CommitIdentity,
 ) -> None:
     if validate_tracked_configs(root):
         raise ValueError("tracked runtime configuration failed validation")
@@ -198,7 +211,11 @@ def _validate_launch(
     )
     if rendered.returncode != 0:
         raise ValueError("compose preflight render failed")
-    compose = json.loads(rendered.stdout)
+    try:
+        snapshot.write_text(rendered.stdout, encoding="utf-8")
+        compose = json.loads(snapshot.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, RecursionError):
+        raise ValueError("compose preflight snapshot failed") from None
     if validate_compose(
         manifest,
         compose,
@@ -207,6 +224,19 @@ def _validate_launch(
         launch_image_id=image_id,
     ):
         raise ValueError("rendered compose failed validation")
+    if resolve_commit_identity(root) != commit_identity:
+        raise ValueError("committed build identity changed before launch")
+    verify_committed_checkout(root, commit_identity)
+    controls = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", *RUNTIME_CONTROL_PATHS],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if controls.returncode != 0:
+        raise ValueError("runtime control files changed before launch")
 
 
 def _run_verified_compose(
@@ -257,10 +287,11 @@ def _launch_inspected_image(
     root: Path,
     manifest: dict[str, Any],
     image_id: str,
+    commit_identity: CommitIdentity,
 ) -> subprocess.CompletedProcess[str]:
     identity = verify_runtime(root, manifest)
     override = _launch_override(manifest, identity, service, image_id)
-    command = [
+    render_command = [
         "docker", "compose", "--project-name", "freqtrade-cn",
         "-f", str(root / "docker-compose.yml"), "-f", "-",
     ]
@@ -269,24 +300,41 @@ def _launch_inspected_image(
         for key, value in os.environ.items()
         if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
     }
-    _validate_launch(root, manifest, command, override, environment, service, image_id)
-    return subprocess.run(
-        [
-            *command,
-            "up",
-            "--detach",
-            "--force-recreate",
-            "--no-build",
-            "--no-deps",
+    with tempfile.TemporaryDirectory(prefix="compose-launch-") as directory:
+        snapshot = Path(directory) / "compose.validated.json"
+        _validate_launch(
+            root,
+            manifest,
+            render_command,
+            override,
+            environment,
             service,
-        ],
-        cwd=root,
-        env=environment,
-        input=override,
-        text=True,
-        capture_output=False,
-        check=False,
-    )
+            image_id,
+            snapshot,
+            commit_identity,
+        )
+        return subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--project-name",
+                "freqtrade-cn",
+                "-f",
+                str(snapshot),
+                "up",
+                "--detach",
+                "--force-recreate",
+                "--no-build",
+                "--no-deps",
+                service,
+            ],
+            cwd=root,
+            env=environment,
+            input=None,
+            text=True,
+            capture_output=False,
+            check=False,
+        )
 
 
 def launch_reviewed_service(service: str, root: Path) -> subprocess.CompletedProcess[str]:
@@ -295,7 +343,12 @@ def launch_reviewed_service(service: str, root: Path) -> subprocess.CompletedPro
     identity = resolve_commit_identity(resolved_root)
     with committed_build_context(resolved_root, identity) as context:
         image = build_and_inspect_image(context, identity)
-        return _launch_inspected_image(service, resolved_root, manifest, image.image_id)
+    if resolve_commit_identity(resolved_root) != identity:
+        raise ValueError("committed build identity changed during image build")
+    verify_committed_checkout(resolved_root, identity)
+    return _launch_inspected_image(
+        service, resolved_root, manifest, image.image_id, identity
+    )
 
 
 def run_compose(
