@@ -1,7 +1,7 @@
 # SQLite backup, migration, restore, and rollback
 
 This runbook migrates only the dry-run SQLite state of the formal Spot and
-Futures services. `sqlite_state.py backup` uses SQLite's online backup API, so a
+Futures services. `sqlite_state.py backup-service` uses SQLite's online backup API, so a
 source may remain online for the initial read-only backup; committed WAL state is
 included and uncommitted work is excluded. `verify` checks the bundle hash,
 SQLite integrity, foreign keys, and core table counts.
@@ -39,9 +39,8 @@ The backup root must be outside the repository. Capture exactly one bundle path,
 validate it as a non-empty existing directory, then verify the bundle:
 
 ```powershell
-$spotBundleOutput = @(python tools/sqlite_state.py backup `
+$spotBundleOutput = @(python tools/sqlite_state.py backup-service `
   --service freqtrade `
-  --source ft_userdata\user_data\tradesv3.sqlite `
   --output-root $backupRoot `
   --print-path)
 $exitCode = $LASTEXITCODE
@@ -66,9 +65,8 @@ Assert-NativeSuccess -ExitCode $exitCode -Operation 'Spot rehearsal verification
 Back up and verify Futures independently:
 
 ```powershell
-$futuresBundleOutput = @(python tools/sqlite_state.py backup `
+$futuresBundleOutput = @(python tools/sqlite_state.py backup-service `
   --service freqtrade-futures `
-  --source ft_userdata\user_data\tradesv3-futures.sqlite `
   --output-root $backupRoot `
   --print-path)
 $exitCode = $LASTEXITCODE
@@ -100,20 +98,20 @@ add a service to the P0 runtime contract. Any archive failure stops the loop:
 
 ```powershell
 $archiveSources = @(
-  @{ Service = 'freqtrade-qqe-base-futures-archive'; Path = 'ft_userdata\user_data\tradesv3-qqe-base-futures.sqlite' },
-  @{ Service = 'freqtrade-qqe-daily-regime-futures-archive'; Path = 'ft_userdata\user_data\tradesv3-qqe-daily-regime-futures.sqlite' },
-  @{ Service = 'freqtrade-qqe-4h-fullstake-futures-archive'; Path = 'ft_userdata\user_data\tradesv3-qqe-4h-fullstake-futures.sqlite' },
-  @{ Service = 'lsri-shadow-archive'; Path = 'ft_userdata\user_data\tradesv3-lsri-shadow.sqlite' }
+  @{ Label = 'freqtrade-qqe-base-futures-archive'; Path = 'ft_userdata\user_data\tradesv3-qqe-base-futures.sqlite' },
+  @{ Label = 'freqtrade-qqe-daily-regime-futures-archive'; Path = 'ft_userdata\user_data\tradesv3-qqe-daily-regime-futures.sqlite' },
+  @{ Label = 'freqtrade-qqe-4h-fullstake-futures-archive'; Path = 'ft_userdata\user_data\tradesv3-qqe-4h-fullstake-futures.sqlite' },
+  @{ Label = 'lsri-shadow-archive'; Path = 'ft_userdata\user_data\tradesv3-lsri-shadow.sqlite' }
 )
 
 foreach ($item in $archiveSources) {
   if (Test-Path -LiteralPath $item.Path -PathType Leaf) {
-    python tools/sqlite_state.py backup `
-      --service $item.Service `
+    python tools/sqlite_state.py archive `
+      --label $item.Label `
       --source $item.Path `
       --output-root $backupRoot
     $exitCode = $LASTEXITCODE
-    Assert-NativeSuccess -ExitCode $exitCode -Operation "Archive backup for $($item.Service)"
+    Assert-NativeSuccess -ExitCode $exitCode -Operation "Archive backup for $($item.Label)"
   }
 }
 ```
@@ -149,9 +147,8 @@ distinct final variable names prevent a failed final backup from falling back to
 an earlier rehearsal bundle:
 
 ```powershell
-$spotFinalBundleOutput = @(python tools/sqlite_state.py backup `
+$spotFinalBundleOutput = @(python tools/sqlite_state.py backup-service `
   --service freqtrade `
-  --source ft_userdata\user_data\tradesv3.sqlite `
   --output-root $backupRoot `
   --print-path)
 $exitCode = $LASTEXITCODE
@@ -172,9 +169,8 @@ python tools/sqlite_state.py verify --bundle $spotFinalBundle
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Spot final verification'
 
-$futuresFinalBundleOutput = @(python tools/sqlite_state.py backup `
+$futuresFinalBundleOutput = @(python tools/sqlite_state.py backup-service `
   --service freqtrade-futures `
-  --source ft_userdata\user_data\tradesv3-futures.sqlite `
   --output-root $backupRoot `
   --print-path)
 $exitCode = $LASTEXITCODE
@@ -213,15 +209,15 @@ if (Test-Path -LiteralPath $futuresDestination) {
   throw "Restore destination already exists: $futuresDestination"
 }
 
-python tools/sqlite_state.py restore `
-  --bundle $spotFinalBundle `
-  --destination $spotDestination
+python tools/sqlite_state.py restore-service `
+  --service freqtrade `
+  --bundle $spotFinalBundle
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Restore Spot final bundle'
 
-python tools/sqlite_state.py restore `
-  --bundle $futuresFinalBundle `
-  --destination $futuresDestination
+python tools/sqlite_state.py restore-service `
+  --service freqtrade-futures `
+  --bundle $futuresFinalBundle
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Restore Futures final bundle'
 ```
@@ -229,13 +225,13 @@ Assert-NativeSuccess -ExitCode $exitCode -Operation 'Restore Futures final bundl
 Compare each restored candidate with its stopped legacy source:
 
 ```powershell
-python tools/sqlite_state.py compare `
+python tools/sqlite_state.py compare-structure `
   --source ft_userdata\user_data\tradesv3.sqlite `
   --candidate ft_userdata\runtime\freqtrade\trades.sqlite
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Compare restored Spot state'
 
-python tools/sqlite_state.py compare `
+python tools/sqlite_state.py compare-structure `
   --source ft_userdata\user_data\tradesv3-futures.sqlite `
   --candidate ft_userdata\runtime\freqtrade-futures\trades.sqlite
 $exitCode = $LASTEXITCODE

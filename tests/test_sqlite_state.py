@@ -21,18 +21,28 @@ class SQLiteStateTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
-        self.source = self.root / "tradesv3.sqlite"
+        manifest_source = Path(__file__).resolve().parents[1] / "ops" / "runtime-services.json"
+        self.manifest_path = self.root / "ops" / "runtime-services.json"
+        self.manifest_path.parent.mkdir(parents=True)
+        shutil.copyfile(manifest_source, self.manifest_path)
+        self.spot_source = self.root / "ft_userdata/user_data/tradesv3.sqlite"
+        self.futures_source = self.root / "ft_userdata/user_data/tradesv3-futures.sqlite"
+        self.spot_destination = self.root / "ft_userdata/runtime/freqtrade/trades.sqlite"
+        self.futures_destination = (
+            self.root / "ft_userdata/runtime/freqtrade-futures/trades.sqlite"
+        )
+        self.spot_source.parent.mkdir(parents=True)
+        self.spot_destination.parent.mkdir(parents=True)
+        self.futures_destination.parent.mkdir(parents=True)
+        self.create_database(self.spot_source)
+        self.create_database(self.futures_source)
         self.output_root = self.root / "backups"
-        self.destination = self.root / "restored.sqlite"
         self.fixed_now = datetime(2026, 7, 11, tzinfo=UTC)
-        self.create_database(self.source)
 
     def create_database(
-        self,
-        path: Path,
-        *,
-        tables: tuple[str, ...] = sqlite_state.COUNT_TABLES,
+        self, path: Path, *, tables: tuple[str, ...] = sqlite_state.COUNT_TABLES
     ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(path)) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             definitions = {
@@ -47,23 +57,22 @@ class SQLiteStateTests(unittest.TestCase):
                 connection.execute(definitions[table])
             connection.commit()
 
-    def open_wal_source(self) -> sqlite3.Connection:
-        writer = sqlite3.connect(self.source)
-        writer.execute("PRAGMA journal_mode=WAL")
-        return writer
+    def create_service_bundle(self, service: str = "freqtrade") -> Path:
+        return sqlite_state.create_service_backup(
+            service=service,
+            output_root=self.output_root,
+            now=self.fixed_now,
+            root=self.root,
+            manifest_path=self.manifest_path,
+        )
 
-    def create_valid_bundle(self) -> Path:
-        return sqlite_state.create_backup(
-            service="freqtrade",
-            source=self.source,
+    def create_archive_bundle(self) -> Path:
+        return sqlite_state.create_archive(
+            label="qqe-research",
+            source=self.spot_source,
             output_root=self.output_root,
             now=self.fixed_now,
         )
-
-    def copy_source(self) -> Path:
-        candidate = self.root / "candidate.sqlite"
-        sqlite_state.online_backup(self.source, candidate)
-        return candidate
 
     def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -74,45 +83,61 @@ class SQLiteStateTests(unittest.TestCase):
             check=False,
         )
 
-    def test_backup_contains_committed_wal_rows_while_writer_stays_open(self) -> None:
-        writer = self.open_wal_source()
-        self.addCleanup(writer.close)
-        writer.execute("INSERT INTO trades(pair) VALUES ('BTC/USDT')")
-        writer.commit()
+    def test_resolve_service_lane_derives_spot_and_futures_from_manifest(self) -> None:
+        spot = sqlite_state.resolve_service_lane(
+            service="freqtrade", root=self.root, manifest_path=self.manifest_path
+        )
+        futures = sqlite_state.resolve_service_lane(
+            service="freqtrade-futures", root=self.root, manifest_path=self.manifest_path
+        )
+        self.assertEqual(
+            spot,
+            sqlite_state.ServiceLane(
+                "freqtrade", self.spot_source, self.spot_destination
+            ),
+        )
+        self.assertEqual(
+            futures,
+            sqlite_state.ServiceLane(
+                "freqtrade-futures", self.futures_source, self.futures_destination
+            ),
+        )
 
-        bundle = self.create_valid_bundle()
+    def test_resolve_service_lane_rejects_research_and_unknown_services(self) -> None:
+        for service in ("freqtrade-research", "unknown", "../freqtrade"):
+            with self.subTest(service=service):
+                with self.assertRaises(sqlite_state.StateBundleError):
+                    sqlite_state.resolve_service_lane(
+                        service=service, root=self.root, manifest_path=self.manifest_path
+                    )
 
-        with closing(sqlite3.connect(bundle / "database.sqlite")) as restored:
-            self.assertEqual(restored.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 1)
+    def test_resolve_service_lane_rejects_path_escape(self) -> None:
+        outside = self.root.parent / f"{self.root.name}-outside"
+        outside.mkdir()
+        self.addCleanup(shutil.rmtree, outside, True)
+        shutil.rmtree(self.spot_destination.parent)
+        try:
+            self.spot_destination.parent.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            self.skipTest("directory symlinks are unavailable")
+        with self.assertRaisesRegex(sqlite_state.StateBundleError, "escape"):
+            sqlite_state.resolve_service_lane(
+                service="freqtrade", root=self.root, manifest_path=self.manifest_path
+            )
 
-    def test_backup_excludes_uncommitted_rows(self) -> None:
-        writer = self.open_wal_source()
-        self.addCleanup(writer.close)
-        writer.execute("INSERT INTO trades(pair) VALUES ('ETH/USDT')")
-
-        bundle = self.create_valid_bundle()
-
-        with closing(sqlite3.connect(bundle / "database.sqlite")) as backup:
-            self.assertEqual(backup.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 0)
-        writer.rollback()
-
-    def test_manifest_hash_size_and_integrity_match_database(self) -> None:
-        bundle = self.create_valid_bundle()
+    def test_schema2_service_bundle_has_exact_fields_and_identity(self) -> None:
+        bundle = self.create_service_bundle()
         manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
-        database = bundle / "database.sqlite"
-        self.assertEqual(manifest["database_sha256"], sqlite_state.sha256_file(database))
-        self.assertEqual(manifest["database_size"], database.stat().st_size)
-        self.assertEqual(manifest["integrity_check"], "ok")
-        self.assertEqual(manifest["foreign_key_violations"], 0)
-
-    def test_manifest_has_exact_schema(self) -> None:
-        manifest = sqlite_state.verify_bundle(self.create_valid_bundle())
         self.assertEqual(
             set(manifest),
             {
                 "schema_version",
+                "purpose",
                 "service",
+                "archive_label",
                 "created_at_utc",
+                "creation_platform",
+                "durability",
                 "sqlite_version",
                 "source_filename",
                 "database_sha256",
@@ -124,16 +149,186 @@ class SQLiteStateTests(unittest.TestCase):
                 "foreign_key_violations",
             },
         )
-        self.assertEqual(manifest["created_at_utc"], "2026-07-11T00:00:00Z")
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["purpose"], "service-state")
+        self.assertEqual(manifest["service"], "freqtrade")
+        self.assertIsNone(manifest["archive_label"])
+        self.assertEqual(manifest["source_filename"], "tradesv3.sqlite")
+        self.assertIn(manifest["creation_platform"], {"posix", "windows"})
+        self.assertEqual(manifest["durability"], "atomic-process-crash")
+        verified = sqlite_state.verify_bundle(bundle)
+        self.assertIsInstance(verified, sqlite_state.VerifiedBundle)
+        self.assertEqual(verified.service, "freqtrade")
 
-    def test_verify_rejects_database_tampering(self) -> None:
-        bundle = self.create_valid_bundle()
+    def test_schema2_archive_bundle_has_archive_identity(self) -> None:
+        verified = sqlite_state.verify_bundle(self.create_archive_bundle())
+        self.assertEqual(verified.schema_version, 2)
+        self.assertEqual(verified.purpose, "archive")
+        self.assertIsNone(verified.service)
+        self.assertEqual(verified.archive_label, "qqe-research")
+        self.assertEqual(verified.durability, "atomic-process-crash")
+
+    def test_schema1_verifies_with_unknown_durability_and_requires_legacy_flag(self) -> None:
+        bundle = self.create_service_bundle()
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for field in ("purpose", "archive_label", "creation_platform", "durability"):
+            del manifest[field]
+        manifest["schema_version"] = 1
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        verified = sqlite_state.verify_bundle(bundle)
+        self.assertEqual(verified.durability, "unknown")
+        self.assertIsNone(verified.creation_platform)
+        with self.assertRaisesRegex(sqlite_state.StateBundleError, "legacy"):
+            sqlite_state.restore_service(
+                service="freqtrade",
+                bundle=bundle,
+                root=self.root,
+                manifest_path=self.manifest_path,
+            )
+        sqlite_state.restore_service(
+            service="freqtrade",
+            bundle=bundle,
+            root=self.root,
+            manifest_path=self.manifest_path,
+            allow_legacy_schema1=True,
+        )
+        self.assertTrue(self.spot_destination.is_file())
+
+    def test_restore_service_rejects_futures_bundle_for_spot_before_any_write(self) -> None:
+        bundle = self.create_service_bundle("freqtrade-futures")
+        with (
+            mock.patch.object(tempfile, "mkstemp") as mkstemp,
+            mock.patch.object(shutil, "copyfile") as copyfile,
+            mock.patch.object(os, "link") as link,
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "service"):
+                sqlite_state.restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        mkstemp.assert_not_called()
+        copyfile.assert_not_called()
+        link.assert_not_called()
+
+    def test_restore_service_rejects_spot_bundle_for_futures_before_any_write(self) -> None:
+        bundle = self.create_service_bundle("freqtrade")
+        with (
+            mock.patch.object(tempfile, "mkstemp") as mkstemp,
+            mock.patch.object(shutil, "copyfile") as copyfile,
+            mock.patch.object(os, "link") as link,
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "service"):
+                sqlite_state.restore_service(
+                    service="freqtrade-futures",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        mkstemp.assert_not_called()
+        copyfile.assert_not_called()
+        link.assert_not_called()
+
+    def test_archive_bundle_cannot_restore_to_formal_service(self) -> None:
+        bundle = self.create_archive_bundle()
+        with mock.patch.object(tempfile, "mkstemp") as mkstemp:
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "archive"):
+                sqlite_state.restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        mkstemp.assert_not_called()
+
+    def test_restore_service_rejects_source_filename_mismatch_before_write(self) -> None:
+        bundle = self.create_service_bundle()
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["source_filename"] = "other.sqlite"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with mock.patch.object(tempfile, "mkstemp") as mkstemp:
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "source filename"):
+                sqlite_state.restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        mkstemp.assert_not_called()
+
+    def test_restore_service_refuses_existing_destination(self) -> None:
+        bundle = self.create_service_bundle()
+        self.spot_destination.write_bytes(b"keep")
+        with self.assertRaisesRegex(sqlite_state.StateBundleError, "already exists"):
+            sqlite_state.restore_service(
+                service="freqtrade",
+                bundle=bundle,
+                root=self.root,
+                manifest_path=self.manifest_path,
+            )
+        self.assertEqual(self.spot_destination.read_bytes(), b"keep")
+
+    def test_restore_service_does_not_clobber_destination_created_during_copy(self) -> None:
+        bundle = self.create_service_bundle()
+        original_copyfile = shutil.copyfile
+
+        def copy_then_create_destination(source: Path, target: Path) -> str:
+            result = original_copyfile(source, target)
+            self.spot_destination.write_bytes(b"keep")
+            return result
+
+        with mock.patch.object(
+            shutil, "copyfile", side_effect=copy_then_create_destination
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "already exists"):
+                sqlite_state.restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        self.assertEqual(self.spot_destination.read_bytes(), b"keep")
+        self.assertEqual(list(self.spot_destination.parent.glob("*.tmp")), [])
+
+    def test_restore_service_refuses_missing_destination_parent(self) -> None:
+        bundle = self.create_service_bundle()
+        shutil.rmtree(self.spot_destination.parent)
+        with mock.patch.object(tempfile, "mkstemp") as mkstemp:
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "parent"):
+                sqlite_state.restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        mkstemp.assert_not_called()
+        self.assertFalse(self.spot_destination.parent.exists())
+
+    def test_backup_contains_committed_wal_rows_and_excludes_uncommitted_rows(self) -> None:
+        writer = sqlite3.connect(self.spot_source)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("INSERT INTO trades(pair) VALUES ('BTC/USDT')")
+        writer.commit()
+        writer.execute("INSERT INTO trades(pair) VALUES ('ETH/USDT')")
+        bundle = self.create_service_bundle()
+        with closing(sqlite3.connect(bundle / "database.sqlite")) as backup:
+            rows = backup.execute("SELECT pair FROM trades").fetchall()
+        self.assertEqual(rows, [("BTC/USDT",)])
+        writer.rollback()
+
+    def test_verify_rejects_database_and_manifest_tampering(self) -> None:
+        bundle = self.create_service_bundle()
         (bundle / "database.sqlite").write_bytes(b"corrupt")
         with self.assertRaises(sqlite_state.StateBundleError):
             sqlite_state.verify_bundle(bundle)
 
-    def test_verify_rejects_manifest_tampering(self) -> None:
-        bundle = self.create_valid_bundle()
+        shutil.rmtree(bundle)
+        bundle = self.create_service_bundle()
         manifest_path = bundle / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["row_counts"]["orders"] = 99
@@ -141,92 +336,15 @@ class SQLiteStateTests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite_state.StateBundleError, "metadata mismatch"):
             sqlite_state.verify_bundle(bundle)
 
-    def test_verify_wraps_malformed_manifest_json(self) -> None:
-        bundle = self.create_valid_bundle()
-        (bundle / "manifest.json").write_text("{", encoding="utf-8")
-        with self.assertRaisesRegex(sqlite_state.StateBundleError, "manifest"):
-            sqlite_state.verify_bundle(bundle)
-
-    def test_verify_rejects_wrong_manifest_field_type(self) -> None:
-        bundle = self.create_valid_bundle()
-        manifest_path = bundle / "manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["database_size"] = str(manifest["database_size"])
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        with self.assertRaisesRegex(sqlite_state.StateBundleError, "manifest"):
-            sqlite_state.verify_bundle(bundle)
-
-    def test_verify_rejects_missing_or_extra_manifest_field(self) -> None:
-        for mutation in ("missing", "extra"):
-            with self.subTest(mutation=mutation):
-                bundle = self.create_valid_bundle()
-                manifest_path = bundle / "manifest.json"
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if mutation == "missing":
-                    del manifest["service"]
-                else:
-                    manifest["unexpected"] = True
-                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-                with self.assertRaisesRegex(sqlite_state.StateBundleError, "manifest"):
-                    sqlite_state.verify_bundle(bundle)
-                shutil.rmtree(bundle)
-
-    def test_verify_rejects_missing_core_table(self) -> None:
-        candidate = self.root / "only-orders.sqlite"
-        self.create_database(candidate, tables=("orders",))
-        with self.assertRaisesRegex(sqlite_state.StateBundleError, "core-table policy"):
-            sqlite_state.inspect_database(candidate)
-
-    def test_backup_does_not_modify_source_hash_or_mtime(self) -> None:
-        before_hash = sqlite_state.sha256_file(self.source)
-        before_mtime = self.source.stat().st_mtime_ns
-        self.create_valid_bundle()
-        self.assertEqual(sqlite_state.sha256_file(self.source), before_hash)
-        self.assertEqual(self.source.stat().st_mtime_ns, before_mtime)
-
-    def test_backup_rejects_path_traversal_service(self) -> None:
-        for service in ("../freqtrade", "..", "freqtrade/escape", "freqtrade\\escape"):
-            with self.subTest(service=service):
-                with self.assertRaisesRegex(sqlite_state.StateBundleError, "service"):
-                    sqlite_state.create_backup(
-                        service=service,
-                        source=self.source,
-                        output_root=self.output_root,
-                        now=self.fixed_now,
-                    )
-        self.assertFalse(self.output_root.exists())
-
-    def test_failed_backup_does_not_publish_bundle_or_leave_staging(self) -> None:
+    def test_failed_backup_and_restore_leave_no_staging_files(self) -> None:
         with mock.patch.object(
             sqlite_state, "inspect_database", side_effect=ValueError("bad")
         ):
             with self.assertRaisesRegex(ValueError, "bad"):
-                self.create_valid_bundle()
+                self.create_service_bundle()
         self.assertEqual(list(self.output_root.iterdir()), [])
 
-    def test_failed_atomic_publish_does_not_leave_staging(self) -> None:
-        with mock.patch.object(os, "replace", side_effect=OSError("publish failed")):
-            with self.assertRaisesRegex(OSError, "publish failed"):
-                self.create_valid_bundle()
-        self.assertEqual(list(self.output_root.iterdir()), [])
-
-    def test_restore_refuses_existing_destination(self) -> None:
-        bundle = self.create_valid_bundle()
-        self.destination.write_bytes(b"keep")
-        with self.assertRaisesRegex(sqlite_state.StateBundleError, "already exists"):
-            sqlite_state.restore_bundle(bundle, self.destination)
-        self.assertEqual(self.destination.read_bytes(), b"keep")
-
-    def test_restore_verifies_before_creating_destination_parent(self) -> None:
-        bundle = self.create_valid_bundle()
-        (bundle / "manifest.json").write_text("not-json", encoding="utf-8")
-        destination = self.root / "new-parent" / "restored.sqlite"
-        with self.assertRaises(sqlite_state.StateBundleError):
-            sqlite_state.restore_bundle(bundle, destination)
-        self.assertFalse(destination.parent.exists())
-
-    def test_failed_restore_removes_destination_and_temporary_file(self) -> None:
-        bundle = self.create_valid_bundle()
+        bundle = self.create_service_bundle()
         original_inspect = sqlite_state.inspect_database
 
         def reject_temporary(path: Path) -> dict[str, object]:
@@ -236,165 +354,65 @@ class SQLiteStateTests(unittest.TestCase):
 
         with mock.patch.object(sqlite_state, "inspect_database", side_effect=reject_temporary):
             with self.assertRaisesRegex(sqlite_state.StateBundleError, "copied"):
-                sqlite_state.restore_bundle(bundle, self.destination)
-        self.assertFalse(self.destination.exists())
-        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
+                sqlite_state.restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        self.assertFalse(self.spot_destination.exists())
+        self.assertEqual(list(self.spot_destination.parent.glob("*.tmp")), [])
 
-    def test_restore_rejects_bundle_database_swapped_after_verification(self) -> None:
-        bundle = self.create_valid_bundle()
-        swapped = self.root / "swapped.sqlite"
-        self.create_database(swapped)
-        with closing(sqlite3.connect(swapped)) as connection:
-            connection.execute("INSERT INTO orders(id) VALUES (99)")
-            connection.commit()
-        original_verify = sqlite_state.verify_bundle
-
-        def verify_then_swap(path: Path) -> dict[str, object]:
-            manifest = original_verify(path)
-            os.replace(swapped, path / "database.sqlite")
-            return manifest
-
-        with mock.patch.object(
-            sqlite_state, "verify_bundle", side_effect=verify_then_swap
-        ):
-            with self.assertRaisesRegex(sqlite_state.StateBundleError, "metadata mismatch"):
-                sqlite_state.restore_bundle(bundle, self.destination)
-        self.assertFalse(self.destination.exists())
-        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
-
-    def test_restore_does_not_clobber_destination_created_during_copy(self) -> None:
-        bundle = self.create_valid_bundle()
-        original_copyfile = shutil.copyfile
-
-        def copy_then_create_destination(source: Path, target: Path) -> str:
-            result = original_copyfile(source, target)
-            self.destination.write_bytes(b"KEEP-ME")
-            return result
-
-        with mock.patch.object(
-            shutil, "copyfile", side_effect=copy_then_create_destination
-        ):
-            with self.assertRaisesRegex(sqlite_state.StateBundleError, "already exists"):
-                sqlite_state.restore_bundle(bundle, self.destination)
-        self.assertEqual(self.destination.read_bytes(), b"KEEP-ME")
-        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
-
-    def test_restore_does_not_clobber_dangling_symlink_created_during_copy(self) -> None:
-        bundle = self.create_valid_bundle()
-        missing_target = self.root / "missing-target.sqlite"
-        original_copyfile = shutil.copyfile
-
-        def copy_then_create_symlink(source: Path, target: Path) -> str:
-            result = original_copyfile(source, target)
-            self.destination.symlink_to(missing_target)
-            return result
-
-        with mock.patch.object(
-            shutil, "copyfile", side_effect=copy_then_create_symlink
-        ):
-            with self.assertRaisesRegex(sqlite_state.StateBundleError, "already exists"):
-                sqlite_state.restore_bundle(bundle, self.destination)
-        self.assertTrue(self.destination.is_symlink())
-        link_target = str(Path(os.readlink(self.destination))).removeprefix("\\\\?\\")
-        self.assertEqual(Path(link_target), missing_target)
-        self.assertFalse(missing_target.exists())
-        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
-
-    def test_restore_reports_cleanup_failure_after_successful_link(self) -> None:
-        bundle = self.create_valid_bundle()
-        original_unlink = Path.unlink
-
-        def reject_temporary_unlink(
-            path: Path, missing_ok: bool = False
-        ) -> None:
-            if path.name.startswith(".restored.sqlite.") and path.suffix == ".tmp":
-                raise PermissionError("temporary unlink blocked")
-            original_unlink(path, missing_ok=missing_ok)
-
-        with mock.patch.object(
-            Path, "unlink", autospec=True, side_effect=reject_temporary_unlink
-        ):
-            with self.assertRaisesRegex(
-                sqlite_state.StateBundleError, "succeeded but temporary cleanup failed"
-            ):
-                sqlite_state.restore_bundle(bundle, self.destination)
-        self.assertTrue(self.destination.is_file())
-        sqlite_state.compare_databases(bundle / "database.sqlite", self.destination)
-        self.assertEqual(len(list(self.root.glob(".restored.sqlite.*.tmp"))), 1)
-
-    def test_restore_closes_connections_before_atomic_publish(self) -> None:
-        sqlite_state.restore_bundle(self.create_valid_bundle(), self.destination)
-        self.assertEqual(list(self.root.glob(".restored.sqlite.*.tmp")), [])
-        renamed = self.destination.with_name("renamed.sqlite")
-        os.replace(self.destination, renamed)
-        self.assertTrue(renamed.is_file())
-
-    def test_compare_detects_core_table_count_mismatch(self) -> None:
-        candidate = self.copy_source()
-        with closing(sqlite3.connect(candidate)) as connection:
+    def test_compare_structure_detects_count_mismatch_and_accepts_match(self) -> None:
+        matching = self.root / "matching.sqlite"
+        sqlite_state.online_backup(self.spot_source, matching)
+        sqlite_state.compare_structure(self.spot_source, matching)
+        with closing(sqlite3.connect(matching)) as connection:
             connection.execute("INSERT INTO orders(id) VALUES (99)")
             connection.commit()
         with self.assertRaisesRegex(sqlite_state.StateBundleError, "orders row count"):
-            sqlite_state.compare_databases(self.source, candidate)
+            sqlite_state.compare_structure(self.spot_source, matching)
 
-    def test_compare_accepts_matching_databases(self) -> None:
-        sqlite_state.compare_databases(self.source, self.copy_source())
+    def test_public_generic_escape_hatches_are_removed(self) -> None:
+        for name in ("create_backup", "restore_bundle", "compare_databases"):
+            self.assertFalse(hasattr(sqlite_state, name), name)
+        parser = sqlite_state.build_parser()
+        help_text = parser.format_help()
+        for command in (
+            "backup-service",
+            "restore-service",
+            "archive",
+            "verify",
+            "compare-structure",
+        ):
+            self.assertIn(command, help_text)
 
-    def test_cli_four_commands_report_status_without_trade_rows(self) -> None:
-        with closing(sqlite3.connect(self.source)) as connection:
-            connection.execute("INSERT INTO trades(pair) VALUES ('BTC/USDT')")
-            connection.commit()
-        backup = self.run_cli(
-            "backup",
-            "--service",
-            "freqtrade-cli",
+    def test_cli_archive_print_path_is_exactly_one_path_line(self) -> None:
+        completed = self.run_cli(
+            "archive",
+            "--label",
+            "qqe-research",
             "--source",
-            str(self.source),
+            str(self.spot_source),
             "--output-root",
             str(self.output_root),
             "--print-path",
         )
-        self.assertEqual(backup.returncode, 0, backup.stderr)
-        bundle = Path(backup.stdout.strip())
-        verify = self.run_cli("verify", "--bundle", str(bundle))
-        restore = self.run_cli(
-            "restore", "--bundle", str(bundle), "--destination", str(self.destination)
-        )
-        compare = self.run_cli(
-            "compare", "--source", str(self.source), "--candidate", str(self.destination)
-        )
-        for completed in (backup, verify, restore, compare):
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertNotIn("BTC/USDT", completed.stdout)
-            self.assertNotIn("BTC/USDT", completed.stderr)
-        self.assertIn("verification: OK", verify.stdout)
-        self.assertIn("restore: OK", restore.stdout)
-        self.assertIn("comparison: OK", compare.stdout)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(len(completed.stdout.splitlines()), 1)
+        self.assertTrue(Path(completed.stdout.strip()).is_dir())
 
-    def test_cli_error_is_nonzero_and_does_not_print_secret_or_trade_rows(self) -> None:
+    def test_cli_error_is_fixed_and_does_not_print_secret_or_paths(self) -> None:
+        bundle = self.create_service_bundle()
         secret = "SUPER-SECRET-BTC/USDT"
-        bundle = self.create_valid_bundle()
         (bundle / "manifest.json").write_text(secret, encoding="utf-8")
         completed = self.run_cli("verify", "--bundle", str(bundle))
         self.assertNotEqual(completed.returncode, 0)
-        self.assertNotIn(secret, completed.stdout + completed.stderr)
-        self.assertNotIn("BTC/USDT", completed.stdout + completed.stderr)
-
-    def test_cli_deeply_nested_manifest_has_fixed_safe_error(self) -> None:
-        bundle = self.create_valid_bundle()
-        secret = "DO-NOT-ECHO-THIS"
-        deeply_nested = "[" * 2000 + json.dumps(secret) + "]" * 2000
-        (bundle / "manifest.json").write_text(deeply_nested, encoding="utf-8")
-
-        completed = self.run_cli("verify", "--bundle", str(bundle))
-
-        output = completed.stdout + completed.stderr
-        self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, "")
         self.assertEqual(completed.stderr, "SQLite state operation failed\n")
-        self.assertNotIn("Traceback", output)
-        self.assertNotIn(str(self.root), output)
-        self.assertNotIn(secret, output)
+        self.assertNotIn(secret, completed.stdout + completed.stderr)
+        self.assertNotIn(str(self.root), completed.stdout + completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
