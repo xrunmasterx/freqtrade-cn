@@ -92,6 +92,24 @@ Every formal service uses `/freqtrade/state` as its writable userdata directory.
 Trading services load strategies from the read-only
 `/freqtrade/user_data/strategies` mount; Research has no strategy path.
 
+## Offline formal startup verification
+
+After building `freqtrade-cn:local`, run the same blocking startup gate used by
+Root Safety:
+
+```powershell
+python tools/formal_startup.py verify-all --image freqtrade-cn:local
+```
+
+The verifier reads each service's rendered production command and runs the real
+entrypoint as UID:GID `12345:12345` with `--network none`. It creates temporary
+dry-run configuration, secrets, and state for the check; operational credentials
+and state are not used. `/freqtrade/state` is the only writable service root,
+while configuration, strategies, Research inputs, and secrets remain read-only.
+Spot and Futures pass only when they reach the named exchange-network boundary.
+Research must answer `/api/v1/ping` inside its isolated container. Every probe is
+stopped and removed within a fixed timeout.
+
 ## Stop
 
 Stopping active Bots is an operational action and requires explicit approval for

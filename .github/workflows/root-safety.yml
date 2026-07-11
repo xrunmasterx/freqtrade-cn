@@ -171,6 +171,9 @@ jobs:
           futures_state="$(python tools/compose_runtime.py check-state freqtrade-futures)"
           test "${futures_state}" = "[]"
 
+      - name: Verify formal dynamic-UID startup
+        run: python tools/formal_startup.py verify-all --image freqtrade-cn:local
+
       - name: Scan current committed trees for secrets
         shell: bash
         run: |
