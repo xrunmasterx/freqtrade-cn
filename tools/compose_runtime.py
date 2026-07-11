@@ -45,7 +45,7 @@ ALLOWED_PROFILES = {"trading", "research"}
 ALLOWED_ACTIONS = {"config", "up", "down", "stop", "ps", "logs"}
 FORMAL_SERVICES = {"freqtrade", "freqtrade-futures", "freqtrade-research"}
 EMERGENCY_ACTIONS = {"down", "stop", "ps", "logs"}
-COMPOSE_WAIT_TIMEOUT_SECONDS = 60
+COMPOSE_WAIT_TIMEOUT_SECONDS = 180
 CI_PROBE_PATHS = {
     "freqtrade": ("/freqtrade/user_data/strategies/.ci-write-probe",),
     "freqtrade-futures": ("/freqtrade/user_data/strategies/.ci-write-probe",),
