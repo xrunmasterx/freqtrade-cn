@@ -62,6 +62,8 @@ class GitFixture:
                 str(source),
                 name,
             )
+            _git(self.root / name, "config", "user.email", "tests@example.invalid")
+            _git(self.root / name, "config", "user.name", "Committed Build Tests")
         _git(self.root, "add", ".")
         _git(self.root, "commit", "-qm", "fixture")
 

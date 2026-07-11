@@ -32,6 +32,8 @@ jobs:
           version: v5.1.4
 
       - name: Run standard-library root unit tests
+        env:
+          ROOT_RUNTIME_TEST_READY: "0"
         run: python -S -m unittest discover -s tests -p "test_*.py" -v
 
       - name: Enforce tracked config policy
@@ -45,6 +47,11 @@ jobs:
 
       - name: Enforce full runtime contract
         run: python tools/runtime_contract.py
+
+      - name: Run bootstrapped runtime root tests
+        env:
+          ROOT_RUNTIME_TEST_READY: "1"
+        run: python -S -m unittest tests.test_trading_config_safety.TradingConfigSafetyTests -v
 
       - name: Install backend development dependencies
         run: |
@@ -71,6 +78,8 @@ jobs:
             tests/test_directory_operations.py
 
       - name: Run runtime-dependent root selector
+        env:
+          ROOT_RUNTIME_TEST_READY: "1"
         run: python -m unittest tests.test_trading_config_safety.TradingConfigSafetyTests.test_actual_research_profile_paths_resolve_below_read_only_input -v
 
       - name: Install pnpm

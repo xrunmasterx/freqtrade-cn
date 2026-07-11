@@ -21,6 +21,7 @@ RUNTIME_CONFIG_PATH = "/freqtrade/config/runtime.json"
 STATE_PATH = "/freqtrade/state"
 STRATEGY_PATH = "/freqtrade/user_data/strategies"
 RESEARCH_DATA_PATH = "/freqtrade/user_data/research_data"
+ROOT_RUNTIME_TEST_READY = "ROOT_RUNTIME_TEST_READY"
 
 SECRET_FILES = {
     "api_password": "api_password",
@@ -54,6 +55,8 @@ def resolved_source(volume: dict[str, Any]) -> Path:
 class TradingConfigSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        if os.environ.get(ROOT_RUNTIME_TEST_READY) != "1":
+            raise unittest.SkipTest("requires bootstrapped runtime")
         cls.manifest = load_runtime_manifest()
         cls.compose = render_compose(root=REPO_ROOT)
         cls.entries = {entry["name"]: entry for entry in cls.manifest["services"]}

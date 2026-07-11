@@ -26,6 +26,13 @@ ROOT_UNIT_STEP = "Run standard-library root unit tests"
 ROOT_UNIT_COMMAND = 'python -S -m unittest discover -s tests -p "test_*.py" -v'
 BOOTSTRAP_STEP = "Bootstrap ephemeral runtime"
 FULL_RUNTIME_STEP = "Enforce full runtime contract"
+BOOTSTRAPPED_RUNTIME_STEP = "Run bootstrapped runtime root tests"
+BOOTSTRAPPED_RUNTIME_COMMAND = (
+    "python -S -m unittest "
+    "tests.test_trading_config_safety.TradingConfigSafetyTests -v"
+)
+RUNTIME_READY_ENV_LINE = '          ROOT_RUNTIME_TEST_READY: "1"'
+RUNTIME_NOT_READY_ENV_LINE = '          ROOT_RUNTIME_TEST_READY: "0"'
 FRONTEND_INSTALL_STEP = "Install FreqUI dependencies"
 BACKEND_REGRESSION_STEP = "Run backend P0 regressions"
 RUNTIME_ROOT_STEP = "Run runtime-dependent root selector"
@@ -117,6 +124,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertTrue(
             step_has_exact_line(root_unit_step, f"        run: {ROOT_UNIT_COMMAND}")
         )
+        self.assertTrue(step_has_exact_line(root_unit_step, RUNTIME_NOT_READY_ENV_LINE))
         root_unit_index = workflow.index(root_unit_step)
         for later_step_name in (
             BOOTSTRAP_STEP,
@@ -158,10 +166,27 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 f"        run: {RUNTIME_ROOT_COMMAND}",
             )
         )
+        self.assertTrue(step_has_exact_line(runtime_selector, RUNTIME_READY_ENV_LINE))
         self.assertLess(workflow.index(full_runtime), workflow.index(install))
         self.assertLess(workflow.index(install), workflow.index(regressions))
         self.assertLess(workflow.index(regressions), workflow.index(runtime_selector))
         self.assertLess(workflow.index(runtime_selector), workflow.index(frontend_setup))
+
+    def test_bootstrapped_runtime_class_runs_before_backend_install(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        full_runtime = named_workflow_step(workflow, FULL_RUNTIME_STEP)
+        runtime_class = named_workflow_step(workflow, BOOTSTRAPPED_RUNTIME_STEP)
+        install = named_workflow_step(workflow, BACKEND_INSTALL_STEP)
+
+        self.assertTrue(
+            step_has_exact_line(
+                runtime_class,
+                f"        run: {BOOTSTRAPPED_RUNTIME_COMMAND}",
+            )
+        )
+        self.assertTrue(step_has_exact_line(runtime_class, RUNTIME_READY_ENV_LINE))
+        self.assertLess(workflow.index(full_runtime), workflow.index(runtime_class))
+        self.assertLess(workflow.index(runtime_class), workflow.index(install))
 
     def test_installs_backend_test_runtime_dependencies(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
