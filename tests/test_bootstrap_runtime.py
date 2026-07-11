@@ -264,21 +264,16 @@ class BootstrapRuntimeTests(unittest.TestCase):
         self.assertEqual(atomic_write.call_args.args[0], config_path)
         migrated = json.loads(config_path.read_text(encoding="utf-8"))
         self.assertEqual(migrated["marker"], "preserved")
+        self.assertEqual(
+            migrated.get("research_input_root"),
+            "/freqtrade/user_data/research_data",
+        )
         profile = migrated["research_bots"][0]
-        self.assertEqual(
-            profile["data_source"]["root"],
-            "/freqtrade/user_data/research_data/a_share",
-        )
-        self.assertEqual(
-            profile["market_data"]["meta_root"],
-            "/freqtrade/user_data/research_data/a_share_meta",
-        )
-        self.assertEqual(
-            profile["side_data"]["root"],
-            "/freqtrade/user_data/research_data/a_share_meta",
-        )
+        self.assertEqual(profile["data_source"]["root"], "a_share")
+        self.assertEqual(profile["market_data"]["meta_root"], "a_share_meta")
+        self.assertEqual(profile["side_data"]["root"], "a_share_meta")
 
-    def test_migrate_research_paths_is_idempotent_for_approved_values(self) -> None:
+    def test_migrate_research_paths_converts_interim_absolute_values(self) -> None:
         config_path = self.root / "configs/research.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         document = {
@@ -297,6 +292,34 @@ class BootstrapRuntimeTests(unittest.TestCase):
             ]
         }
         config_path.write_text(json.dumps(document), encoding="utf-8")
+        self.manifest["services"][2]["config_path"] = "configs/research.json"
+
+        bootstrap_runtime.migrate_research_paths(self.root, self.manifest)
+
+        migrated = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            migrated.get("research_input_root"),
+            "/freqtrade/user_data/research_data",
+        )
+        profile = migrated["research_bots"][0]
+        self.assertEqual(profile["data_source"]["root"], "a_share")
+        self.assertEqual(profile["market_data"]["meta_root"], "a_share_meta")
+        self.assertEqual(profile["side_data"]["root"], "a_share_meta")
+
+    def test_migrate_research_paths_is_idempotent_for_approved_values(self) -> None:
+        config_path = self.root / "configs/research.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        document = {
+            "research_input_root": "/freqtrade/user_data/research_data",
+            "research_bots": [
+                {
+                    "data_source": {"root": "a_share"},
+                    "market_data": {"meta_root": "a_share_meta"},
+                    "side_data": {"root": "a_share_meta"},
+                }
+            ]
+        }
+        config_path.write_text(json.dumps(document), encoding="utf-8")
         before = config_path.read_bytes()
         self.manifest["services"][2]["config_path"] = "configs/research.json"
         migrate = getattr(bootstrap_runtime, "migrate_research_paths", None)
@@ -305,7 +328,10 @@ class BootstrapRuntimeTests(unittest.TestCase):
             return
 
         with mock.patch.object(bootstrap_runtime, "_atomic_write_text") as atomic_write:
-            migrate(self.root, self.manifest)
+            try:
+                migrate(self.root, self.manifest)
+            except ValueError as error:
+                self.fail(f"approved research paths must be idempotent: {error}")
 
         atomic_write.assert_not_called()
         self.assertEqual(config_path.read_bytes(), before)

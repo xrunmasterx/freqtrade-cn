@@ -4,8 +4,10 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import unittest
-from pathlib import Path, PurePosixPath
+from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 from tools.compose_runtime import render_compose
@@ -216,29 +218,35 @@ class TradingConfigSafetyTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        profile = next(
-            bot for bot in config["research_bots"] if bot["id"] == "a-share-local"
-        )
-        mounted_root = PurePosixPath(RESEARCH_DATA_PATH)
-        roots = (
-            PurePosixPath(profile["data_source"]["root"]),
-            PurePosixPath(profile["market_data"]["meta_root"]),
-            PurePosixPath(profile["side_data"]["root"]),
-        )
-        self.assertEqual(
-            roots,
-            (
-                mounted_root / "a_share",
-                mounted_root / "a_share_meta",
-                mounted_root / "a_share_meta",
-            ),
-        )
-        for root in roots:
-            self.assertFalse(str(root.relative_to(mounted_root)).startswith(".."))
+        config["user_data_dir"] = STATE_PATH
+        self.assertEqual(config.get("research_input_root"), RESEARCH_DATA_PATH)
         research_source = volume_for(
             self.services["freqtrade-research"], RESEARCH_DATA_PATH
         )
         self.assertTrue(research_source.get("read_only", False))
+        config["research_input_root"] = str(resolved_source(research_source))
+
+        sys.path.insert(0, str(REPO_ROOT / "freqtrade"))
+        try:
+            load_research_profiles = import_module(
+                "freqtrade.research.profiles"
+            ).load_research_profiles
+        finally:
+            sys.path.pop(0)
+        profile = load_research_profiles(config)[0]
+        input_root = resolved_source(research_source)
+        roots = (profile.data_root, profile.market_data_root, profile.side_data_root)
+        self.assertEqual(
+            roots,
+            (
+                input_root / "a_share",
+                input_root / "a_share_meta",
+                input_root / "a_share_meta",
+            ),
+        )
+        for root in roots:
+            self.assertIsNotNone(root)
+            root.relative_to(input_root)
 
     def test_all_bind_mounts_refuse_to_create_missing_host_paths(self) -> None:
         for name, service in self.services.items():

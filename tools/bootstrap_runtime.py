@@ -30,20 +30,24 @@ RESEARCH_PATH_MIGRATIONS = (
         "root",
         "research_data/a_share",
         "/freqtrade/user_data/research_data/a_share",
+        "a_share",
     ),
     (
         "market_data",
         "meta_root",
         "research_data/a_share_meta",
         "/freqtrade/user_data/research_data/a_share_meta",
+        "a_share_meta",
     ),
     (
         "side_data",
         "root",
         "research_data/a_share_meta",
         "/freqtrade/user_data/research_data/a_share_meta",
+        "a_share_meta",
     ),
 )
+RESEARCH_INPUT_ROOT = "/freqtrade/user_data/research_data"
 RUNTIME_IDENTITY_KEYS = (
     "FREQTRADE_RUNTIME_UID",
     "FREQTRADE_RUNTIME_GID",
@@ -462,23 +466,29 @@ def migrate_research_paths(root: Path, manifest: dict[str, Any]) -> None:
     if type(profiles) is not list or not profiles:
         raise ValueError("research path migration requires research profiles")
 
-    values: list[tuple[dict[str, Any], str, str, str]] = []
+    input_root = document.get("research_input_root")
+    if input_root not in (None, RESEARCH_INPUT_ROOT):
+        raise ValueError("research path migration rejected unknown input root")
+
+    values: list[tuple[dict[str, Any], str, str]] = []
     for profile in profiles:
         if type(profile) is not dict:
             raise ValueError("research path migration requires research profiles")
-        for section, key, legacy, approved in RESEARCH_PATH_MIGRATIONS:
+        for section, key, legacy, interim, approved in RESEARCH_PATH_MIGRATIONS:
             container = profile.get(section)
             value = container.get(key) if type(container) is dict else None
-            if value not in (legacy, approved):
+            allowed = (legacy, interim) if input_root is None else (approved,)
+            if value not in allowed:
                 raise ValueError("research path migration rejected unknown value")
-            values.append((container, key, legacy, approved))
+            values.append((container, key, approved))
 
-    changed = False
-    for container, key, legacy, approved in values:
-        if container[key] == legacy:
+    changed = input_root is None
+    for container, key, approved in values:
+        if container[key] != approved:
             container[key] = approved
             changed = True
     if changed:
+        document["research_input_root"] = RESEARCH_INPUT_ROOT
         _atomic_write_text(
             config_path,
             json.dumps(document, indent=4, ensure_ascii=False) + "\n",

@@ -1,6 +1,7 @@
 {
     "$schema": "https://schema.freqtrade.io/schema.json",
     "bot_name": "freqtrade-cn-a-share-research",
+    "research_input_root": "/freqtrade/user_data/research_data",
     "research_bots": [
         {
             "id": "a-share-local",
@@ -8,15 +9,15 @@
             "market": "a_share",
             "data_source": {
                 "type": "local_csv",
-                "root": "/freqtrade/user_data/research_data/a_share"
+                "root": "a_share"
             },
             "market_data": {
-                "meta_root": "/freqtrade/user_data/research_data/a_share_meta",
+                "meta_root": "a_share_meta",
                 "calendar": "calendar/trade_dates.csv",
                 "daily_status": "status/daily_status.csv"
             },
             "side_data": {
-                "root": "/freqtrade/user_data/research_data/a_share_meta",
+                "root": "a_share_meta",
                 "enabled_datasets": [
                     "fund_flow_daily",
                     "limit_pool",

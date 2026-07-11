@@ -31,9 +31,10 @@ information to logs or paste it into an issue, chat, or screenshot.
 
 `migrate-research-paths` is the explicit, idempotent migration for an existing
 ignored `config.research.json`. It changes only the known legacy A-share data,
-metadata, and side-data roots to their absolute paths below the read-only
-Research input mount. Unknown or customized values are rejected without writing
-the file; neither `init` nor `sanitize-api-configs` performs this migration.
+metadata, and side-data roots (including the interim absolute form) to relative
+children of `research_input_root=/freqtrade/user_data/research_data`. Unknown or
+customized values are rejected without writing the file; neither `init` nor
+`sanitize-api-configs` performs this migration.
 
 QQE is not part of the formal root runtime contract. Adding it requires one
 reviewed change that includes its manifest entry, template, strategy, tests, and
