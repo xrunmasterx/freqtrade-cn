@@ -291,20 +291,29 @@ class CommittedBuildTests(unittest.TestCase):
             self.assertTrue((root / "source").samefile(root / "nested/path/copy"))
 
     def test_extraction_failure_removes_partial_writes(self) -> None:
-        source = tarfile.TarInfo("source")
-        source.size = len(b"committed")
-        hardlink = tarfile.TarInfo("nested/copy")
-        hardlink.type = tarfile.LNKTYPE
-        hardlink.linkname = "source"
+        for mode in (0o644, 0o444):
+            with self.subTest(mode=oct(mode)):
+                source = tarfile.TarInfo("source")
+                source.mode = mode
+                source.size = len(b"committed")
+                hardlink = tarfile.TarInfo("nested/copy")
+                hardlink.type = tarfile.LNKTYPE
+                hardlink.linkname = "source"
 
-        with tempfile.TemporaryDirectory() as destination:
-            root = Path(destination)
-            with patch("tools.committed_build.os.link", side_effect=OSError("link failure")):
-                with self.assertRaises(ValueError):
-                    extract_git_archive(
-                        _tar_bytes([(source, b"committed"), (hardlink, b"")]), root
-                    )
-            self.assertEqual(list(root.iterdir()), [])
+                with tempfile.TemporaryDirectory() as destination:
+                    root = Path(destination)
+                    with patch(
+                        "tools.committed_build.os.link", side_effect=OSError("link failure")
+                    ) as link_operation:
+                        with self.assertRaises(ValueError) as raised:
+                            extract_git_archive(
+                                _tar_bytes([(source, b"committed"), (hardlink, b"")]), root
+                            )
+
+                    link_operation.assert_called_once()
+                    self.assertEqual(str(raised.exception), "Git archive extraction failed")
+                    self.assertNotIn(str(root), str(raised.exception))
+                    self.assertEqual(list(root.iterdir()), [])
 
     def test_context_is_removed_after_success_and_exception(self) -> None:
         identity = resolve_commit_identity(self.fixture.root)

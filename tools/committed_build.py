@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -229,12 +230,50 @@ def _extract_member(
     os.chmod(path, member.mode & 0o777)
 
 
-def _clear_directory(directory: Path) -> None:
-    for path in directory.iterdir():
-        if path.is_symlink() or path.is_file():
+def _add_owner_permissions(path: Path, permissions: int) -> None:
+    try:
+        os.chmod(path, path.stat().st_mode | permissions)
+    except OSError:
+        pass
+
+
+def _remove_archive_path(path: Path) -> None:
+    try:
+        if path.is_symlink():
             path.unlink()
-        else:
-            shutil.rmtree(path)
+            return
+        is_directory = path.is_dir()
+    except OSError:
+        return
+
+    if is_directory:
+        _add_owner_permissions(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        try:
+            children = list(path.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            _remove_archive_path(child)
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+        return
+
+    _add_owner_permissions(path, stat.S_IWUSR)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _clear_directory(directory: Path) -> None:
+    try:
+        paths = list(directory.iterdir())
+    except OSError:
+        paths = []
+    for path in paths:
+        _remove_archive_path(path)
 
 
 def extract_git_archive(stream: BinaryIO, destination: Path) -> None:
@@ -265,7 +304,10 @@ def extract_git_archive(stream: BinaryIO, destination: Path) -> None:
         except (tarfile.TarError, EOFError):
             raise ValueError("Git archive is invalid") from None
         except OSError:
-            _clear_directory(destination)
+            try:
+                _clear_directory(destination)
+            except BaseException:
+                pass
             raise ValueError("Git archive extraction failed") from None
 
 
