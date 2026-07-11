@@ -266,7 +266,7 @@ the authorized terminal; do not paste it into logs, tickets, chat, or reports.
 Start Spot first:
 
 ```powershell
-python tools/compose_runtime.py up --detach freqtrade
+python tools/compose_runtime.py up freqtrade
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Start Spot service'
 python tools/compose_runtime.py ps freqtrade
@@ -281,7 +281,7 @@ Pause and confirm Spot is healthy and visibly identifies the correct Bot name,
 ID, exchange, mode, and DRY-RUN endpoint. Only then start Futures:
 
 ```powershell
-python tools/compose_runtime.py up --detach freqtrade-futures
+python tools/compose_runtime.py up freqtrade-futures
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Start Futures service'
 python tools/compose_runtime.py ps freqtrade-futures
@@ -296,7 +296,7 @@ Pause and perform the same target and health checks for Futures. Only then start
 Research:
 
 ```powershell
-python tools/compose_runtime.py up --detach freqtrade-research
+python tools/compose_runtime.py up freqtrade-research
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Start Research service'
 python tools/compose_runtime.py ps freqtrade-research

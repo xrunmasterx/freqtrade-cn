@@ -53,7 +53,7 @@ before migrating state.
 Build and start Spot, then inspect its status:
 
 ```powershell
-python tools/compose_runtime.py up --detach --build freqtrade
+python tools/compose_runtime.py up freqtrade
 python tools/compose_runtime.py ps freqtrade
 ```
 
@@ -62,7 +62,7 @@ Open the trading UI at `http://127.0.0.1:8081/trade`.
 Build and start Futures independently:
 
 ```powershell
-python tools/compose_runtime.py up --detach --build freqtrade-futures
+python tools/compose_runtime.py up freqtrade-futures
 python tools/compose_runtime.py ps freqtrade-futures
 ```
 
@@ -73,21 +73,25 @@ do not treat a healthy Spot endpoint on port `8081` as Futures acceptance.
 Build and start only the research webserver:
 
 ```powershell
-python tools/compose_runtime.py up --detach --build freqtrade-research
+python tools/compose_runtime.py up freqtrade-research
 python tools/compose_runtime.py ps freqtrade-research
 ```
 
 Open the research UI at `http://127.0.0.1:8083/research`.
 
-Services are assigned to profiles. To build and start all formal services, use:
+Services are assigned to profiles. To build and start all formal services, start
+each approved service explicitly, then inspect the complete project:
 
 ```powershell
-python tools/compose_runtime.py --profile trading --profile research up --detach --build
+python tools/compose_runtime.py up freqtrade
+python tools/compose_runtime.py up freqtrade-futures
+python tools/compose_runtime.py up freqtrade-research
 python tools/compose_runtime.py --profile trading --profile research ps
 ```
 
 The wrapper verifies bootstrap state and permits only the supported project,
-profiles, services, actions, and options. It is the formal runtime entrypoint.
+profiles, services, actions, and options. Launch accepts exactly one service and
+does not accept caller-supplied flags or profiles. It is the formal runtime entrypoint.
 Every formal service uses `/freqtrade/state` as its writable userdata directory.
 Trading services load strategies from the read-only
 `/freqtrade/user_data/strategies` mount; Research has no strategy path.

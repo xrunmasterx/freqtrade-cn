@@ -81,7 +81,7 @@ Assert-NativeSuccess -ExitCode $exitCode -Operation 'Rotate Spot credentials'
 python tools/bootstrap_runtime.py verify
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Verify Spot credential rotation'
-python tools/compose_runtime.py up --detach --force-recreate freqtrade
+python tools/compose_runtime.py up freqtrade
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Recreate Spot service'
 python tools/compose_runtime.py ps freqtrade
@@ -104,7 +104,7 @@ Assert-NativeSuccess -ExitCode $exitCode -Operation 'Rotate Futures credentials'
 python tools/bootstrap_runtime.py verify
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Verify Futures credential rotation'
-python tools/compose_runtime.py up --detach --force-recreate freqtrade-futures
+python tools/compose_runtime.py up freqtrade-futures
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Recreate Futures service'
 python tools/compose_runtime.py ps freqtrade-futures
@@ -127,7 +127,7 @@ Assert-NativeSuccess -ExitCode $exitCode -Operation 'Rotate Research credentials
 python tools/bootstrap_runtime.py verify
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Verify Research credential rotation'
-python tools/compose_runtime.py up --detach --force-recreate freqtrade-research
+python tools/compose_runtime.py up freqtrade-research
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Recreate Research service'
 python tools/compose_runtime.py ps freqtrade-research

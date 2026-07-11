@@ -49,15 +49,16 @@ class ComposeRuntimeTests(unittest.TestCase):
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-qm", "fixture"], cwd=self.root, check=True)
 
-    def test_parser_allows_only_supported_actions_and_safe_options(self) -> None:
+    def test_parser_exposes_only_approved_public_actions(self) -> None:
+        self.assertEqual(
+            compose_runtime.ALLOWED_ACTIONS,
+            {"config", "up", "down", "stop", "ps", "logs"},
+        )
         cases = (
             (["--profile", "trading", "config", "--quiet", "--format", "json"],),
-            (["--profile", "research", "up", "--detach", "--build", "freqtrade-research"],),
+            (["up", "freqtrade-research"],),
             (["down"],),
-            (["create", "--force-recreate", "freqtrade"],),
-            (["start", "freqtrade"],),
             (["stop", "freqtrade-futures"],),
-            (["restart", "freqtrade-research"],),
             (["ps", "--all"],),
             (["logs", "--follow", "--tail", "50", "freqtrade"],),
         )
@@ -67,6 +68,136 @@ class ComposeRuntimeTests(unittest.TestCase):
                     compose_runtime.parse_compose_arguments(arguments, set(SERVICES)),
                     arguments,
                 )
+
+    def test_parser_requires_up_with_exactly_one_approved_service_and_no_flags(self) -> None:
+        for service in SERVICES:
+            with self.subTest(service=service):
+                self.assertEqual(
+                    compose_runtime.parse_compose_arguments(["up", service], set(SERVICES)),
+                    ["up", service],
+                )
+
+        forbidden = (
+            ["up"],
+            ["up", "unknown-service"],
+            ["up", "freqtrade", "freqtrade-futures"],
+            ["up", "--detach", "freqtrade"],
+            ["up", "--build", "freqtrade"],
+            ["up", "--force-recreate", "freqtrade"],
+            ["--profile", "trading", "up", "freqtrade"],
+        )
+        for arguments in forbidden:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(compose_runtime.UnsupportedArguments):
+                    compose_runtime.parse_compose_arguments(arguments, set(SERVICES))
+
+    def test_parser_rejects_create_start_and_restart_before_docker(self) -> None:
+        for action in ("create", "start", "restart"):
+            arguments = [action, "freqtrade"]
+            with self.subTest(action=action):
+                with self.assertRaises(compose_runtime.UnsupportedArguments):
+                    compose_runtime.parse_compose_arguments(arguments, set(SERVICES))
+                with (
+                    mock.patch.object(compose_runtime.subprocess, "run") as run,
+                    mock.patch("sys.stderr"),
+                ):
+                    self.assertEqual(compose_runtime.main(arguments), 64)
+                run.assert_not_called()
+
+    def test_up_delegates_to_internal_launcher_with_frozen_service(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        launcher = mock.Mock(return_value=completed)
+        with mock.patch.object(
+            compose_runtime, "load_runtime_manifest", return_value=MANIFEST
+        ):
+            result = compose_runtime.run_compose(
+                ["up", "freqtrade-futures"],
+                root=self.root,
+                launch_service=launcher,
+            )
+
+        self.assertIs(result, completed)
+        launcher.assert_called_once_with("freqtrade-futures", self.root.resolve())
+
+    def test_pending_provenance_launcher_freezes_temporary_launch_flags(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(
+                compose_runtime, "load_runtime_manifest", return_value=MANIFEST
+            ),
+            mock.patch.object(
+                compose_runtime, "_run_verified_compose", return_value=completed
+            ) as run,
+        ):
+            result = compose_runtime.launch_service_pending_provenance(
+                "freqtrade", self.root
+            )
+
+        self.assertIs(result, completed)
+        run.assert_called_once_with(
+            ["up", "--detach", "--build", "--force-recreate", "freqtrade"],
+            self.root.resolve(),
+            MANIFEST,
+        )
+
+    def test_non_launch_actions_never_call_internal_launcher(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        launcher = mock.Mock(side_effect=AssertionError("launcher must not run"))
+        cases = (
+            ["config"],
+            ["down"],
+            ["stop", "freqtrade"],
+            ["ps", "freqtrade"],
+            ["logs", "freqtrade"],
+        )
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                with (
+                    mock.patch.object(
+                        compose_runtime, "load_runtime_manifest", return_value=MANIFEST
+                    ),
+                    mock.patch.object(
+                        compose_runtime, "verify_runtime", return_value=IDENTITY
+                    ),
+                    mock.patch.object(
+                        compose_runtime.subprocess, "run", return_value=completed
+                    ),
+                ):
+                    result = compose_runtime.run_compose(
+                        arguments,
+                        root=self.root,
+                        launch_service=launcher,
+                    )
+                self.assertIs(result, completed)
+        launcher.assert_not_called()
+
+    def test_stop_down_ps_and_logs_remain_available_when_launch_validation_fails(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        for arguments in (
+            ["stop", "freqtrade"],
+            ["down"],
+            ["ps", "freqtrade"],
+            ["logs", "freqtrade"],
+        ):
+            with self.subTest(arguments=arguments):
+                with (
+                    mock.patch.object(
+                        compose_runtime, "load_runtime_manifest", return_value=MANIFEST
+                    ),
+                    mock.patch.object(
+                        compose_runtime, "verify_runtime", return_value=IDENTITY
+                    ),
+                    mock.patch.object(
+                        compose_runtime,
+                        "_validate_launch",
+                        side_effect=ValueError("launch validation failed"),
+                    ),
+                    mock.patch.object(
+                        compose_runtime.subprocess, "run", return_value=completed
+                    ),
+                ):
+                    result = compose_runtime.run_compose(arguments, root=self.root)
+                self.assertIs(result, completed)
 
     def test_parser_rejects_escape_hatches_before_docker(self) -> None:
         forbidden = (

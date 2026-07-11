@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 if __package__:
     from tools.bootstrap_runtime import build_compose_identity, verify_runtime
@@ -27,7 +27,7 @@ else:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_PROFILES = {"trading", "research"}
-ALLOWED_ACTIONS = {"config", "up", "down", "create", "start", "stop", "restart", "ps", "logs"}
+ALLOWED_ACTIONS = {"config", "up", "down", "stop", "ps", "logs"}
 CI_PROBE_PATHS = {
     "freqtrade": ("/freqtrade/user_data/strategies/.ci-write-probe",),
     "freqtrade-futures": ("/freqtrade/user_data/strategies/.ci-write-probe",),
@@ -37,13 +37,14 @@ CI_PROBE_PATHS = {
     ),
 }
 STATE_CHECK_SERVICES = {"freqtrade", "freqtrade-futures"}
-PREFLIGHT_ACTIONS = {"up", "create", "start", "restart", "run"}
 RUNTIME_CONTROL_PATHS = (
     "docker-compose.yml",
     "ops/config/trading-safety.json",
     "Dockerfile",
     "docker/freqtrade_entrypoint.py",
 )
+
+LaunchService = Callable[[str, Path], subprocess.CompletedProcess[str]]
 
 
 class UnsupportedArguments(ValueError):
@@ -114,15 +115,15 @@ def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> lis
     if index >= len(tokens) or tokens[index] not in ALLOWED_ACTIONS:
         raise UnsupportedArguments
     action = tokens[index]
+    if action == "up":
+        if index != 0 or len(tokens) != 2 or tokens[1] not in services:
+            raise UnsupportedArguments
+        return tokens
     index += 1
     flags = {
         "config": {"--quiet"},
-        "up": {"--detach", "--build", "--force-recreate"},
         "down": set(),
-        "create": {"--build", "--force-recreate"},
-        "start": set(),
         "stop": set(),
-        "restart": set(),
         "ps": {"--all"},
         "logs": {"--follow"},
     }[action]
@@ -196,16 +197,13 @@ def _validate_launch(
         raise ValueError("rendered compose failed validation")
 
 
-def run_compose(
-    arguments: Sequence[str],
+def _run_verified_compose(
+    safe_arguments: Sequence[str],
+    resolved_root: Path,
+    manifest: dict[str, Any],
     *,
-    root: Path = REPO_ROOT,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    resolved_root = root.resolve()
-    manifest = load_runtime_manifest(resolved_root / "ops/runtime-services.json")
-    services = {service["name"] for service in manifest["services"]}
-    safe_arguments = parse_compose_arguments(arguments, services)
     identity = verify_runtime(resolved_root, manifest)
     override = json.dumps(build_compose_identity(manifest, identity)) + "\n"
     command = [
@@ -217,7 +215,7 @@ def run_compose(
         for key, value in os.environ.items()
         if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
     }
-    if safe_arguments[0] in PREFLIGHT_ACTIONS:
+    if safe_arguments[0] == "up":
         _validate_launch(resolved_root, manifest, command, override, environment)
     return subprocess.run(
         [*command, *safe_arguments],
@@ -227,6 +225,39 @@ def run_compose(
         text=True,
         capture_output=capture_output,
         check=False,
+    )
+
+
+def launch_service_pending_provenance(
+    service: str, root: Path
+) -> subprocess.CompletedProcess[str]:
+    resolved_root = root.resolve()
+    manifest = load_runtime_manifest(resolved_root / "ops/runtime-services.json")
+    return _run_verified_compose(
+        ["up", "--detach", "--build", "--force-recreate", service],
+        resolved_root,
+        manifest,
+    )
+
+
+def run_compose(
+    arguments: Sequence[str],
+    *,
+    root: Path = REPO_ROOT,
+    capture_output: bool = False,
+    launch_service: LaunchService = launch_service_pending_provenance,
+) -> subprocess.CompletedProcess[str]:
+    resolved_root = root.resolve()
+    manifest = load_runtime_manifest(resolved_root / "ops/runtime-services.json")
+    services = {service["name"] for service in manifest["services"]}
+    safe_arguments = parse_compose_arguments(arguments, services)
+    if safe_arguments[0] == "up":
+        return launch_service(safe_arguments[1], resolved_root)
+    return _run_verified_compose(
+        safe_arguments,
+        resolved_root,
+        manifest,
+        capture_output=capture_output,
     )
 
 
