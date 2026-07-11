@@ -174,6 +174,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
 
     def test_bootstrapped_runtime_class_runs_before_backend_install(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        bootstrap = named_workflow_step(workflow, BOOTSTRAP_STEP)
         full_runtime = named_workflow_step(workflow, FULL_RUNTIME_STEP)
         runtime_class = named_workflow_step(workflow, BOOTSTRAPPED_RUNTIME_STEP)
         install = named_workflow_step(workflow, BACKEND_INSTALL_STEP)
@@ -185,6 +186,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             )
         )
         self.assertTrue(step_has_exact_line(runtime_class, RUNTIME_READY_ENV_LINE))
+        self.assertLess(workflow.index(bootstrap), workflow.index(full_runtime))
         self.assertLess(workflow.index(full_runtime), workflow.index(runtime_class))
         self.assertLess(workflow.index(runtime_class), workflow.index(install))
 
