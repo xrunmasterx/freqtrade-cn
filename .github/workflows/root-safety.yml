@@ -1,0 +1,215 @@
+name: Root Safety
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feature/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: root-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Enforce tracked config policy
+        run: python tools/runtime_contract.py --check-configs-only
+
+      - name: Bootstrap ephemeral runtime
+        run: |
+          python tools/bootstrap_runtime.py init
+          python tools/bootstrap_runtime.py sanitize-api-configs
+          python tools/bootstrap_runtime.py verify
+
+      - name: Install backend development dependencies
+        run: uv pip install --system -e "./freqtrade[develop]"
+
+      - name: Run root unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Enforce full runtime contract
+        run: python tools/runtime_contract.py
+
+      - name: Run backend P0 regressions
+        working-directory: freqtrade
+        run: |
+          python -m pytest \
+            tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders_keeps_recent_missing_orders \
+            tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders \
+            tests/test_directory_operations.py \
+            tests/strategy/test_interface.py::test_get_signal_old_dataframe \
+            tests/strategy/test_interface.py::test_ignore_expired_candle \
+            -q -p no:cacheprovider
+          ruff check \
+            freqtrade/freqtradebot.py \
+            freqtrade/configuration/directory_operations.py \
+            freqtrade/commands/build_config_commands.py \
+            tests/freqtradebot/test_freqtradebot.py \
+            tests/test_directory_operations.py
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: frequi/pnpm-lock.yaml
+
+      - name: Install FreqUI dependencies
+        working-directory: frequi
+        run: pnpm install --frozen-lockfile
+
+      - name: Run FreqUI P0 regressions
+        working-directory: frequi
+        run: |
+          pnpm exec vitest run \
+            tests/unit/ftbotwrapperTradeRouting.spec.ts \
+            tests/unit/tradeActionTarget.spec.ts \
+            tests/unit/appI18n.spec.ts \
+            tests/component/ConfirmDialogBox.spec.ts \
+            tests/component/ForceTradeForms.spec.ts \
+            tests/component/TradeListTradeActions.spec.ts \
+            tests/component/BotControls.spec.ts
+          pnpm typecheck
+          pnpm exec eslint --quiet \
+            src/types/types.ts \
+            src/stores/ftbotwrapper.ts \
+            src/components/ftbot/ForceEntryForm.vue \
+            src/components/ftbot/ForceExitForm.vue \
+            src/components/ftbot/TradeList.vue \
+            src/components/ftbot/BotControls.vue \
+            src/components/general/ConfirmDialogBox.vue \
+            src/utils/tradeActionTarget.ts \
+            tests/unit/ftbotwrapperTradeRouting.spec.ts \
+            tests/unit/tradeActionTarget.spec.ts \
+            tests/component/ForceTradeForms.spec.ts \
+            tests/component/TradeListTradeActions.spec.ts \
+            tests/component/ConfirmDialogBox.spec.ts \
+            tests/component/BotControls.spec.ts
+
+      - name: Render and enforce Compose
+        run: |
+          python tools/compose_runtime.py --profile trading --profile research config --format json > compose.rendered.json
+          python tools/runtime_contract.py --compose-json compose.rendered.json
+          python tools/compose_runtime.py --profile trading --profile research config --quiet
+
+      - name: Build integrated image
+        run: docker build -t freqtrade-cn:local .
+
+      - name: Verify unprivileged runtime image
+        run: |
+          docker run --rm --entrypoint python freqtrade-cn:local -c '
+          import os, shutil, subprocess
+          assert os.geteuid() == 1000
+          assert shutil.which("sudo") is None
+          assert "sudo" not in subprocess.check_output(["id", "-Gn"], text=True).split()
+          '
+          docker run --rm --entrypoint sh freqtrade-cn:local -c '
+          set -eu
+          touch /tmp/chown-probe
+          if chown 0:0 /tmp/chown-probe 2>/dev/null; then exit 1; fi
+          '
+
+      - name: Verify missing secrets fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          output="$(docker run --rm freqtrade-cn:local --version 2>&1)"
+          status=$?
+          set -e
+          test "${status}" -eq 78
+          test "${output}" = "fatal: FT_API_PASSWORD_FILE is required"
+
+      - name: Smoke secret entrypoint and service configs
+        run: |
+          python tools/compose_runtime.py ci-probe-version freqtrade
+          python tools/compose_runtime.py ci-probe-version freqtrade-futures
+          python tools/compose_runtime.py ci-probe-version freqtrade-research
+
+      - name: Verify state write and input read-only mounts
+        run: |
+          python tools/compose_runtime.py ci-probe-mounts freqtrade
+          python tools/compose_runtime.py ci-probe-mounts freqtrade-futures
+          python tools/compose_runtime.py ci-probe-mounts freqtrade-research
+
+      - name: Scan current committed trees for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          scan_root="${RUNNER_TEMP}/current-trees"
+          audit_root="${RUNNER_TEMP}/gitleaks-audit"
+          export scan_root
+          export checkout_root="${GITHUB_WORKSPACE}"
+          mkdir -p "${scan_root}" "${audit_root}"
+          git archive HEAD | tar -x -C "${scan_root}"
+          git submodule foreach --recursive '
+            relative_path="$(realpath --relative-to="${checkout_root}" "${PWD}")"
+            destination="${scan_root}/${relative_path}"
+            mkdir -p "${destination}"
+            git archive HEAD | tar -x -C "${destination}"
+          '
+          mv "${scan_root}/.gitleaksignore" "${audit_root}/expected-ignore"
+          : > "${audit_root}/empty-ignore"
+          set +e
+          docker run --rm \
+            -v "${scan_root}:/repo:ro" \
+            -v "${audit_root}:/audit" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0 \
+            dir . --redact --no-banner \
+            --gitleaks-ignore-path /audit/empty-ignore \
+            --report-format json --report-path /audit/findings.json
+          unfiltered_status=$?
+          set -e
+          test "${unfiltered_status}" -eq 1
+          python - "${audit_root}/findings.json" "${audit_root}/expected-ignore" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          findings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          actual = {finding["Fingerprint"] for finding in findings}
+          expected = {
+              line.strip()
+              for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.lstrip().startswith("#")
+          }
+          if actual != expected:
+              raise SystemExit("gitleaks fingerprint audit mismatch")
+          PY
+          mv "${audit_root}/expected-ignore" "${scan_root}/.gitleaksignore"
+          docker run --rm \
+            -v "${scan_root}:/repo:ro" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0 \
+            dir . --redact --no-banner \
+            --gitleaks-ignore-path /repo/.gitleaksignore
+          mutation_path="${scan_root}/.ci-gitleaks-mutation"
+          printf 'api_key = "%s"\n' "$(head -c 48 /dev/urandom | base64 | tr -d '\n')" > "${mutation_path}"
+          set +e
+          docker run --rm \
+            -v "${scan_root}:/repo:ro" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0 \
+            dir . --redact --no-banner \
+            --gitleaks-ignore-path /repo/.gitleaksignore
+          mutation_status=$?
+          set -e
+          rm -f "${mutation_path}"
+          test "${mutation_status}" -eq 1

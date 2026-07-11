@@ -1,0 +1,13 @@
+freqtrade/docs/configuration.md:generic-api-key:752
+freqtrade/docs/configuration.md:generic-api-key:753
+freqtrade/docs/rest-api.md:generic-api-key:252
+freqtrade/docs/rest-api.md:generic-api-key:256
+freqtrade/docs/rest-api.md:jwt:340
+freqtrade/docs/rest-api.md:jwt:342
+freqtrade/docs/rest-api.md:jwt:352
+freqtrade/tests/exchange/test_hyperliquid.py:generic-api-key:419
+freqtrade/tests/exchange/test_hyperliquid.py:generic-api-key:856
+freqtrade/tests/research/test_data_source.py:generic-api-key:50
+freqtrade/tests/rpc/test_api_research.py:generic-api-key:29
+freqtrade/tests/rpc/test_rpc_apiserver.py:generic-api-key:60
+freqtrade-strategies/user_data/strategies/futures/Readme.md:generic-api-key:154

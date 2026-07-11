@@ -260,7 +260,7 @@ Create `ft_userdata/user_data/config.lsri.futures.20u.json` with this exact JSON
             "http://localhost:8081"
         ],
         "username": "freqtrader",
-        "password": "LWcW6iapsr-fKOiruO2mWpL6"
+        "password": "__SET_VIA_SECRET_FILE__"
     },
     "initial_state": "running",
     "force_entry_enable": false,
