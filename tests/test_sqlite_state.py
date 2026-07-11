@@ -80,6 +80,12 @@ class SQLiteStateTests(unittest.TestCase):
         directory.rename(moved_directory)
         directory.mkdir(parents=True)
 
+    def close_descriptor_if_open(self, descriptor: int) -> None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
     def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(Path(sqlite_state.__file__)), *arguments],
@@ -1693,46 +1699,27 @@ class SQLiteStateTests(unittest.TestCase):
                 sqlite_state.verify_bundle(invalid)
         load_failure.assert_not_called()
 
-    def test_unlock_error_is_safe_only_when_descriptor_close_succeeds(self) -> None:
-        module = object()
-        with (
-            mock.patch.object(
-                sqlite_state,
-                "_release_lock",
-                side_effect=OSError("injected unlock failure"),
-            ),
-            mock.patch.object(os, "close") as close,
-        ):
-            sqlite_state._release_and_close_lock(module, 31)
-        close.assert_called_once_with(31)
-
-        with (
-            mock.patch.object(
-                sqlite_state,
-                "_release_lock",
-                side_effect=OSError("injected unlock failure"),
-            ),
-            mock.patch.object(os, "close", side_effect=OSError("injected close failure")),
-        ):
-            with self.assertRaisesRegex(sqlite_state.StateBundleError, "close failed"):
-                sqlite_state._release_and_close_lock(module, 31)
-
-    def test_close_failure_invalidates_success_receipt_before_final_release(self) -> None:
+    def test_unlock_failure_marks_success_failed_before_single_close(self) -> None:
         bundle = self.create_service_bundle()
         lock_path = self.output_root / f".{bundle.name}.creation.lock"
         flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
         descriptor = os.open(lock_path, flags)
+        self.addCleanup(self.close_descriptor_if_open, descriptor)
         module = sqlite_state._acquire_lock(
             descriptor, exclusive=True, blocking=True
         )
+        events: list[str] = []
+        original_write_receipt = sqlite_state._write_receipt
         real_close = os.close
-        close_calls = 0
 
-        def fail_once_then_close(selected_descriptor: int) -> None:
-            nonlocal close_calls
-            close_calls += 1
-            if close_calls == 1:
-                raise OSError("injected close failure")
+        def record_failed_receipt(
+            selected_descriptor: int, receipt: dict[str, object]
+        ) -> None:
+            events.append(f"receipt:{receipt['state']}")
+            original_write_receipt(selected_descriptor, receipt)
+
+        def record_close(selected_descriptor: int) -> None:
+            events.append("close")
             real_close(selected_descriptor)
 
         with (
@@ -1741,18 +1728,104 @@ class SQLiteStateTests(unittest.TestCase):
                 "_release_lock",
                 side_effect=OSError("injected unlock failure"),
             ),
-            mock.patch.object(os, "close", side_effect=fail_once_then_close),
+            mock.patch.object(
+                sqlite_state, "_write_receipt", side_effect=record_failed_receipt
+            ),
+            mock.patch.object(os, "close", side_effect=record_close) as close,
         ):
-            with self.assertRaisesRegex(sqlite_state.StateBundleError, "close failed"):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "unlock failed"):
                 sqlite_state._release_and_close_lock(
                     module,
                     descriptor,
-                    invalidate_success_on_close_failure=True,
+                    exclusive=True,
+                    body_failed=False,
                 )
 
-        self.assertEqual(close_calls, 2)
+        self.assertEqual(events, ["receipt:failed", "close"])
+        close.assert_called_once_with(descriptor)
         with self.assertRaisesRegex(sqlite_state.StateBundleError, "transaction"):
             sqlite_state.verify_bundle(bundle)
+
+    def test_post_unlock_real_close_error_preserves_success_without_fd_reuse(self) -> None:
+        bundle = self.create_service_bundle()
+        lock_path = self.output_root / f".{bundle.name}.creation.lock"
+        descriptor = os.open(lock_path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+        self.addCleanup(self.close_descriptor_if_open, descriptor)
+        module = sqlite_state._acquire_lock(
+            descriptor, exclusive=True, blocking=True
+        )
+        real_close = os.close
+
+        def real_close_then_raise(selected_descriptor: int) -> None:
+            real_close(selected_descriptor)
+            raise OSError("injected late close anomaly")
+
+        with (
+            mock.patch.object(os, "close", side_effect=real_close_then_raise) as close,
+            mock.patch.object(sqlite_state, "_read_receipt") as read_receipt,
+            mock.patch.object(sqlite_state, "_write_receipt") as write_receipt,
+            mock.patch.object(sqlite_state, "_acquire_lock") as acquire_lock,
+        ):
+            sqlite_state._release_and_close_lock(
+                module,
+                descriptor,
+                exclusive=True,
+                body_failed=False,
+            )
+        close.assert_called_once_with(descriptor)
+        read_receipt.assert_not_called()
+        write_receipt.assert_not_called()
+        acquire_lock.assert_not_called()
+        self.assertIn(
+            sqlite_state.verify_bundle(bundle).durability,
+            {"atomic-process-crash", "power-loss-posix"},
+        )
+
+    def test_invalid_fd_close_is_not_retried_or_reused_after_unlock(self) -> None:
+        module = object()
+        with (
+            mock.patch.object(sqlite_state, "_release_lock") as release,
+            mock.patch.object(os, "close", side_effect=OSError(errno.EBADF, "bad fd")) as close,
+            mock.patch.object(sqlite_state, "_read_receipt") as read_receipt,
+            mock.patch.object(sqlite_state, "_write_receipt") as write_receipt,
+            mock.patch.object(sqlite_state, "_acquire_lock") as acquire_lock,
+        ):
+            sqlite_state._release_and_close_lock(
+                module,
+                31,
+                exclusive=True,
+                body_failed=False,
+            )
+        release.assert_called_once_with(module, 31)
+        close.assert_called_once_with(31)
+        read_receipt.assert_not_called()
+        write_receipt.assert_not_called()
+        acquire_lock.assert_not_called()
+
+    def test_body_failure_remains_original_when_unlock_and_close_report_errors(self) -> None:
+        lock_path = self.output_root / ".body-failure.creation.lock"
+        self.output_root.mkdir(parents=True)
+        real_close = os.close
+
+        def real_close_then_raise(descriptor: int) -> None:
+            real_close(descriptor)
+            raise OSError("injected close anomaly")
+
+        with (
+            mock.patch.object(
+                sqlite_state,
+                "_release_lock",
+                side_effect=OSError("injected unlock failure"),
+            ),
+            mock.patch.object(os, "close", side_effect=real_close_then_raise),
+            mock.patch.object(sqlite_state, "_write_receipt") as write_receipt,
+        ):
+            with self.assertRaisesRegex(OSError, "original body failure"):
+                with sqlite_state._bundle_lock(
+                    lock_path, exclusive=True, blocking=True
+                ):
+                    raise OSError("original body failure")
+        write_receipt.assert_not_called()
 
     def test_sidecar_open_rejects_symlink_and_non_regular_entry(self) -> None:
         target = self.output_root / "target.lock"

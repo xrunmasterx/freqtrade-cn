@@ -62,10 +62,15 @@ bundle without its matching sidecar is not a verified backup.
 If a creator still holds the lock, verification fails with the fixed
 creation-in-progress result. A missing sidecar or unavailable lock implementation
 also fails closed. POSIX uses `flock` and Windows uses `msvcrt.locking`; no
-in-process-only fallback exists. An explicit unlock error followed by successful
-descriptor close is a safe release. If creator-side close fails, the still-open
-descriptor is used to downgrade any success receipt to failed before another
-close attempt, and the command fails closed.
+in-process-only fallback exists. Transaction outcome is finalized while the
+exclusive lock is certainly held, before teardown. If explicit creator unlock
+fails after a successful body, the still-owned descriptor is first used to write
+and fsync a failed receipt, then closed exactly once, and the command fails. If
+unlock succeeds, the success receipt remains committed: a later close anomaly is
+not transaction failure and the numeric descriptor is never read, rewritten,
+relocked, or closed again. A body failure remains the outward failure regardless
+of unlock or close anomalies because its failed receipt was already attempted
+under the exclusive lock.
 
 If any explicit barrier or completion check fails after final-name publication,
 the tool writes and file-syncs an exact `creation-failed.json` record and syncs

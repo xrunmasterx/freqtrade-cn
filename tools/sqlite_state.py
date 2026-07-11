@@ -669,21 +669,16 @@ def _release_and_close_lock(
     module: object,
     descriptor: int,
     *,
-    invalidate_success_on_close_failure: bool = False,
+    exclusive: bool,
+    body_failed: bool,
 ) -> None:
-    unlock_failed = False
+    unlock_error: BaseException | None = None
     try:
         _release_lock(module, descriptor)
-    except (AttributeError, OSError):
-        unlock_failed = True
-    try:
-        os.close(descriptor)
-        return
-    except OSError as close_error:
-        if invalidate_success_on_close_failure:
+    except (AttributeError, OSError) as error:
+        unlock_error = error
+        if exclusive and not body_failed:
             try:
-                if not unlock_failed:
-                    _acquire_lock(descriptor, exclusive=True, blocking=True)
                 receipt = _read_receipt(descriptor)
                 if receipt["state"] == "success":
                     _write_receipt(
@@ -696,15 +691,12 @@ def _release_and_close_lock(
                     )
             except (OSError, StateBundleError):
                 pass
-        try:
-            _release_lock(module, descriptor)
-        except (AttributeError, OSError):
-            pass
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        raise StateBundleError("state bundle lock close failed") from close_error
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+    if unlock_error is not None and not body_failed:
+        raise StateBundleError("state bundle lock unlock failed") from unlock_error
 
 
 @contextmanager
@@ -723,6 +715,7 @@ def _bundle_lock(
     except OSError as error:
         raise StateBundleError("state bundle locking unavailable") from error
     module: object | None = None
+    body_failed = False
     try:
         descriptor_status = os.fstat(descriptor)
         path_status = os.stat(path, follow_symlinks=False)
@@ -741,16 +734,28 @@ def _bundle_lock(
             if not blocking and _is_lock_contention(error):
                 raise StateBundleError("state bundle creation in progress") from error
             raise StateBundleError("state bundle locking unavailable") from error
-        yield descriptor
+        try:
+            yield descriptor
+        except BaseException:
+            body_failed = True
+            raise
     finally:
         if module is not None:
-            _release_and_close_lock(
-                module,
-                descriptor,
-                invalidate_success_on_close_failure=exclusive,
-            )
+            try:
+                _release_and_close_lock(
+                    module,
+                    descriptor,
+                    exclusive=exclusive,
+                    body_failed=body_failed,
+                )
+            except BaseException:
+                if not body_failed:
+                    raise
         else:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _acquire_creation_lock(path: Path) -> object:
