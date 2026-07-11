@@ -43,6 +43,9 @@ else:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_PROFILES = {"trading", "research"}
 ALLOWED_ACTIONS = {"config", "up", "down", "stop", "ps", "logs"}
+FORMAL_SERVICES = {"freqtrade", "freqtrade-futures", "freqtrade-research"}
+EMERGENCY_ACTIONS = {"down", "stop", "ps", "logs"}
+COMPOSE_WAIT_TIMEOUT_SECONDS = 60
 CI_PROBE_PATHS = {
     "freqtrade": ("/freqtrade/user_data/strategies/.ci-write-probe",),
     "freqtrade-futures": ("/freqtrade/user_data/strategies/.ci-write-probe",),
@@ -268,6 +271,35 @@ def _run_verified_compose(
     )
 
 
+def _run_emergency_compose(
+    safe_arguments: Sequence[str],
+    resolved_root: Path,
+    *,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
+    }
+    return subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--project-name",
+            "freqtrade-cn",
+            "-f",
+            str(resolved_root / "docker-compose.yml"),
+            *safe_arguments,
+        ],
+        cwd=resolved_root,
+        env=environment,
+        text=True,
+        capture_output=capture_output,
+        check=False,
+    )
+
+
 def _launch_override(
     manifest: dict[str, Any], identity: dict[str, int], service: str, image_id: str
 ) -> str:
@@ -323,6 +355,9 @@ def _launch_inspected_image(
                 str(snapshot),
                 "up",
                 "--detach",
+                "--wait",
+                "--wait-timeout",
+                str(COMPOSE_WAIT_TIMEOUT_SECONDS),
                 "--force-recreate",
                 "--no-build",
                 "--no-deps",
@@ -359,6 +394,16 @@ def run_compose(
     launch_service: LaunchService = launch_reviewed_service,
 ) -> subprocess.CompletedProcess[str]:
     resolved_root = root.resolve()
+    safe_arguments = parse_compose_arguments(arguments, FORMAL_SERVICES)
+    action_index = 0
+    while safe_arguments[action_index] == "--profile":
+        action_index += 2
+    if safe_arguments[action_index] in EMERGENCY_ACTIONS:
+        return _run_emergency_compose(
+            safe_arguments,
+            resolved_root,
+            capture_output=capture_output,
+        )
     manifest = load_runtime_manifest(resolved_root / "ops/runtime-services.json")
     services = {service["name"] for service in manifest["services"]}
     safe_arguments = parse_compose_arguments(arguments, services)

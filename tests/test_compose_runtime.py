@@ -227,9 +227,90 @@ class ComposeRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(final_snapshot)
         self.assertFalse(final_snapshot.exists())
         self.assertEqual(
-            run_mock.call_args.args[0][-6:],
-            ["up", "--detach", "--force-recreate", "--no-build", "--no-deps", "freqtrade"],
+            run_mock.call_args.args[0][-9:],
+            [
+                "up",
+                "--detach",
+                "--wait",
+                "--wait-timeout",
+                "60",
+                "--force-recreate",
+                "--no-build",
+                "--no-deps",
+                "freqtrade",
+            ],
         )
+
+    def test_up_returns_unhealthy_and_timeout_results_unchanged(self) -> None:
+        rendered_text = '{"services":{"freqtrade":{}}}'
+        for returncode in (1, 124):
+            with self.subTest(returncode=returncode):
+                completed = subprocess.CompletedProcess([], returncode, "", "failed")
+
+                def run(
+                    command: list[str], **_kwargs: object
+                ) -> subprocess.CompletedProcess[str]:
+                    if command[0] == "git":
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    if command[-3:] == ["config", "--format", "json"]:
+                        return subprocess.CompletedProcess(command, 0, rendered_text, "")
+                    self.assertEqual(
+                        command[-9:],
+                        [
+                            "up",
+                            "--detach",
+                            "--wait",
+                            "--wait-timeout",
+                            "60",
+                            "--force-recreate",
+                            "--no-build",
+                            "--no-deps",
+                            "freqtrade",
+                        ],
+                    )
+                    return completed
+
+                with (
+                    mock.patch.object(
+                        compose_runtime, "verify_runtime", return_value=IDENTITY
+                    ),
+                    mock.patch.object(
+                        compose_runtime, "validate_tracked_configs", return_value=[]
+                    ),
+                    mock.patch.object(compose_runtime, "validate_compose", return_value=[]),
+                    mock.patch.object(
+                        compose_runtime,
+                        "resolve_commit_identity",
+                        return_value=COMMIT_IDENTITY,
+                    ),
+                    mock.patch.object(compose_runtime, "verify_committed_checkout"),
+                    mock.patch.object(compose_runtime.subprocess, "run", side_effect=run),
+                ):
+                    result = compose_runtime._launch_inspected_image(
+                        "freqtrade",
+                        self.root,
+                        MANIFEST,
+                        INSPECTED_IMAGE.image_id,
+                        COMMIT_IDENTITY,
+                    )
+
+                self.assertIs(result, completed)
+                launcher = mock.Mock(return_value=completed)
+                with mock.patch.object(
+                    compose_runtime, "load_runtime_manifest", return_value=MANIFEST
+                ):
+                    result = compose_runtime.run_compose(
+                        ["up", "freqtrade"],
+                        root=self.root,
+                        launch_service=launcher,
+                    )
+                self.assertIs(result, completed)
+                with mock.patch.object(
+                    compose_runtime, "run_compose", return_value=completed
+                ):
+                    self.assertEqual(
+                        compose_runtime.main(["up", "freqtrade"]), returncode
+                    )
 
     def test_launch_uses_validated_snapshot_when_live_compose_changes(self) -> None:
         rendered_text = '{"name":"validated-snapshot"}'
@@ -412,6 +493,126 @@ class ComposeRuntimeTests(unittest.TestCase):
                 compose_runtime.run_compose(action, root=self.root)
         resolve.assert_not_called()
         build.assert_not_called()
+
+    def test_emergency_actions_run_exact_fixed_command_when_manifest_loading_fails(
+        self,
+    ) -> None:
+        cases = (
+            (["down"], False),
+            (["stop", "freqtrade-futures"], True),
+            (["ps", "--all", "freqtrade-research"], False),
+            (["logs", "--follow", "--tail", "50", "freqtrade"], True),
+        )
+        for arguments, capture_output in cases:
+            with self.subTest(arguments=arguments):
+                completed = subprocess.CompletedProcess([], 17, "output", "error")
+                with (
+                    mock.patch.object(
+                        compose_runtime,
+                        "load_runtime_manifest",
+                        side_effect=ValueError("missing manifest"),
+                    ) as load_manifest,
+                    mock.patch.object(
+                        compose_runtime,
+                        "verify_runtime",
+                        side_effect=ValueError("runtime unavailable"),
+                    ) as verify_runtime,
+                    mock.patch.object(
+                        compose_runtime.subprocess, "run", return_value=completed
+                    ) as run,
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "KEEP_ME": "yes",
+                            "FREQTRADE_RUNTIME_UID": "1001",
+                            "COMPOSE_FILE": "outside.yml",
+                        },
+                        clear=True,
+                    ),
+                ):
+                    result = compose_runtime.run_compose(
+                        arguments,
+                        root=self.root,
+                        capture_output=capture_output,
+                    )
+
+                self.assertIs(result, completed)
+                load_manifest.assert_not_called()
+                verify_runtime.assert_not_called()
+                run.assert_called_once_with(
+                    [
+                        "docker",
+                        "compose",
+                        "--project-name",
+                        "freqtrade-cn",
+                        "-f",
+                        str(self.root / "docker-compose.yml"),
+                        *arguments,
+                    ],
+                    cwd=self.root.resolve(),
+                    env={"KEEP_ME": "yes"},
+                    text=True,
+                    capture_output=capture_output,
+                    check=False,
+                )
+
+    def test_emergency_actions_do_not_call_manifest_or_runtime_verification(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        for arguments in (
+            ["down"],
+            ["stop", "freqtrade"],
+            ["ps", "freqtrade"],
+            ["logs", "freqtrade"],
+        ):
+            with self.subTest(arguments=arguments):
+                with (
+                    mock.patch.object(
+                        compose_runtime,
+                        "load_runtime_manifest",
+                        side_effect=AssertionError("manifest must not load"),
+                    ) as load_manifest,
+                    mock.patch.object(
+                        compose_runtime,
+                        "verify_runtime",
+                        side_effect=ValueError("runtime verification failed"),
+                    ) as verify_runtime,
+                    mock.patch.object(
+                        compose_runtime.subprocess, "run", return_value=completed
+                    ) as run,
+                ):
+                    result = compose_runtime.run_compose(arguments, root=self.root)
+
+                self.assertIs(result, completed)
+                load_manifest.assert_not_called()
+                verify_runtime.assert_not_called()
+                run.assert_called_once()
+
+    def test_forbidden_emergency_services_and_flags_fail_before_dependencies_or_docker(
+        self,
+    ) -> None:
+        for arguments in (
+            ["stop", "unknown-service"],
+            ["stop", "--timeout", "1", "freqtrade"],
+            ["down", "freqtrade"],
+            ["ps", "--format", "json"],
+            ["logs", "--tail", "secret", "freqtrade"],
+        ):
+            with self.subTest(arguments=arguments):
+                with (
+                    mock.patch.object(
+                        compose_runtime,
+                        "load_runtime_manifest",
+                        side_effect=ValueError("missing manifest"),
+                    ) as load_manifest,
+                    mock.patch.object(compose_runtime, "verify_runtime") as verify_runtime,
+                    mock.patch.object(compose_runtime.subprocess, "run") as run,
+                ):
+                    with self.assertRaises(compose_runtime.UnsupportedArguments):
+                        compose_runtime.run_compose(arguments, root=self.root)
+
+                load_manifest.assert_not_called()
+                verify_runtime.assert_not_called()
+                run.assert_not_called()
 
     def test_non_launch_actions_never_call_internal_launcher(self) -> None:
         completed = subprocess.CompletedProcess([], 0, "", "")
