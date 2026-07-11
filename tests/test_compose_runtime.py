@@ -121,6 +121,42 @@ class ComposeRuntimeTests(unittest.TestCase):
                 with self.assertRaises(compose_runtime.UnsupportedArguments):
                     compose_runtime.parse_compose_arguments(arguments, set(SERVICES))
 
+    def test_state_check_expands_to_fixed_freqtrade_command(self) -> None:
+        for service in ("freqtrade", "freqtrade-futures"):
+            with self.subTest(service=service):
+                self.assertEqual(
+                    compose_runtime.parse_compose_arguments(
+                        ["check-state", service], set(SERVICES)
+                    ),
+                    [
+                        "run",
+                        "--rm",
+                        "--no-deps",
+                        service,
+                        "show-trades",
+                        "--db-url",
+                        "sqlite:////freqtrade/state/trades.sqlite",
+                        "--print-json",
+                    ],
+                )
+
+    def test_state_check_rejects_research_unknown_and_extra_arguments(self) -> None:
+        forbidden = (
+            ["check-state"],
+            ["check-state", "freqtrade-research"],
+            ["check-state", "unknown-service"],
+            ["check-state", "freqtrade", "--user", "0"],
+            ["check-state", "freqtrade", "--db-url", "sqlite:///outside"],
+            ["check-state", "freqtrade", "--entrypoint", "sh"],
+            ["check-state", "freqtrade", "--volume", "host:/container"],
+            ["check-state", "freqtrade", "--env", "X=Y"],
+            ["check-state", "freqtrade", "--cap-add", "ALL"],
+        )
+        for arguments in forbidden:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(compose_runtime.UnsupportedArguments):
+                    compose_runtime.parse_compose_arguments(arguments, set(SERVICES))
+
     def test_run_uses_verified_in_memory_override_and_clean_environment(self) -> None:
         completed = subprocess.CompletedProcess([], 17, "", "")
         with (

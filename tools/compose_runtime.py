@@ -26,6 +26,7 @@ CI_PROBE_PATHS = {
         "/freqtrade/user_data/research_data/.ci-write-probe",
     ),
 }
+STATE_CHECK_SERVICES = {"freqtrade", "freqtrade-futures"}
 
 
 class UnsupportedArguments(ValueError):
@@ -71,6 +72,22 @@ def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> lis
         if tokens[0] == "ci-probe-version":
             return ["run", "--rm", "--no-deps", service, "--version"]
         return _ci_mount_probe(service)
+    if index < len(tokens) and tokens[index] == "check-state":
+        if index != 0 or len(tokens) != 2 or tokens[1] not in services:
+            raise UnsupportedArguments
+        service = tokens[1]
+        if service not in STATE_CHECK_SERVICES:
+            raise UnsupportedArguments
+        return [
+            "run",
+            "--rm",
+            "--no-deps",
+            service,
+            "show-trades",
+            "--db-url",
+            "sqlite:////freqtrade/state/trades.sqlite",
+            "--print-json",
+        ]
     if index >= len(tokens) or tokens[index] not in ALLOWED_ACTIONS:
         raise UnsupportedArguments
     action = tokens[index]
