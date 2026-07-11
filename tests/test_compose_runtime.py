@@ -166,6 +166,8 @@ class ComposeRuntimeTests(unittest.TestCase):
                         "/freqtrade/config/runtime.json",
                         "--config",
                         "/freqtrade/config/trading-safety.json",
+                        "--user-data-dir",
+                        "/freqtrade/state",
                         "--print-json",
                     ],
                 )
