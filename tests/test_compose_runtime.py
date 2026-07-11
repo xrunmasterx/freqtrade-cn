@@ -73,6 +73,54 @@ class ComposeRuntimeTests(unittest.TestCase):
                     "compose runtime: unsupported arguments\n",
                 )
 
+    def test_ci_version_probe_expands_to_fixed_compose_run(self) -> None:
+        self.assertEqual(
+            compose_runtime.parse_compose_arguments(
+                ["ci-probe-version", "freqtrade-futures"], set(SERVICES)
+            ),
+            ["run", "--rm", "--no-deps", "freqtrade-futures", "--version"],
+        )
+
+    def test_ci_mount_probe_expands_to_fixed_python_program(self) -> None:
+        arguments = compose_runtime.parse_compose_arguments(
+            ["ci-probe-mounts", "freqtrade-research"], set(SERVICES)
+        )
+
+        self.assertEqual(
+            arguments[:7],
+            [
+                "run",
+                "--rm",
+                "--no-deps",
+                "--entrypoint",
+                "python",
+                "freqtrade-research",
+                "-c",
+            ],
+        )
+        program = arguments[7]
+        self.assertIn("/freqtrade/state/.ci-write-probe", program)
+        self.assertIn("/freqtrade/user_data/strategies/.ci-write-probe", program)
+        self.assertIn("/freqtrade/user_data/research_data/.ci-write-probe", program)
+        self.assertIn("if not path.parent.is_dir()", program)
+
+    def test_ci_probes_reject_unknown_services_and_all_extra_arguments(self) -> None:
+        forbidden = (
+            ["ci-probe-version"],
+            ["ci-probe-version", "unknown-service"],
+            ["ci-probe-version", "freqtrade", "--user", "0"],
+            ["ci-probe-mounts"],
+            ["ci-probe-mounts", "unknown-service"],
+            ["ci-probe-mounts", "freqtrade", "--entrypoint", "sh"],
+            ["ci-probe-mounts", "freqtrade", "--volume", "host:/container"],
+            ["ci-probe-mounts", "freqtrade", "--env", "X=Y"],
+            ["ci-probe-mounts", "freqtrade", "--cap-add", "ALL"],
+        )
+        for arguments in forbidden:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(compose_runtime.UnsupportedArguments):
+                    compose_runtime.parse_compose_arguments(arguments, set(SERVICES))
+
     def test_run_uses_verified_in_memory_override_and_clean_environment(self) -> None:
         completed = subprocess.CompletedProcess([], 17, "", "")
         with (

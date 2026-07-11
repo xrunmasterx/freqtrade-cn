@@ -18,10 +18,43 @@ else:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_PROFILES = {"trading", "research"}
 ALLOWED_ACTIONS = {"config", "up", "down", "create", "start", "stop", "restart", "ps", "logs"}
+CI_PROBE_PATHS = {
+    "freqtrade": ("/freqtrade/user_data/strategies/.ci-write-probe",),
+    "freqtrade-futures": ("/freqtrade/user_data/strategies/.ci-write-probe",),
+    "freqtrade-research": (
+        "/freqtrade/user_data/strategies/.ci-write-probe",
+        "/freqtrade/user_data/research_data/.ci-write-probe",
+    ),
+}
 
 
 class UnsupportedArguments(ValueError):
     pass
+
+
+def _ci_mount_probe(service: str) -> list[str]:
+    read_only_paths = CI_PROBE_PATHS.get(service)
+    if read_only_paths is None:
+        raise UnsupportedArguments
+    program = """\
+from pathlib import Path
+
+state = Path("/freqtrade/state/.ci-write-probe")
+state.write_text("ok", encoding="utf-8")
+state.unlink()
+for path_text in READ_ONLY_PATHS:
+    path = Path(path_text)
+    if not path.parent.is_dir():
+        raise SystemExit("read-only runtime input is missing")
+    try:
+        path.write_text("unexpected", encoding="utf-8")
+    except OSError:
+        continue
+    path.unlink(missing_ok=True)
+    raise SystemExit("read-only runtime input is writable")
+"""
+    program = f"READ_ONLY_PATHS = {read_only_paths!r}\n{program}"
+    return ["run", "--rm", "--no-deps", "--entrypoint", "python", service, "-c", program]
 
 
 def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> list[str]:
@@ -31,6 +64,13 @@ def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> lis
         if index + 1 >= len(tokens) or tokens[index + 1] not in ALLOWED_PROFILES:
             raise UnsupportedArguments
         index += 2
+    if index < len(tokens) and tokens[index] in {"ci-probe-version", "ci-probe-mounts"}:
+        if index != 0 or len(tokens) != 2 or tokens[1] not in services:
+            raise UnsupportedArguments
+        service = tokens[1]
+        if tokens[0] == "ci-probe-version":
+            return ["run", "--rm", "--no-deps", service, "--version"]
+        return _ci_mount_probe(service)
     if index >= len(tokens) or tokens[index] not in ALLOWED_ACTIONS:
         raise UnsupportedArguments
     action = tokens[index]
