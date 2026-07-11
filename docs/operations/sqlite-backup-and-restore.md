@@ -12,9 +12,15 @@ source, or destination override for those lanes. The tool records the resolved
 path and filesystem identity, then revalidates the formal source immediately
 before backup I/O and the destination parent before temporary-file creation and
 again before publication. If a checked path changes, the operation fails without
-printing success and cleans its temporary output. These checks close supported
-same-process mutation windows; they do not claim protection against a
-continuously racing, same-authority privileged local actor between boundaries.
+printing success. Once restore creates its unique temporary file, the tool never
+searches for or unlinks that name through a mutable pathname. Failures therefore
+leave the file quarantined wherever the original directory identity resides.
+Successful restore publishes a no-clobber hard link only after revalidating the
+temporary inode captured from its creation handle, and retains that same inode
+under the unique temporary name as a post-publication quarantine. These checks
+close supported same-process mutation windows; they do not claim protection
+against a continuously racing, same-authority privileged local actor between
+boundaries.
 
 The document itself grants no operational authority. Read-only backup and bundle
 verification may be automated. Stopping a current Bot or restoring/replacing its
@@ -231,6 +237,16 @@ python tools/sqlite_state.py restore-service `
 $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Restore Futures final bundle'
 ```
+
+Each restore that reaches temporary-file creation intentionally leaves one
+hidden `.trades.sqlite.*.tmp` quarantine name in the original destination
+directory identity. After a successful restore it is a second hard link to the
+published database, not a second copy. After a failed restore it may contain a
+partial or complete candidate and the CLI prints only the fixed failure message.
+Do not automate quarantine cleanup by pathname or recursively search for moved
+files: a substituted directory or filename could make such cleanup delete
+unrelated data. Quarantine disposition requires a separately authorized,
+identity-aware operator procedure outside this migration command.
 
 Compare each restored candidate with its stopped legacy source:
 

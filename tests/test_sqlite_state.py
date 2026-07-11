@@ -297,7 +297,7 @@ class SQLiteStateTests(unittest.TestCase):
                     manifest_path=self.manifest_path,
                 )
         self.assertEqual(self.spot_destination.read_bytes(), b"keep")
-        self.assertEqual(list(self.spot_destination.parent.glob("*.tmp")), [])
+        self.assertEqual(len(list(self.spot_destination.parent.glob("*.tmp"))), 1)
 
     def test_restore_service_refuses_missing_destination_parent(self) -> None:
         bundle = self.create_service_bundle()
@@ -445,9 +445,119 @@ class SQLiteStateTests(unittest.TestCase):
                     manifest_path=self.manifest_path,
                 )
         self.assertFalse(self.spot_destination.exists())
-        self.assertEqual(list(moved_parent.glob("*.tmp")), [])
+        self.assertEqual(len(list(moved_parent.glob("*.tmp"))), 1)
 
-    def test_failed_backup_and_restore_leave_no_staging_files(self) -> None:
+    def test_restore_failure_does_not_unlink_substituted_temporary_name(self) -> None:
+        bundle = self.create_service_bundle()
+        quarantined_database = self.root / "created-restore-temp.sqlite"
+        replacement_contents = b"unrelated replacement"
+        original_inspect = sqlite_state.inspect_database
+
+        def replace_temporary_then_fail(path: Path) -> dict[str, object]:
+            if path.suffix == ".tmp":
+                path.rename(quarantined_database)
+                path.write_bytes(replacement_contents)
+                raise sqlite_state.StateBundleError("copied database rejected")
+            return original_inspect(path)
+
+        with mock.patch.object(
+            sqlite_state, "inspect_database", side_effect=replace_temporary_then_fail
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "copied"):
+                sqlite_state._restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        replacement = next(self.spot_destination.parent.glob("*.tmp"))
+        self.assertEqual(replacement.read_bytes(), replacement_contents)
+        self.assertTrue(quarantined_database.is_file())
+        self.assertFalse(self.spot_destination.exists())
+
+    def test_successful_restore_retains_same_inode_post_publication_quarantine(self) -> None:
+        bundle = self.create_service_bundle()
+        sqlite_state._restore_service(
+            service="freqtrade",
+            bundle=bundle,
+            root=self.root,
+            manifest_path=self.manifest_path,
+        )
+        quarantined = list(self.spot_destination.parent.glob("*.tmp"))
+        self.assertEqual(len(quarantined), 1)
+        self.assertTrue(os.path.samefile(quarantined[0], self.spot_destination))
+
+    def test_restore_failure_has_no_validate_then_unlink_fallback(self) -> None:
+        bundle = self.create_service_bundle()
+        moved_parent = self.root / "original-destination-parent"
+        original_inspect = sqlite_state.inspect_database
+        original_capture = sqlite_state._capture_path_identity
+        fallback_called = False
+
+        def inspect_then_swap(path: Path) -> dict[str, object]:
+            inspected = original_inspect(path)
+            if path.suffix == ".tmp":
+                self.replace_directory(self.spot_destination.parent, moved_parent)
+            return inspected
+
+        def detect_fallback(*args: object, **kwargs: object) -> object:
+            nonlocal fallback_called
+            if kwargs.get("description") == "temporary restore parent":
+                fallback_called = True
+            return original_capture(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                sqlite_state, "inspect_database", side_effect=inspect_then_swap
+            ),
+            mock.patch.object(
+                sqlite_state, "_capture_path_identity", side_effect=detect_fallback
+            ),
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "changed"):
+                sqlite_state._restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        self.assertFalse(fallback_called)
+        self.assertEqual(len(list(moved_parent.glob("*.tmp"))), 1)
+
+    def test_restore_failure_does_not_unlink_through_replaced_cleanup_root(self) -> None:
+        bundle = self.create_service_bundle()
+        moved_root = self.root.parent / f"{self.root.name}-original"
+        self.addCleanup(shutil.rmtree, moved_root, True)
+        original_inspect = sqlite_state.inspect_database
+        replacement_contents = b"unrelated root replacement"
+
+        def replace_root_then_fail(path: Path) -> dict[str, object]:
+            inspected = original_inspect(path)
+            if path.suffix == ".tmp":
+                self.root.rename(moved_root)
+                path.parent.mkdir(parents=True)
+                path.write_bytes(replacement_contents)
+                raise sqlite_state.StateBundleError("publication control failed")
+            return inspected
+
+        with mock.patch.object(
+            sqlite_state, "inspect_database", side_effect=replace_root_then_fail
+        ):
+            with self.assertRaisesRegex(sqlite_state.StateBundleError, "publication"):
+                sqlite_state._restore_service(
+                    service="freqtrade",
+                    bundle=bundle,
+                    root=self.root,
+                    manifest_path=self.manifest_path,
+                )
+        replacement = next(self.spot_destination.parent.glob("*.tmp"))
+        self.assertEqual(replacement.read_bytes(), replacement_contents)
+        moved_temporary_parent = (
+            moved_root / "ft_userdata/runtime/freqtrade"
+        )
+        self.assertEqual(len(list(moved_temporary_parent.glob("*.tmp"))), 1)
+
+    def test_failed_backup_cleans_staging_and_failed_restore_quarantines_temp(self) -> None:
         with mock.patch.object(
             sqlite_state, "inspect_database", side_effect=ValueError("bad")
         ):
@@ -472,7 +582,7 @@ class SQLiteStateTests(unittest.TestCase):
                     manifest_path=self.manifest_path,
                 )
         self.assertFalse(self.spot_destination.exists())
-        self.assertEqual(list(self.spot_destination.parent.glob("*.tmp")), [])
+        self.assertEqual(len(list(self.spot_destination.parent.glob("*.tmp"))), 1)
 
     def test_compare_structure_detects_count_mismatch_and_accepts_match(self) -> None:
         matching = self.root / "matching.sqlite"

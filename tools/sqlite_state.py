@@ -305,27 +305,9 @@ def _revalidate_path_identity(
         raise StateBundleError(f"formal {description} changed during operation")
 
 
-def _cleanup_restore_temporary(
-    temporary: Path,
-    *,
-    cleanup_root: Path,
-    destination_parent_identity: _PathIdentity,
-) -> None:
-    temporary.unlink(missing_ok=True)
-    for candidate in cleanup_root.rglob(temporary.name):
-        try:
-            candidate_parent_identity = _capture_path_identity(
-                candidate.parent,
-                description="temporary restore parent",
-                expected_kind="directory",
-            )
-        except StateBundleError:
-            continue
-        if (
-            candidate_parent_identity.device == destination_parent_identity.device
-            and candidate_parent_identity.inode == destination_parent_identity.inode
-        ):
-            candidate.unlink(missing_ok=True)
+def _capture_open_file_identity(path: Path, descriptor: int) -> _PathIdentity:
+    status = os.fstat(descriptor)
+    return _PathIdentity(path.resolve(strict=True), status.st_dev, status.st_ino)
 
 
 def _resolve_service_lane(
@@ -492,7 +474,6 @@ def _restore_verified_bundle(
     destination: Path,
     verified: VerifiedBundle,
     destination_parent_identity: _PathIdentity,
-    cleanup_root: Path,
 ) -> None:
     _revalidate_path_identity(
         destination.parent,
@@ -513,46 +494,46 @@ def _restore_verified_bundle(
     descriptor, temporary_text = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
     )
-    os.close(descriptor)
-    temporary = Path(temporary_text).resolve(strict=True)
-    published = False
     try:
-        shutil.copyfile(bundle / "database.sqlite", temporary)
-        if sha256_file(temporary) != verified.database_sha256:
-            raise StateBundleError("restored database metadata mismatch: hash")
-        if temporary.stat().st_size != verified.database_size:
-            raise StateBundleError("restored database metadata mismatch: size")
-        inspected = inspect_database(temporary)
-        for key, expected in verified.metadata.items():
-            if inspected[key] != expected:
-                raise StateBundleError(f"restored database metadata mismatch: {key}")
-        _revalidate_path_identity(
-            destination.parent,
-            destination_parent_identity,
-            description="destination parent",
-            expected_kind="directory",
+        temporary_identity = _capture_open_file_identity(
+            Path(temporary_text), descriptor
         )
-        try:
-            os.link(temporary, destination)
-        except FileExistsError as error:
-            raise StateBundleError(
-                f"restore destination already exists: {destination}"
-            ) from error
-        published = True
-        try:
-            temporary.unlink()
-        except OSError as error:
-            raise StateBundleError(
-                "restore succeeded but temporary cleanup failed"
-            ) from error
-    except BaseException:
-        if not published:
-            _cleanup_restore_temporary(
-                temporary,
-                cleanup_root=cleanup_root,
-                destination_parent_identity=destination_parent_identity,
-            )
-        raise
+    finally:
+        os.close(descriptor)
+    temporary = temporary_identity.resolved
+    _revalidate_path_identity(
+        temporary,
+        temporary_identity,
+        description="restore temporary",
+        expected_kind="file",
+    )
+    shutil.copyfile(bundle / "database.sqlite", temporary)
+    if sha256_file(temporary) != verified.database_sha256:
+        raise StateBundleError("restored database metadata mismatch: hash")
+    if temporary.stat().st_size != verified.database_size:
+        raise StateBundleError("restored database metadata mismatch: size")
+    inspected = inspect_database(temporary)
+    for key, expected in verified.metadata.items():
+        if inspected[key] != expected:
+            raise StateBundleError(f"restored database metadata mismatch: {key}")
+    _revalidate_path_identity(
+        destination.parent,
+        destination_parent_identity,
+        description="destination parent",
+        expected_kind="directory",
+    )
+    _revalidate_path_identity(
+        temporary,
+        temporary_identity,
+        description="restore temporary",
+        expected_kind="file",
+    )
+    try:
+        os.link(temporary, destination)
+    except FileExistsError as error:
+        raise StateBundleError(
+            f"restore destination already exists: {destination}"
+        ) from error
 
 
 def _restore_service(
@@ -585,7 +566,6 @@ def _restore_service(
         lane.destination,
         verified,
         destination_parent_identity,
-        root,
     )
     return lane.destination
 
