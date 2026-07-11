@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import hashlib
 import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
+import secrets
 import shutil
 import sqlite3
 import sys
@@ -50,6 +51,13 @@ SCHEMA2_FIELDS = SCHEMA1_FIELDS | {
 IDENTITY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 UTC_TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+COMPLETION_FILENAME = "durability-complete.json"
+COMPLETION_FIELDS = {
+    "schema_version",
+    "durability",
+    "manifest_sha256",
+    "bundle_name",
+}
 
 
 class StateBundleError(RuntimeError):
@@ -246,6 +254,8 @@ def _verified_manifest(manifest: object) -> VerifiedBundle:
 
 
 def verify_bundle(bundle: Path) -> VerifiedBundle:
+    if ".quarantine-" in bundle.name:
+        raise StateBundleError("quarantined state bundle is not promotable")
     manifest_path = bundle / "manifest.json"
     database_path = bundle / "database.sqlite"
     if not manifest_path.is_file() or not database_path.is_file():
@@ -263,7 +273,38 @@ def verify_bundle(bundle: Path) -> VerifiedBundle:
     for key, expected in verified.metadata.items():
         if inspected[key] != expected:
             raise StateBundleError(f"state bundle metadata mismatch: {key}")
-    return verified
+    completion_path = bundle / COMPLETION_FILENAME
+    if not completion_path.exists():
+        return verified
+    completion = _load_completion(completion_path)
+    if (
+        verified.schema_version != 2
+        or verified.creation_platform != "posix"
+        or verified.durability != "atomic-process-crash"
+        or completion["manifest_sha256"] != sha256_file(manifest_path)
+        or completion["bundle_name"] != bundle.name
+    ):
+        raise StateBundleError("invalid state bundle durability completion")
+    return replace(verified, durability="power-loss-posix")
+
+
+def _load_completion(path: Path) -> dict[str, object]:
+    try:
+        completion = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError, OSError, RecursionError) as error:
+        raise StateBundleError("invalid state bundle durability completion") from error
+    if (
+        type(completion) is not dict
+        or set(completion) != COMPLETION_FIELDS
+        or not _is_exact_int(completion["schema_version"])
+        or completion["schema_version"] != 1
+        or completion["durability"] != "power-loss-posix"
+        or type(completion["manifest_sha256"]) is not str
+        or not SHA256_PATTERN.fullmatch(completion["manifest_sha256"])
+        or not _is_portable_basename(completion["bundle_name"])
+    ):
+        raise StateBundleError("invalid state bundle durability completion")
+    return completion
 
 
 def _contained_path(root: Path, relative: str, description: str) -> Path:
@@ -346,7 +387,7 @@ def resolve_service_lane(*, service: str) -> ServiceLane:
 
 
 def _creation_platform() -> CreationPlatform:
-    return "windows" if os.name == "nt" else "posix"
+    return "posix" if _is_posix() else "windows"
 
 
 def _is_posix() -> bool:
@@ -354,8 +395,8 @@ def _is_posix() -> bool:
 
 
 def _sync_file(path: Path) -> None:
-    access = os.O_RDONLY if _is_posix() else os.O_RDWR
-    descriptor = os.open(path, access | getattr(os, "O_BINARY", 0))
+    flags = os.O_RDONLY if _is_posix() else os.O_RDWR | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
     try:
         os.fsync(descriptor)
     finally:
@@ -371,7 +412,7 @@ def _sync_directory(path: Path) -> None:
 
 
 def _new_bundle_durability() -> DurabilityLevel:
-    return "power-loss-posix" if _is_posix() else "atomic-process-crash"
+    return "atomic-process-crash"
 
 
 def _create_bundle(
@@ -398,6 +439,7 @@ def _create_bundle(
         raise StateBundleError("backup bundle already exists or has an invalid path")
     staging = Path(tempfile.mkdtemp(prefix=f".{identity}-", dir=output_root))
     database = staging / "database.sqlite"
+    published_final = False
     try:
         if source_parent_identity is not None:
             _revalidate_path_identity(
@@ -441,11 +483,52 @@ def _create_bundle(
         if _is_posix():
             _sync_directory(staging)
         os.replace(staging, final_bundle)
+        published_final = True
         if _is_posix():
             _sync_directory(output_root)
+            manifest_path = final_bundle / "manifest.json"
+            pending_completion = final_bundle / (
+                f".{COMPLETION_FILENAME}.pending-{secrets.token_hex(8)}"
+            )
+            pending_completion.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "durability": "power-loss-posix",
+                        "manifest_sha256": sha256_file(manifest_path),
+                        "bundle_name": final_bundle.name,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            _sync_file(pending_completion)
+            completion_path = final_bundle / COMPLETION_FILENAME
+            os.replace(pending_completion, completion_path)
+            _sync_directory(final_bundle)
+            completion = _load_completion(completion_path)
+            if (
+                completion["manifest_sha256"] != sha256_file(manifest_path)
+                or completion["bundle_name"] != final_bundle.name
+            ):
+                raise StateBundleError("invalid state bundle durability completion")
+            if verify_bundle(final_bundle).durability != "power-loss-posix":
+                raise StateBundleError("state bundle durability completion failed")
         return final_bundle
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        if published_final:
+            quarantine = output_root / (
+                f".{final_bundle.name}.quarantine-{secrets.token_hex(8)}"
+            )
+            try:
+                os.replace(final_bundle, quarantine)
+                if _is_posix():
+                    _sync_directory(output_root)
+            except BaseException as quarantine_error:
+                raise StateBundleError("state bundle quarantine failed") from quarantine_error
         raise
 
 

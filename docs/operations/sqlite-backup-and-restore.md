@@ -22,26 +22,45 @@ close supported same-process mutation windows; they do not claim protection
 against a continuously racing, same-authority privileged local actor between
 boundaries.
 
-Every successful schema 2 bundle records the durability contract of the host
-that created it. On POSIX, `power-loss-posix` is reported only after the backup
-database and manifest files are synced, the staged bundle verifies, the staging
-directory is synced, publication is renamed into place, and the output root is
-synced. A POSIX restore syncs the temporary database before verification, creates
-the no-clobber hard link, syncs the destination parent, retains the temporary
-name as the binding Scheme A same-inode quarantine, and then performs the
-approved second parent-directory sync. The historical durability-plan step that
-said "unlink" does not apply: restore never removes the quarantine through a
-pathname, and the second barrier records the deliberately retained namespace
-state rather than claiming an unlink occurred.
+Every schema 2 manifest records only the weaker `atomic-process-crash` baseline.
+On POSIX, `verify` derives `power-loss-posix` only from a separate
+`durability-complete.json` record whose exact schema binds it to the manifest
+hash and final bundle directory name. The database and weak manifest files are
+synced first, the staged bundle verifies, and the staging directory is synced.
+Publication then renames the uniquely owned staging directory into its final
+name and syncs the output root while the bundle is still weak. A hidden
+completion candidate is written and file-synced, atomically renamed to
+`durability-complete.json`, and followed by a final bundle-directory sync. Only
+then is the completed bundle verified and returned. A missing, malformed,
+changed, or name-mismatched completion record cannot promote the weak manifest
+to `power-loss-posix`.
+
+If any explicit barrier or completion check fails after final-name publication,
+the tool atomically moves the bundle to a new unique hidden quarantine name.
+Because completion is bound to the intended final basename, the quarantined
+artifact is non-promotable and `verify` rejects its completion. The tool tracks
+whether final publication occurred and never recursively deletes the vacated
+staging pathname; an unrelated replacement at that old name is left untouched.
+Failures before final publication retain the unique hidden staging artifact for
+identity-aware disposition rather than performing pathname-based recursive
+cleanup under ambiguity.
+
+A POSIX restore syncs the temporary database before verification, creates the
+no-clobber hard link, syncs the destination parent, retains the temporary name
+as the binding Scheme A same-inode quarantine, and then performs the approved
+second parent-directory sync. The historical durability-plan step that said
+"unlink" does not apply: restore never removes the quarantine through a pathname,
+and the second barrier records the deliberately retained namespace state rather
+than claiming an unlink occurred.
 
 On Windows, the database, manifest, and restore temporary files are synced, but
 directories are not. Schema 2 therefore reports only `atomic-process-crash` and
 does not claim power-loss or hard-reset durability. Any failed barrier makes the
-operation fail. A failure before backup publication removes the safely owned
-staging directory; a failure after publication retains the published bundle as
-evidence. Restore failures retain any created temporary quarantine, and failures
-after hard-link publication retain both names. A failed command is never a
-durability success, even when published or quarantined evidence remains.
+operation fail. Backup failures retain a uniquely named non-promotable staging
+or quarantine artifact instead of leaving a normal bundle with a strong claim.
+Restore failures retain any created temporary quarantine, and failures after
+hard-link publication retain both names. A failed command is never a durability
+success, even when quarantined evidence remains.
 
 The document itself grants no operational authority. Read-only backup and bundle
 verification may be automated. Stopping a current Bot or restoring/replacing its
