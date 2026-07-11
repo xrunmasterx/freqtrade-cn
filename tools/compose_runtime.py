@@ -9,9 +9,11 @@ from typing import Any, Sequence
 
 if __package__:
     from tools.bootstrap_runtime import build_compose_identity, verify_runtime
+    from tools.runtime_contract import validate_compose, validate_tracked_configs
     from tools.runtime_manifest import load_runtime_manifest
 else:
     from bootstrap_runtime import build_compose_identity, verify_runtime
+    from runtime_contract import validate_compose, validate_tracked_configs
     from runtime_manifest import load_runtime_manifest
 
 
@@ -27,6 +29,13 @@ CI_PROBE_PATHS = {
     ),
 }
 STATE_CHECK_SERVICES = {"freqtrade", "freqtrade-futures"}
+PREFLIGHT_ACTIONS = {"up", "create", "start", "restart", "run"}
+RUNTIME_CONTROL_PATHS = (
+    "docker-compose.yml",
+    "ops/config/trading-safety.json",
+    "Dockerfile",
+    "docker/freqtrade_entrypoint.py",
+)
 
 
 class UnsupportedArguments(ValueError):
@@ -129,6 +138,50 @@ def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> lis
     return tokens
 
 
+def _validate_launch(
+    root: Path,
+    manifest: dict[str, Any],
+    command_prefix: list[str],
+    override: str,
+    environment: dict[str, str],
+) -> None:
+    if validate_tracked_configs(root):
+        raise ValueError("tracked runtime configuration failed validation")
+    controls = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", *RUNTIME_CONTROL_PATHS],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if controls.returncode != 0:
+        raise ValueError("runtime control files differ from HEAD")
+    rendered = subprocess.run(
+        [
+            *command_prefix,
+            "--profile",
+            "trading",
+            "--profile",
+            "research",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=root,
+        env=environment,
+        input=override,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if rendered.returncode != 0:
+        raise ValueError("compose preflight render failed")
+    compose = json.loads(rendered.stdout)
+    if validate_compose(manifest, compose, repo_root=root):
+        raise ValueError("rendered compose failed validation")
+
+
 def run_compose(
     arguments: Sequence[str],
     *,
@@ -144,15 +197,16 @@ def run_compose(
     command = [
         "docker", "compose", "--project-name", "freqtrade-cn",
         "-f", str(resolved_root / "docker-compose.yml"), "-f", "-",
-        *safe_arguments,
     ]
     environment = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
     }
+    if safe_arguments[0] in PREFLIGHT_ACTIONS:
+        _validate_launch(resolved_root, manifest, command, override, environment)
     return subprocess.run(
-        command,
+        [*command, *safe_arguments],
         cwd=resolved_root,
         env=environment,
         input=override,

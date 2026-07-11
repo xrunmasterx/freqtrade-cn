@@ -23,6 +23,32 @@ class ComposeRuntimeTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         (self.root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
 
+    def commit_runtime_controls(self) -> None:
+        controls = {
+            "Dockerfile": "FROM scratch\n",
+            "docker/freqtrade_entrypoint.py": "raise SystemExit\n",
+            "ops/config/trading-safety.json": json.dumps(
+                {"dry_run": True, "ignore_buying_expired_candle_after": 60}
+            ),
+        }
+        for relative, content in controls.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "tests@example.invalid"],
+            cwd=self.root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Compose Runtime Tests"],
+            cwd=self.root,
+            check=True,
+        )
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=self.root, check=True)
+
     def test_parser_allows_only_supported_actions_and_safe_options(self) -> None:
         cases = (
             (["--profile", "trading", "config", "--quiet", "--format", "json"],),
@@ -230,6 +256,65 @@ class ComposeRuntimeTests(unittest.TestCase):
             compose_runtime.run_compose(["config"], root=self.root)
         users = json.loads(run.call_args.kwargs["input"])["services"]
         self.assertTrue(all(service["user"] == "1001:1002" for service in users.values()))
+
+    def test_launch_rejects_worktree_safety_policy_drift_before_docker(self) -> None:
+        self.commit_runtime_controls()
+        (self.root / "ops/config/trading-safety.json").write_text(
+            json.dumps({"dry_run": False, "ignore_buying_expired_candle_after": 60}),
+            encoding="utf-8",
+        )
+        original_run = subprocess.run
+
+        def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if command[0] == "git":
+                return original_run(command, **kwargs)
+            raise AssertionError("Docker must not run after runtime control drift")
+
+        with (
+            mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=MANIFEST),
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime.subprocess, "run", side_effect=run),
+        ):
+            with self.assertRaises(ValueError):
+                compose_runtime.run_compose(["up", "freqtrade"], root=self.root)
+
+    def test_launch_rejects_rendered_compose_drift_before_action(self) -> None:
+        self.commit_runtime_controls()
+        rendered = subprocess.CompletedProcess(
+            [], 0, '{"services":{"freqtrade":{"user":"0:0"}}}', ""
+        )
+        with (
+            mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=MANIFEST),
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime, "validate_tracked_configs", return_value=[]),
+            mock.patch.object(
+                compose_runtime, "validate_compose", return_value=["runtime user drift"]
+            ),
+            mock.patch.object(
+                compose_runtime.subprocess, "run", return_value=rendered
+            ) as run,
+        ):
+            with self.assertRaises(ValueError):
+                compose_runtime.run_compose(["up", "freqtrade"], root=self.root)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            run.call_args_list[1].args[0][-3:], ["config", "--format", "json"]
+        )
+
+    def test_emergency_stop_remains_available_with_control_drift(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=MANIFEST),
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(
+                compose_runtime.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            result = compose_runtime.run_compose(["stop", "freqtrade"], root=self.root)
+
+        self.assertIs(result, completed)
+        run.assert_called_once()
 
     def test_main_rejects_unsupported_arguments_with_fixed_error(self) -> None:
         with (
