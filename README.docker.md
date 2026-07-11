@@ -51,6 +51,17 @@ python tools/compose_runtime.py ps freqtrade
 
 Open the trading UI at `http://127.0.0.1:8081/trade`.
 
+Build and start Futures independently:
+
+```powershell
+python tools/compose_runtime.py up --detach --build freqtrade-futures
+python tools/compose_runtime.py ps freqtrade-futures
+```
+
+Open the Futures trading UI at `http://127.0.0.1:8082/trade`. Acceptance must
+show the `freqtrade-futures` endpoint identity, Futures mode, and DRY-RUN marker;
+do not treat a healthy Spot endpoint on port `8081` as Futures acceptance.
+
 Build and start only the research webserver:
 
 ```powershell
@@ -86,5 +97,6 @@ python tools/compose_runtime.py --profile trading --profile research ps
 - Trading mode: Spot for `freqtrade`; Futures for `freqtrade-futures`
 - Run mode: `dry_run` for every P0 trading service
 - Main trading UI port: `8081`
+- Futures trading UI port: `8082`
 - Research UI port: `8083`
 - Container API/UI port: `8080`

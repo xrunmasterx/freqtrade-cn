@@ -242,11 +242,24 @@ $exitCode = $LASTEXITCODE
 Assert-NativeSuccess -ExitCode $exitCode -Operation 'Compare restored Futures state'
 ```
 
-The verified final bundles plus successful restore and comparison are the
-supported dry-run database readability proof. The old raw Compose `show-trades`
-probe is prohibited: it requires unsupported `run` behavior and can override the
-service command or entrypoint. Do not copy or reconstruct that command. A future
-Freqtrade-native probe requires a dedicated, reviewed safe wrapper action.
+After the bundle checks succeed, use the fixed safe wrapper action to prove that
+Freqtrade itself can read both restored databases:
+
+```powershell
+python tools/compose_runtime.py check-state freqtrade
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Read restored Spot state through Freqtrade'
+
+python tools/compose_runtime.py check-state freqtrade-futures
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Read restored Futures state through Freqtrade'
+```
+
+`check-state` fixes the service command, database URL, JSON output mode, runtime
+identity, mounts, and environment. It does not accept an entrypoint, volume,
+user, environment, capability, database URL, or Research service override. The
+JSON output can contain trade rows from a non-empty database. Inspect it only in
+the authorized terminal; do not paste it into logs, tickets, chat, or reports.
 
 ## 5. Start and accept one service at a time
 

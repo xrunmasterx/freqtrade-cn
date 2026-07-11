@@ -43,16 +43,53 @@ replace that service's current credential suite. Keep the other two services
 running and unchanged. A successful rotation invalidates old access and refresh
 tokens; clients must authenticate again.
 
+Define the native-command fail-fast helper once in the current PowerShell
+session. Every rotation, verification, recreate, status, and log command below
+captures and checks its exit code before the next command runs:
+
+```powershell
+function Assert-NativeSuccess {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int] $ExitCode,
+    [Parameter(Mandatory = $true)]
+    [string] $Operation
+  )
+
+  if ($ExitCode -ne 0) {
+    throw "$Operation failed with native exit code $ExitCode"
+  }
+}
+```
+
+The endpoint mapping is fixed for this runbook:
+
+| Service | Endpoint | Acceptance identity |
+|---|---|---|
+| `freqtrade` | `http://127.0.0.1:8081` | Spot, DRY-RUN |
+| `freqtrade-futures` | `http://127.0.0.1:8082` | Futures, DRY-RUN |
+| `freqtrade-research` | `http://127.0.0.1:8083` | Research webserver |
+
 ### Spot: `freqtrade`
 
 ```powershell
 Set-Location G:\AI_Trading\freqtrade-cn
 
 python tools/bootstrap_runtime.py rotate-secrets --service freqtrade
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Rotate Spot credentials'
 python tools/bootstrap_runtime.py verify
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Verify Spot credential rotation'
 python tools/compose_runtime.py up --detach --force-recreate freqtrade
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Recreate Spot service'
 python tools/compose_runtime.py ps freqtrade
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Inspect Spot service'
 python tools/compose_runtime.py logs --tail 100 freqtrade
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Read Spot service logs'
 ```
 
 ### Futures: `freqtrade-futures`
@@ -62,10 +99,20 @@ authorization for this endpoint.
 
 ```powershell
 python tools/bootstrap_runtime.py rotate-secrets --service freqtrade-futures
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Rotate Futures credentials'
 python tools/bootstrap_runtime.py verify
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Verify Futures credential rotation'
 python tools/compose_runtime.py up --detach --force-recreate freqtrade-futures
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Recreate Futures service'
 python tools/compose_runtime.py ps freqtrade-futures
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Inspect Futures service'
 python tools/compose_runtime.py logs --tail 100 freqtrade-futures
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Read Futures service logs'
 ```
 
 ### Research: `freqtrade-research`
@@ -75,10 +122,20 @@ authorization for this endpoint.
 
 ```powershell
 python tools/bootstrap_runtime.py rotate-secrets --service freqtrade-research
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Rotate Research credentials'
 python tools/bootstrap_runtime.py verify
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Verify Research credential rotation'
 python tools/compose_runtime.py up --detach --force-recreate freqtrade-research
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Recreate Research service'
 python tools/compose_runtime.py ps freqtrade-research
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Inspect Research service'
 python tools/compose_runtime.py logs --tail 100 freqtrade-research
+$exitCode = $LASTEXITCODE
+Assert-NativeSuccess -ExitCode $exitCode -Operation 'Read Research service logs'
 ```
 
 ## Acceptance after every service
@@ -89,8 +146,9 @@ Complete all checks before rotating the next service:
    a rollback condition.
 2. Sign in again to exactly that Bot endpoint in FreqUI.
 3. Confirm the visible Bot name and ID, exchange, Spot/Futures mode, and DRY-RUN
-   marker identify the intended target. For Research, confirm the endpoint is the
-   Research service rather than a trading Bot.
+   marker identify the intended target. Futures acceptance must be performed at
+   `http://127.0.0.1:8082`, not the Spot endpoint. For Research, confirm the
+   endpoint is the Research service rather than a trading Bot.
 4. Inspect `ps` and the bounded service logs for a healthy service. Never print,
    copy, hash, or otherwise expose a secret file as a health check.
 5. If authentication or health verification fails, do not restore a previously
