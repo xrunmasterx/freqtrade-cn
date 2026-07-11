@@ -98,6 +98,8 @@ def safe_service(
         "--db-url sqlite:////freqtrade/state/trades.sqlite "
         "--config /freqtrade/config/runtime.json "
         "--config /freqtrade/config/trading-safety.json "
+        "--user-data-dir /freqtrade/state "
+        "--strategy-path /freqtrade/user_data/strategies "
         f"--strategy {entry['strategy']}"
     )
     if role == "trading":
@@ -123,33 +125,12 @@ def safe_service(
                     "read_only": True,
                     "bind": {"create_host_path": False},
                 },
-                {
-                    "type": "bind",
-                    "source": str(
-                        (repo_root / str(entry["state_root"]) / "data").resolve()
-                    ),
-                    "target": "/freqtrade/user_data/data",
-                    "read_only": False,
-                    "bind": {"create_host_path": False},
-                },
-                {
-                    "type": "bind",
-                    "source": str(
-                        (
-                            repo_root
-                            / str(entry["state_root"])
-                            / "backtest_results"
-                        ).resolve()
-                    ),
-                    "target": "/freqtrade/user_data/backtest_results",
-                    "read_only": False,
-                    "bind": {"create_host_path": False},
-                },
             ]
         )
         command = (
             "webserver --logfile /freqtrade/state/logs/runtime.log "
-            "--config /freqtrade/config/runtime.json"
+            "--config /freqtrade/config/runtime.json "
+            "--user-data-dir /freqtrade/state"
         )
     return {
         "build": {"context": str(repo_root.resolve()), "dockerfile": "Dockerfile"},
@@ -211,9 +192,6 @@ def build_safe_contract(repo_root: Path) -> tuple[dict[str, object], dict[str, o
     for entry in entries:
         source_paths.add(str(entry["config_path"]))
         source_paths.add(str(entry["state_root"]))
-        if entry["role"] == "research":
-            source_paths.add(f"{entry['state_root']}/data")
-            source_paths.add(f"{entry['state_root']}/backtest_results")
     for relative in source_paths:
         path = repo_root / relative
         if Path(relative).suffix:
@@ -286,6 +264,93 @@ class RuntimeComposeContractTests(unittest.TestCase):
         return "\n".join(self.validate())
 
     def test_accepts_the_minimal_safe_contract(self) -> None:
+        self.assertEqual(self.validate(), [])
+
+    def test_requires_state_userdata_and_read_only_strategy_path(self) -> None:
+        self.assertEqual(
+            getattr(runtime_contract, "EXPECTED_USER_DATA_DIR", None),
+            "/freqtrade/state",
+        )
+        self.assertEqual(
+            getattr(runtime_contract, "EXPECTED_STRATEGY_PATH", None),
+            "/freqtrade/user_data/strategies",
+        )
+        for name in ("freqtrade", "freqtrade-futures"):
+            with self.subTest(service=name):
+                self.assertEqual(
+                    runtime_contract.option_values(
+                        self.compose["services"][name]["command"].split(),
+                        "--user-data-dir",
+                    ),
+                    ["/freqtrade/state"],
+                )
+                self.assertEqual(
+                    runtime_contract.option_values(
+                        self.compose["services"][name]["command"].split(),
+                        "--strategy-path",
+                    ),
+                    ["/freqtrade/user_data/strategies"],
+                )
+        self.assertEqual(self.validate(), [])
+
+    def test_rejects_duplicate_or_wrong_userdata_and_strategy_paths(self) -> None:
+        mutations = (
+            (" --user-data-dir /freqtrade/state", "userdata directory"),
+            (" --user-data-dir /freqtrade/user_data", "userdata directory"),
+            (" --strategy-path /freqtrade/user_data/strategies", "strategy path"),
+            (" --strategy-path /freqtrade/state/strategies", "strategy path"),
+            (
+                " --strategy-path --user-data-dir /freqtrade/state "
+                "/freqtrade/user_data/strategies",
+                "userdata directory",
+            ),
+        )
+        for suffix, expected_error in mutations:
+            with self.subTest(suffix=suffix):
+                _, compose = build_safe_contract(self.root)
+                compose["services"]["freqtrade"]["command"] += suffix
+                self.assertIn(
+                    expected_error,
+                    "\n".join(self.validate(compose=compose)),
+                )
+
+        for option, expected_error in (
+            ("--user-data-dir /freqtrade/state", "userdata directory"),
+            (
+                "--strategy-path /freqtrade/user_data/strategies",
+                "strategy path",
+            ),
+        ):
+            with self.subTest(missing=option):
+                _, compose = build_safe_contract(self.root)
+                command = compose["services"]["freqtrade"]["command"]
+                compose["services"]["freqtrade"]["command"] = command.replace(
+                    f" {option}", ""
+                )
+                self.assertIn(
+                    expected_error,
+                    "\n".join(self.validate(compose=compose)),
+                )
+
+    def test_research_uses_state_userdata_without_strategy_path(self) -> None:
+        command = self.compose["services"]["freqtrade-research"]["command"].split()
+        self.assertEqual(
+            runtime_contract.option_values(command, "--user-data-dir"),
+            ["/freqtrade/state"],
+        )
+        self.assertEqual(
+            runtime_contract.option_values(command, "--strategy-path"),
+            [],
+        )
+        self.assertEqual(self.validate(), [])
+
+    def test_research_removes_writable_userdata_alias_mounts(self) -> None:
+        targets = {
+            volume["target"]
+            for volume in self.compose["services"]["freqtrade-research"]["volumes"]
+        }
+        self.assertNotIn("/freqtrade/user_data/data", targets)
+        self.assertNotIn("/freqtrade/user_data/backtest_results", targets)
         self.assertEqual(self.validate(), [])
 
     def test_rejects_service_not_in_manifest(self) -> None:

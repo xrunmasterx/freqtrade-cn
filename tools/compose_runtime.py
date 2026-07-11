@@ -9,11 +9,19 @@ from typing import Any, Sequence
 
 if __package__:
     from tools.bootstrap_runtime import build_compose_identity, verify_runtime
-    from tools.runtime_contract import validate_compose, validate_tracked_configs
+    from tools.runtime_contract import (
+        EXPECTED_USER_DATA_DIR,
+        validate_compose,
+        validate_tracked_configs,
+    )
     from tools.runtime_manifest import load_runtime_manifest
 else:
     from bootstrap_runtime import build_compose_identity, verify_runtime
-    from runtime_contract import validate_compose, validate_tracked_configs
+    from runtime_contract import (
+        EXPECTED_USER_DATA_DIR,
+        validate_compose,
+        validate_tracked_configs,
+    )
     from runtime_manifest import load_runtime_manifest
 
 
@@ -100,7 +108,7 @@ def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> lis
             "--config",
             "/freqtrade/config/trading-safety.json",
             "--user-data-dir",
-            "/freqtrade/state",
+            EXPECTED_USER_DATA_DIR,
             "--print-json",
         ]
     if index >= len(tokens) or tokens[index] not in ALLOWED_ACTIONS:

@@ -91,6 +91,8 @@ services:
       --db-url sqlite:////freqtrade/state/trades.sqlite
       --config /freqtrade/config/runtime.json
       --config /freqtrade/config/trading-safety.json
+      --user-data-dir /freqtrade/state
+      --strategy-path /freqtrade/user_data/strategies
       --strategy SampleStrategy
 
   freqtrade-futures:
@@ -150,6 +152,8 @@ services:
       --db-url sqlite:////freqtrade/state/trades.sqlite
       --config /freqtrade/config/runtime.json
       --config /freqtrade/config/trading-safety.json
+      --user-data-dir /freqtrade/state
+      --strategy-path /freqtrade/user_data/strategies
       --strategy VolatilitySystem
 
   freqtrade-research:
@@ -180,16 +184,6 @@ services:
         target: /freqtrade/state
         bind:
           create_host_path: false
-      - type: bind
-        source: ./ft_userdata/runtime/freqtrade-research/data
-        target: /freqtrade/user_data/data
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ./ft_userdata/runtime/freqtrade-research/backtest_results
-        target: /freqtrade/user_data/backtest_results
-        bind:
-          create_host_path: false
     secrets:
       - source: freqtrade_research_api_password
         target: api_password
@@ -217,3 +211,4 @@ services:
       webserver
       --logfile /freqtrade/state/logs/freqtrade-research.log
       --config /freqtrade/config/runtime.json
+      --user-data-dir /freqtrade/state

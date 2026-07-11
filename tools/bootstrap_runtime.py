@@ -308,14 +308,14 @@ def _merge_compose_identity(
     _atomic_write_text(path, content + "\n")
 
 
-def _service_writable_directories(root: Path, service: dict[str, Any]) -> list[Path]:
-    state_root = root / service["state_root"]
-    directories = [state_root, state_root / "home", state_root / "logs"]
-    if service["role"] == "research":
-        directories.extend(
-            [state_root / "data", state_root / "backtest_results"]
-        )
-    return directories
+def _service_writable_directories(state_root: Path) -> tuple[Path, ...]:
+    return (
+        state_root,
+        state_root / "home",
+        state_root / "logs",
+        state_root / "data",
+        state_root / "backtest_results",
+    )
 
 
 def _verify_posix_writable_directory(
@@ -343,7 +343,7 @@ def _verify_writable_directories(
     runtime_uid: int,
     runtime_gid: int,
 ) -> Path:
-    directories = _service_writable_directories(root, service)
+    directories = _service_writable_directories(root / service["state_root"])
     state_root = directories[0]
     if state_root.is_symlink() or not state_root.is_dir():
         raise ValueError(f"invalid runtime writable directory for {service['name']}")
@@ -400,11 +400,8 @@ def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
             shutil.copyfile(template, config)
 
         state_root = root / service["state_root"]
-        (state_root / "logs").mkdir(parents=True, exist_ok=True)
-        (state_root / "home").mkdir(parents=True, exist_ok=True)
-        if service["role"] == "research":
-            (state_root / "data").mkdir(parents=True, exist_ok=True)
-            (state_root / "backtest_results").mkdir(parents=True, exist_ok=True)
+        for directory in _service_writable_directories(state_root):
+            directory.mkdir(parents=True, exist_ok=True)
 
         secret_root = root / "ft_userdata" / "secrets" / service["name"]
         for filename, entropy_bytes in SECRET_SPECS.items():

@@ -172,6 +172,20 @@ class ComposeRuntimeTests(unittest.TestCase):
                     ],
                 )
 
+    def test_state_check_reuses_formal_userdata_contract(self) -> None:
+        with mock.patch.object(
+            compose_runtime,
+            "EXPECTED_USER_DATA_DIR",
+            "/contract-userdata",
+            create=True,
+        ):
+            arguments = compose_runtime.parse_compose_arguments(
+                ["check-state", "freqtrade"], set(SERVICES)
+            )
+
+        index = arguments.index("--user-data-dir")
+        self.assertEqual(arguments[index + 1], "/contract-userdata")
+
     def test_state_check_rejects_research_unknown_and_extra_arguments(self) -> None:
         forbidden = (
             ["check-state"],

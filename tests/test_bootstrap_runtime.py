@@ -215,6 +215,39 @@ class BootstrapRuntimeTests(unittest.TestCase):
         self.assertEqual(len(all_values), len(set(all_values)))
         self.assertTrue(all(len(value) >= 32 for value in all_values))
 
+    def test_init_creates_complete_state_layout_for_every_service(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        for service in self.manifest["services"]:
+            with self.subTest(service=service["name"]):
+                state_root = self.root / service["state_root"]
+                for directory in ("home", "logs", "data", "backtest_results"):
+                    self.assertTrue((state_root / directory).is_dir())
+
+    def test_init_never_creates_state_strategy_directory(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        for service in self.manifest["services"]:
+            with self.subTest(service=service["name"]):
+                self.assertFalse(
+                    (self.root / service["state_root"] / "strategies").exists()
+                )
+
+    def test_verify_requires_data_and_backtest_directories_for_every_service(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        for service in self.manifest["services"]:
+            for directory in ("data", "backtest_results"):
+                with self.subTest(service=service["name"], directory=directory):
+                    path = self.root / service["state_root"] / directory
+                    path.mkdir(exist_ok=True)
+                    path.rmdir()
+                    with self.assertRaisesRegex(
+                        ValueError, "invalid runtime writable directory"
+                    ):
+                        bootstrap_runtime.verify_runtime(self.root, self.manifest)
+                    path.mkdir()
+
     def test_posix_init_merges_runtime_identity_and_creates_service_homes(self) -> None:
         environment = self.root / ".env"
         environment.write_bytes(
@@ -666,7 +699,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         self.assertTrue(verify_secret.call_args_list)
         self.assertTrue(all(call.args[1] == 1001 for call in verify_secret.call_args_list))
-        self.assertEqual(verify_directory.call_count, 11)
+        self.assertEqual(verify_directory.call_count, 15)
         self.assertTrue(
             all(
                 call.args[1:] == (1001, 1002)

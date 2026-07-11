@@ -80,6 +80,9 @@ python tools/compose_runtime.py --profile trading --profile research ps
 
 The wrapper verifies bootstrap state and permits only the supported project,
 profiles, services, actions, and options. It is the formal runtime entrypoint.
+Every formal service uses `/freqtrade/state` as its writable userdata directory.
+Trading services load strategies from the read-only
+`/freqtrade/user_data/strategies` mount; Research has no strategy path.
 
 ## Stop
 

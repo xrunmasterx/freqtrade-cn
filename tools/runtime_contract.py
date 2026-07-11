@@ -26,6 +26,8 @@ EXPECTED_CONFIGS = [
     "/freqtrade/config/runtime.json",
     "/freqtrade/config/trading-safety.json",
 ]
+EXPECTED_USER_DATA_DIR = "/freqtrade/state"
+EXPECTED_STRATEGY_PATH = "/freqtrade/user_data/strategies"
 DIRECT_SECRET_ENV = {
     "FREQTRADE__API_SERVER__PASSWORD",
     "FREQTRADE__API_SERVER__JWT_SECRET_KEY",
@@ -348,20 +350,9 @@ def _expected_volumes(
             "file",
         )
     else:
-        state_root = service.get("state_root")
         expected["/freqtrade/user_data/research_data"] = (
             "ft_userdata/user_data/research_data",
             True,
-            "directory",
-        )
-        expected["/freqtrade/user_data/data"] = (
-            f"{state_root}/data",
-            False,
-            "directory",
-        )
-        expected["/freqtrade/user_data/backtest_results"] = (
-            f"{state_root}/backtest_results",
-            False,
             "directory",
         )
     return expected
@@ -703,6 +694,10 @@ def validate_compose(
             errors.append(f"{name}: logfile must be a normalized state log path")
         databases = option_values(tokens, "--db-url")
         strategies = option_values(tokens, "--strategy")
+        user_data_directories = option_values(tokens, "--user-data-dir")
+        strategy_paths = option_values(tokens, "--strategy-path")
+        if user_data_directories != [EXPECTED_USER_DATA_DIR]:
+            errors.append(f"{name}: userdata directory differs from runtime contract")
         if role == "trading":
             if option_values(tokens, "--config") != EXPECTED_CONFIGS:
                 errors.append(f"{name}: trading safety config must be last")
@@ -713,11 +708,15 @@ def validate_compose(
                 errors.append(f"{name}: database must be a normalized state path")
             if strategies != [expected.get("strategy")]:
                 errors.append(f"{name}: strategy differs from runtime manifest")
+            if strategy_paths != [EXPECTED_STRATEGY_PATH]:
+                errors.append(f"{name}: strategy path differs from runtime contract")
         else:
             if databases:
                 errors.append(f"{name}: research service cannot use a trading database")
             if strategies:
                 errors.append(f"{name}: research service cannot select a strategy")
+            if strategy_paths:
+                errors.append(f"{name}: research service cannot use a strategy path")
 
     if len(runtime_users) > 1:
         errors.append("runtime user must be identical for every service")
