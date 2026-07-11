@@ -9,11 +9,19 @@ from pathlib import Path
 from unittest import mock
 
 from tools import compose_runtime
+from tools.committed_build import CommitIdentity
+from tools.image_provenance import InspectedImage
 
 
 SERVICES = ["freqtrade", "freqtrade-futures", "freqtrade-research"]
 MANIFEST = {"services": [{"name": name} for name in SERVICES]}
 IDENTITY = {"FREQTRADE_RUNTIME_UID": 1001, "FREQTRADE_RUNTIME_GID": 1002}
+COMMIT_IDENTITY = CommitIdentity("a" * 40, "b" * 40, "c" * 40)
+INSPECTED_IMAGE = InspectedImage(
+    "sha256:" + "d" * 64,
+    "freqtrade-cn:p0-aaaaaaaaaaaa-bbbbbbbbbbbb-cccccccccccc",
+    {},
+)
 
 
 class ComposeRuntimeTests(unittest.TestCase):
@@ -119,26 +127,115 @@ class ComposeRuntimeTests(unittest.TestCase):
         self.assertIs(result, completed)
         launcher.assert_called_once_with("freqtrade-futures", self.root.resolve())
 
-    def test_pending_provenance_launcher_freezes_temporary_launch_flags(self) -> None:
+    def test_up_builds_context_inspects_labels_and_launches_exact_image_id(self) -> None:
         completed = subprocess.CompletedProcess([], 0, "", "")
+        context = self.root / "committed"
         with (
             mock.patch.object(
                 compose_runtime, "load_runtime_manifest", return_value=MANIFEST
             ),
             mock.patch.object(
-                compose_runtime, "_run_verified_compose", return_value=completed
-            ) as run,
+                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+            ),
+            mock.patch.object(
+                compose_runtime, "committed_build_context"
+            ) as committed_context,
+            mock.patch.object(
+                compose_runtime, "build_and_inspect_image", return_value=INSPECTED_IMAGE
+            ) as build,
+            mock.patch.object(
+                compose_runtime, "_launch_inspected_image", return_value=completed
+            ) as launch,
         ):
-            result = compose_runtime.launch_service_pending_provenance(
-                "freqtrade", self.root
-            )
+            committed_context.return_value.__enter__.return_value = context
+            result = compose_runtime.launch_reviewed_service("freqtrade", self.root)
 
         self.assertIs(result, completed)
-        run.assert_called_once_with(
-            ["up", "--detach", "--build", "--force-recreate", "freqtrade"],
-            self.root.resolve(),
-            MANIFEST,
+        committed_context.assert_called_once_with(self.root.resolve(), COMMIT_IDENTITY)
+        build.assert_called_once_with(context, COMMIT_IDENTITY)
+        launch.assert_called_once_with(
+            "freqtrade", self.root.resolve(), MANIFEST, INSPECTED_IMAGE.image_id
         )
+
+    def test_up_uses_fixed_recreate_no_build_no_deps_flags(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime, "_validate_launch"),
+            mock.patch.object(compose_runtime.subprocess, "run", return_value=completed) as run,
+        ):
+            result = compose_runtime._launch_inspected_image(
+                "freqtrade", self.root, MANIFEST, INSPECTED_IMAGE.image_id
+            )
+        self.assertIs(result, completed)
+        self.assertEqual(
+            run.call_args.args[0][-6:],
+            ["up", "--detach", "--force-recreate", "--no-build", "--no-deps", "freqtrade"],
+        )
+
+    def test_up_never_launches_when_build_inspect_or_label_validation_fails(self) -> None:
+        for failure in (OSError("build"), ValueError("inspect"), ValueError("labels")):
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    mock.patch.object(
+                        compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+                    ),
+                    mock.patch.object(compose_runtime, "committed_build_context") as context,
+                    mock.patch.object(
+                        compose_runtime, "build_and_inspect_image", side_effect=failure
+                    ),
+                    mock.patch.object(compose_runtime, "_launch_inspected_image") as launch,
+                ):
+                    context.return_value.__enter__.return_value = self.root / "committed"
+                    with self.assertRaises((OSError, ValueError)):
+                        compose_runtime.launch_reviewed_service("freqtrade", self.root)
+                launch.assert_not_called()
+
+    def test_up_cleans_context_after_every_failure(self) -> None:
+        events: list[str] = []
+
+        class Context:
+            def __enter__(self) -> Path:
+                events.append("enter")
+                return self.root / "committed"
+
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def __exit__(self, *args: object) -> None:
+                events.append("exit")
+
+        with (
+            mock.patch.object(
+                compose_runtime, "load_runtime_manifest", return_value=MANIFEST
+            ),
+            mock.patch.object(
+                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+            ),
+            mock.patch.object(
+                compose_runtime, "committed_build_context", return_value=Context(self.root)
+            ),
+            mock.patch.object(
+                compose_runtime, "build_and_inspect_image", side_effect=ValueError("failed")
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                compose_runtime.launch_reviewed_service("freqtrade", self.root)
+        self.assertEqual(events, ["enter", "exit"])
+
+    def test_emergency_actions_do_not_require_image_provenance(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=MANIFEST),
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(compose_runtime, "resolve_commit_identity") as resolve,
+            mock.patch.object(compose_runtime, "build_and_inspect_image") as build,
+            mock.patch.object(compose_runtime.subprocess, "run", return_value=completed),
+        ):
+            for action in (["down"], ["stop", "freqtrade"], ["ps", "freqtrade"], ["logs", "freqtrade"]):
+                compose_runtime.run_compose(action, root=self.root)
+        resolve.assert_not_called()
+        build.assert_not_called()
 
     def test_non_launch_actions_never_call_internal_launcher(self) -> None:
         completed = subprocess.CompletedProcess([], 0, "", "")
@@ -437,6 +534,13 @@ class ComposeRuntimeTests(unittest.TestCase):
         with (
             mock.patch.object(compose_runtime, "load_runtime_manifest", return_value=MANIFEST),
             mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(
+                compose_runtime, "resolve_commit_identity", return_value=COMMIT_IDENTITY
+            ),
+            mock.patch.object(compose_runtime, "committed_build_context") as context,
+            mock.patch.object(
+                compose_runtime, "build_and_inspect_image", return_value=INSPECTED_IMAGE
+            ),
             mock.patch.object(compose_runtime, "validate_tracked_configs", return_value=[]),
             mock.patch.object(
                 compose_runtime, "validate_compose", return_value=["runtime user drift"]
@@ -445,6 +549,7 @@ class ComposeRuntimeTests(unittest.TestCase):
                 compose_runtime.subprocess, "run", return_value=rendered
             ) as run,
         ):
+            context.return_value.__enter__.return_value = self.root / "committed"
             with self.assertRaises(ValueError):
                 compose_runtime.run_compose(["up", "freqtrade"], root=self.root)
 

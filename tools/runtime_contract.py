@@ -381,11 +381,19 @@ def validate_compose(
     compose: dict[str, object],
     *,
     repo_root: Path = REPO_ROOT,
+    launch_service: str | None = None,
+    launch_image_id: str | None = None,
 ) -> list[str]:
     errors: list[str] = []
     manifest_services = _manifest_services(manifest)
     if manifest_services is None:
         return ["runtime manifest services must be objects"]
+    if (launch_service is None) != (launch_image_id is None):
+        return ["launch image contract is incomplete"]
+    if launch_service is not None and launch_service not in manifest_services:
+        return ["launch service differs from runtime manifest"]
+    if launch_image_id is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", launch_image_id) is None:
+        return ["launch image ID is invalid"]
     if type(compose) is not dict:
         return ["rendered Compose must be an object"]
     if set(compose) != EXPECTED_TOP_LEVEL_FIELDS:
@@ -456,10 +464,16 @@ def validate_compose(
             "context": str(repo_root.resolve()),
             "dockerfile": "Dockerfile",
         }
-        if not _exact_value(service.get("build"), expected_build):
-            errors.append(f"{name}: build differs from runtime contract")
-        if service.get("image") != "freqtrade-cn:local":
-            errors.append(f"{name}: image differs from runtime contract")
+        if name == launch_service:
+            if "build" in service:
+                errors.append(f"{name}: build is forbidden for launch")
+            if service.get("image") != launch_image_id:
+                errors.append(f"{name}: image differs from inspected image ID")
+        else:
+            if not _exact_value(service.get("build"), expected_build):
+                errors.append(f"{name}: build differs from runtime contract")
+            if service.get("image") != "freqtrade-cn:local":
+                errors.append(f"{name}: image differs from runtime contract")
         if service.get("container_name") != EXPECTED_CONTAINER_NAMES.get(name):
             errors.append(f"{name}: container name differs from runtime contract")
         if service.get("restart") != "unless-stopped":

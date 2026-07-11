@@ -91,18 +91,24 @@ python tools/compose_runtime.py --profile trading --profile research ps
 
 The wrapper verifies bootstrap state and permits only the supported project,
 profiles, services, actions, and options. Launch accepts exactly one service and
-does not accept caller-supplied flags or profiles. It is the formal runtime entrypoint.
+does not accept caller-supplied flags or profiles. Before every launch, it creates
+a temporary context from the committed root and exact committed backend/frontend
+gitlinks, builds and inspects the image's complete revision labels, and launches
+only the resulting immutable `sha256:` image ID. Uncommitted files never enter the
+image, and build, inspection, label, render, or launch-preflight failures do not
+fall back to a tag or an existing container. It is the formal runtime entrypoint.
 Every formal service uses `/freqtrade/state` as its writable userdata directory.
 Trading services load strategies from the read-only
 `/freqtrade/user_data/strategies` mount; Research has no strategy path.
 
 ## Offline formal startup verification
 
-After building `freqtrade-cn:local`, run the same blocking startup gate used by
-Root Safety:
+Build the committed image and capture its inspected ID, then run the same blocking
+startup gate used by Root Safety:
 
 ```powershell
-python tools/formal_startup.py verify-all --image freqtrade-cn:local
+$ImageId = python tools/image_provenance.py build --print-image-id
+python tools/formal_startup.py verify-all --image $ImageId
 ```
 
 The verifier reads each service's rendered production command and runs the real

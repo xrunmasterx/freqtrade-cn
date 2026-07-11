@@ -120,20 +120,26 @@ jobs:
           python tools/compose_runtime.py --profile trading --profile research config --quiet
 
       - name: Build integrated image
-        run: docker build -t freqtrade-cn:local .
+        id: reviewed-image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(python tools/image_provenance.py build --print-image-id)"
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+          docker tag "${image_id}" freqtrade-cn:local
 
       - name: Initialize empty trading state fixtures
         run: python tools/init_empty_state.py
 
       - name: Verify unprivileged runtime image
         run: |
-          docker run --rm --entrypoint python freqtrade-cn:local -c '
+          docker run --rm --entrypoint python "${{ steps.reviewed-image.outputs.image_id }}" -c '
           import os, shutil, subprocess
           assert os.geteuid() == 1000
           assert shutil.which("sudo") is None
           assert "sudo" not in subprocess.check_output(["id", "-Gn"], text=True).split()
           '
-          docker run --rm --entrypoint sh freqtrade-cn:local -c '
+          docker run --rm --entrypoint sh "${{ steps.reviewed-image.outputs.image_id }}" -c '
           set -eu
           touch /tmp/chown-probe
           if chown 0:0 /tmp/chown-probe 2>/dev/null; then exit 1; fi
@@ -144,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          output="$(docker run --rm freqtrade-cn:local --version 2>&1)"
+          output="$(docker run --rm "${{ steps.reviewed-image.outputs.image_id }}" --version 2>&1)"
           status=$?
           set -e
           test "${status}" -eq 78

@@ -9,6 +9,8 @@ from typing import Any, Callable, Sequence
 
 if __package__:
     from tools.bootstrap_runtime import build_compose_identity, verify_runtime
+    from tools.committed_build import committed_build_context, resolve_commit_identity
+    from tools.image_provenance import build_and_inspect_image
     from tools.runtime_contract import (
         EXPECTED_USER_DATA_DIR,
         validate_compose,
@@ -17,6 +19,8 @@ if __package__:
     from tools.runtime_manifest import load_runtime_manifest
 else:
     from bootstrap_runtime import build_compose_identity, verify_runtime
+    from committed_build import committed_build_context, resolve_commit_identity
+    from image_provenance import build_and_inspect_image
     from runtime_contract import (
         EXPECTED_USER_DATA_DIR,
         validate_compose,
@@ -159,6 +163,8 @@ def _validate_launch(
     command_prefix: list[str],
     override: str,
     environment: dict[str, str],
+    service: str,
+    image_id: str,
 ) -> None:
     if validate_tracked_configs(root):
         raise ValueError("tracked runtime configuration failed validation")
@@ -193,7 +199,13 @@ def _validate_launch(
     if rendered.returncode != 0:
         raise ValueError("compose preflight render failed")
     compose = json.loads(rendered.stdout)
-    if validate_compose(manifest, compose, repo_root=root):
+    if validate_compose(
+        manifest,
+        compose,
+        repo_root=root,
+        launch_service=service,
+        launch_image_id=image_id,
+    ):
         raise ValueError("rendered compose failed validation")
 
 
@@ -215,8 +227,6 @@ def _run_verified_compose(
         for key, value in os.environ.items()
         if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
     }
-    if safe_arguments[0] == "up":
-        _validate_launch(resolved_root, manifest, command, override, environment)
     return subprocess.run(
         [*command, *safe_arguments],
         cwd=resolved_root,
@@ -228,16 +238,64 @@ def _run_verified_compose(
     )
 
 
-def launch_service_pending_provenance(
-    service: str, root: Path
+def _launch_override(
+    manifest: dict[str, Any], identity: dict[str, int], service: str, image_id: str
+) -> str:
+    users = build_compose_identity(manifest, identity)["services"]
+    lines = ["services:"]
+    for name, values in users.items():
+        lines.extend([f"  {json.dumps(name)}:", f"    user: {json.dumps(values['user'])}"])
+        if name == service:
+            lines.extend(
+                [f"    image: {json.dumps(image_id)}", "    build: !reset null"]
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _launch_inspected_image(
+    service: str,
+    root: Path,
+    manifest: dict[str, Any],
+    image_id: str,
 ) -> subprocess.CompletedProcess[str]:
+    identity = verify_runtime(root, manifest)
+    override = _launch_override(manifest, identity, service, image_id)
+    command = [
+        "docker", "compose", "--project-name", "freqtrade-cn",
+        "-f", str(root / "docker-compose.yml"), "-f", "-",
+    ]
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
+    }
+    _validate_launch(root, manifest, command, override, environment, service, image_id)
+    return subprocess.run(
+        [
+            *command,
+            "up",
+            "--detach",
+            "--force-recreate",
+            "--no-build",
+            "--no-deps",
+            service,
+        ],
+        cwd=root,
+        env=environment,
+        input=override,
+        text=True,
+        capture_output=False,
+        check=False,
+    )
+
+
+def launch_reviewed_service(service: str, root: Path) -> subprocess.CompletedProcess[str]:
     resolved_root = root.resolve()
     manifest = load_runtime_manifest(resolved_root / "ops/runtime-services.json")
-    return _run_verified_compose(
-        ["up", "--detach", "--build", "--force-recreate", service],
-        resolved_root,
-        manifest,
-    )
+    identity = resolve_commit_identity(resolved_root)
+    with committed_build_context(resolved_root, identity) as context:
+        image = build_and_inspect_image(context, identity)
+        return _launch_inspected_image(service, resolved_root, manifest, image.image_id)
 
 
 def run_compose(
@@ -245,7 +303,7 @@ def run_compose(
     *,
     root: Path = REPO_ROOT,
     capture_output: bool = False,
-    launch_service: LaunchService = launch_service_pending_provenance,
+    launch_service: LaunchService = launch_reviewed_service,
 ) -> subprocess.CompletedProcess[str]:
     resolved_root = root.resolve()
     manifest = load_runtime_manifest(resolved_root / "ops/runtime-services.json")

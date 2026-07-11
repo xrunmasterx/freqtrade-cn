@@ -266,6 +266,45 @@ class RuntimeComposeContractTests(unittest.TestCase):
     def test_accepts_the_minimal_safe_contract(self) -> None:
         self.assertEqual(self.validate(), [])
 
+    def test_accepts_launch_render_with_exact_image_id_and_no_build(self) -> None:
+        image_id = "sha256:" + "d" * 64
+        service = self.compose["services"]["freqtrade"]
+        service.pop("build")
+        service["image"] = image_id
+        self.assertEqual(
+            runtime_contract.validate_compose(
+                self.manifest,
+                self.compose,
+                repo_root=self.root,
+                launch_service="freqtrade",
+                launch_image_id=image_id,
+            ),
+            [],
+        )
+
+    def test_rejects_mutable_tag_or_build_in_launch_render(self) -> None:
+        image_id = "sha256:" + "d" * 64
+        cases = (
+            ("freqtrade-cn:local", False),
+            ("freqtrade-cn:p0-aaaaaaaaaaaa-bbbbbbbbbbbb-cccccccccccc", False),
+            (image_id, True),
+        )
+        for image, keep_build in cases:
+            with self.subTest(image=image, keep_build=keep_build):
+                _, compose = build_safe_contract(self.root)
+                service = compose["services"]["freqtrade"]
+                service["image"] = image
+                if not keep_build:
+                    service.pop("build")
+                errors = runtime_contract.validate_compose(
+                    self.manifest,
+                    compose,
+                    repo_root=self.root,
+                    launch_service="freqtrade",
+                    launch_image_id=image_id,
+                )
+                self.assertTrue(errors)
+
     def test_requires_state_userdata_and_read_only_strategy_path(self) -> None:
         self.assertEqual(
             getattr(runtime_contract, "EXPECTED_USER_DATA_DIR", None),
