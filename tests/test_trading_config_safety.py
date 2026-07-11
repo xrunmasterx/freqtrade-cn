@@ -5,7 +5,7 @@ import os
 import shlex
 import subprocess
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from tools.compose_runtime import render_compose
@@ -162,11 +162,7 @@ class TradingConfigSafetyTests(unittest.TestCase):
         expected_writable_targets = {
             "freqtrade": {STATE_PATH},
             "freqtrade-futures": {STATE_PATH},
-            "freqtrade-research": {
-                STATE_PATH,
-                "/freqtrade/user_data/data",
-                "/freqtrade/user_data/backtest_results",
-            },
+            "freqtrade-research": {STATE_PATH},
         }
         for name, service in self.services.items():
             writable_targets = {
@@ -189,18 +185,15 @@ class TradingConfigSafetyTests(unittest.TestCase):
             (REPO_ROOT / "ft_userdata/user_data/research_data").resolve(),
         )
 
-    def test_research_uses_only_its_own_state_data_and_results(self) -> None:
+    def test_research_uses_only_its_own_state(self) -> None:
         research = self.services["freqtrade-research"]
         research_root = (
             REPO_ROOT / self.entries["freqtrade-research"]["state_root"]
         ).resolve()
-        expected_sources = {
-            STATE_PATH: research_root,
-            "/freqtrade/user_data/data": research_root / "data",
-            "/freqtrade/user_data/backtest_results": research_root / "backtest_results",
-        }
-        for target, source in expected_sources.items():
-            self.assertEqual(resolved_source(volume_for(research, target)), source, target)
+        self.assertEqual(
+            resolved_source(volume_for(research, STATE_PATH)),
+            research_root,
+        )
 
         trading_state_roots = {
             (REPO_ROOT / entry["state_root"]).resolve()
@@ -216,6 +209,36 @@ class TradingConfigSafetyTests(unittest.TestCase):
         tokens = command_tokens(research)
         self.assertNotIn("--strategy", tokens)
         self.assertNotIn("--db-url", tokens)
+
+    def test_actual_research_profile_paths_resolve_below_read_only_input(self) -> None:
+        config = json.loads(
+            (REPO_ROOT / "ft_userdata/user_data/config.research.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        profile = next(
+            bot for bot in config["research_bots"] if bot["id"] == "a-share-local"
+        )
+        mounted_root = PurePosixPath(RESEARCH_DATA_PATH)
+        roots = (
+            PurePosixPath(profile["data_source"]["root"]),
+            PurePosixPath(profile["market_data"]["meta_root"]),
+            PurePosixPath(profile["side_data"]["root"]),
+        )
+        self.assertEqual(
+            roots,
+            (
+                mounted_root / "a_share",
+                mounted_root / "a_share_meta",
+                mounted_root / "a_share_meta",
+            ),
+        )
+        for root in roots:
+            self.assertFalse(str(root.relative_to(mounted_root)).startswith(".."))
+        research_source = volume_for(
+            self.services["freqtrade-research"], RESEARCH_DATA_PATH
+        )
+        self.assertTrue(research_source.get("read_only", False))
 
     def test_all_bind_mounts_refuse_to_create_missing_host_paths(self) -> None:
         for name, service in self.services.items():

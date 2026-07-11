@@ -24,6 +24,26 @@ SECRET_SPECS = {
     "jwt_secret_key": 48,
     "ws_token": 32,
 }
+RESEARCH_PATH_MIGRATIONS = (
+    (
+        "data_source",
+        "root",
+        "research_data/a_share",
+        "/freqtrade/user_data/research_data/a_share",
+    ),
+    (
+        "market_data",
+        "meta_root",
+        "research_data/a_share_meta",
+        "/freqtrade/user_data/research_data/a_share_meta",
+    ),
+    (
+        "side_data",
+        "root",
+        "research_data/a_share_meta",
+        "/freqtrade/user_data/research_data/a_share_meta",
+    ),
+)
 RUNTIME_IDENTITY_KEYS = (
     "FREQTRADE_RUNTIME_UID",
     "FREQTRADE_RUNTIME_GID",
@@ -430,6 +450,41 @@ def sanitize_api_configs(root: Path, manifest: dict[str, Any]) -> None:
         os.replace(temporary, config_path)
 
 
+def migrate_research_paths(root: Path, manifest: dict[str, Any]) -> None:
+    research_services = [
+        service for service in manifest["services"] if service["role"] == "research"
+    ]
+    if len(research_services) != 1:
+        raise ValueError("research path migration requires one research service")
+    config_path = root / research_services[0]["config_path"]
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    profiles = document.get("research_bots") if type(document) is dict else None
+    if type(profiles) is not list or not profiles:
+        raise ValueError("research path migration requires research profiles")
+
+    values: list[tuple[dict[str, Any], str, str, str]] = []
+    for profile in profiles:
+        if type(profile) is not dict:
+            raise ValueError("research path migration requires research profiles")
+        for section, key, legacy, approved in RESEARCH_PATH_MIGRATIONS:
+            container = profile.get(section)
+            value = container.get(key) if type(container) is dict else None
+            if value not in (legacy, approved):
+                raise ValueError("research path migration rejected unknown value")
+            values.append((container, key, legacy, approved))
+
+    changed = False
+    for container, key, legacy, approved in values:
+        if container[key] == legacy:
+            container[key] = approved
+            changed = True
+    if changed:
+        _atomic_write_text(
+            config_path,
+            json.dumps(document, indent=4, ensure_ascii=False) + "\n",
+        )
+
+
 def rotate_secrets(
     root: Path,
     manifest: dict[str, Any],
@@ -521,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init")
     subparsers.add_parser("verify")
     subparsers.add_parser("sanitize-api-configs")
+    subparsers.add_parser("migrate-research-paths")
     rotate = subparsers.add_parser("rotate-secrets")
     rotate.add_argument("--service", action="append", required=True)
     return parser
@@ -536,6 +592,8 @@ def main() -> int:
         verify_runtime(root, manifest)
     elif args.command == "sanitize-api-configs":
         sanitize_api_configs(root, manifest)
+    elif args.command == "migrate-research-paths":
+        migrate_research_paths(root, manifest)
     elif args.command == "rotate-secrets":
         rotate_secrets(root, manifest, set(args.service))
     print(f"runtime bootstrap: {args.command}: OK")

@@ -94,7 +94,7 @@ def safe_service(
         },
     ]
     command = (
-        "trade --logfile /freqtrade/state/logs/runtime.log "
+        f"trade --logfile /freqtrade/state/logs/{name}.log "
         "--db-url sqlite:////freqtrade/state/trades.sqlite "
         "--config /freqtrade/config/runtime.json "
         "--config /freqtrade/config/trading-safety.json "
@@ -128,7 +128,7 @@ def safe_service(
             ]
         )
         command = (
-            "webserver --logfile /freqtrade/state/logs/runtime.log "
+            f"webserver --logfile /freqtrade/state/logs/{name}.log "
             "--config /freqtrade/config/runtime.json "
             "--user-data-dir /freqtrade/state"
         )
@@ -299,11 +299,6 @@ class RuntimeComposeContractTests(unittest.TestCase):
             (" --user-data-dir /freqtrade/user_data", "userdata directory"),
             (" --strategy-path /freqtrade/user_data/strategies", "strategy path"),
             (" --strategy-path /freqtrade/state/strategies", "strategy path"),
-            (
-                " --strategy-path --user-data-dir /freqtrade/state "
-                "/freqtrade/user_data/strategies",
-                "userdata directory",
-            ),
         )
         for suffix, expected_error in mutations:
             with self.subTest(suffix=suffix):
@@ -311,6 +306,28 @@ class RuntimeComposeContractTests(unittest.TestCase):
                 compose["services"]["freqtrade"]["command"] += suffix
                 self.assertIn(
                     expected_error,
+                    "\n".join(self.validate(compose=compose)),
+                )
+
+        base = self.compose["services"]["freqtrade"]["command"].split()
+        reordered_commands = (
+            base[:1] + base[11:13] + base[1:11] + base[13:],
+            base[:11] + base[13:15] + base[11:13] + base[15:],
+        )
+        for command in reordered_commands:
+            with self.subTest(command=command):
+                _, compose = build_safe_contract(self.root)
+                compose["services"]["freqtrade"]["command"] = command
+                self.assertEqual(
+                    runtime_contract.option_values(command, "--user-data-dir"),
+                    ["/freqtrade/state"],
+                )
+                self.assertEqual(
+                    runtime_contract.option_values(command, "--strategy-path"),
+                    ["/freqtrade/user_data/strategies"],
+                )
+                self.assertIn(
+                    "formal argv differs from runtime contract",
                     "\n".join(self.validate(compose=compose)),
                 )
 
@@ -344,6 +361,27 @@ class RuntimeComposeContractTests(unittest.TestCase):
         )
         self.assertEqual(self.validate(), [])
 
+    def test_rejects_role_specific_formal_argv_drift(self) -> None:
+        service = self.compose["services"]["freqtrade"]
+        service["command"] = service["command"].replace(
+            "/freqtrade/state/logs/freqtrade.log",
+            "/freqtrade/state/logs/alternate.log",
+        )
+        self.assertIn("formal argv differs from runtime contract", self.errors())
+
+        _, compose = build_safe_contract(self.root)
+        command = compose["services"]["freqtrade-research"]["command"].split()
+        reordered = command[:1] + command[5:7] + command[1:5]
+        compose["services"]["freqtrade-research"]["command"] = reordered
+        self.assertEqual(
+            runtime_contract.option_values(reordered, "--user-data-dir"),
+            ["/freqtrade/state"],
+        )
+        self.assertIn(
+            "formal argv differs from runtime contract",
+            "\n".join(self.validate(compose=compose)),
+        )
+
     def test_research_removes_writable_userdata_alias_mounts(self) -> None:
         targets = {
             volume["target"]
@@ -352,6 +390,28 @@ class RuntimeComposeContractTests(unittest.TestCase):
         self.assertNotIn("/freqtrade/user_data/data", targets)
         self.assertNotIn("/freqtrade/user_data/backtest_results", targets)
         self.assertEqual(self.validate(), [])
+
+        for target, directory in (
+            ("/freqtrade/user_data/data", "data"),
+            ("/freqtrade/user_data/backtest_results", "backtest_results"),
+        ):
+            with self.subTest(target=target):
+                _, compose = build_safe_contract(self.root)
+                source = self.root / "ft_userdata/runtime/freqtrade-research" / directory
+                source.mkdir(parents=True, exist_ok=True)
+                compose["services"]["freqtrade-research"]["volumes"].append(
+                    {
+                        "type": "bind",
+                        "source": str(source.resolve()),
+                        "target": target,
+                        "read_only": False,
+                        "bind": {"create_host_path": False},
+                    }
+                )
+                self.assertIn(
+                    "volume set differs from runtime contract",
+                    "\n".join(self.validate(compose=compose)),
+                )
 
     def test_rejects_service_not_in_manifest(self) -> None:
         self.compose["services"]["rogue-bot"] = copy.deepcopy(

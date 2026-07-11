@@ -233,6 +233,125 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     (self.root / service["state_root"] / "strategies").exists()
                 )
 
+    def test_migrate_research_paths_updates_exact_legacy_values_atomically(self) -> None:
+        config_path = self.root / "configs/research.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        document = {
+            "marker": "preserved",
+            "research_bots": [
+                {
+                    "data_source": {"root": "research_data/a_share"},
+                    "market_data": {"meta_root": "research_data/a_share_meta"},
+                    "side_data": {"root": "research_data/a_share_meta"},
+                }
+            ],
+        }
+        config_path.write_text(json.dumps(document), encoding="utf-8")
+        self.manifest["services"][2]["config_path"] = "configs/research.json"
+        migrate = getattr(bootstrap_runtime, "migrate_research_paths", None)
+        self.assertIsNotNone(migrate)
+        if migrate is None:
+            return
+
+        with mock.patch.object(
+            bootstrap_runtime,
+            "_atomic_write_text",
+            wraps=bootstrap_runtime._atomic_write_text,
+        ) as atomic_write:
+            migrate(self.root, self.manifest)
+
+        atomic_write.assert_called_once()
+        self.assertEqual(atomic_write.call_args.args[0], config_path)
+        migrated = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["marker"], "preserved")
+        profile = migrated["research_bots"][0]
+        self.assertEqual(
+            profile["data_source"]["root"],
+            "/freqtrade/user_data/research_data/a_share",
+        )
+        self.assertEqual(
+            profile["market_data"]["meta_root"],
+            "/freqtrade/user_data/research_data/a_share_meta",
+        )
+        self.assertEqual(
+            profile["side_data"]["root"],
+            "/freqtrade/user_data/research_data/a_share_meta",
+        )
+
+    def test_migrate_research_paths_is_idempotent_for_approved_values(self) -> None:
+        config_path = self.root / "configs/research.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        document = {
+            "research_bots": [
+                {
+                    "data_source": {
+                        "root": "/freqtrade/user_data/research_data/a_share"
+                    },
+                    "market_data": {
+                        "meta_root": "/freqtrade/user_data/research_data/a_share_meta"
+                    },
+                    "side_data": {
+                        "root": "/freqtrade/user_data/research_data/a_share_meta"
+                    },
+                }
+            ]
+        }
+        config_path.write_text(json.dumps(document), encoding="utf-8")
+        before = config_path.read_bytes()
+        self.manifest["services"][2]["config_path"] = "configs/research.json"
+        migrate = getattr(bootstrap_runtime, "migrate_research_paths", None)
+        self.assertIsNotNone(migrate)
+        if migrate is None:
+            return
+
+        with mock.patch.object(bootstrap_runtime, "_atomic_write_text") as atomic_write:
+            migrate(self.root, self.manifest)
+
+        atomic_write.assert_not_called()
+        self.assertEqual(config_path.read_bytes(), before)
+
+    def test_migrate_research_paths_rejects_unknown_values_without_partial_write(self) -> None:
+        mutations = (
+            ("data_source", "root", "/custom/data"),
+            ("market_data", "meta_root", "custom/meta"),
+            ("side_data", "root", "/custom/side"),
+        )
+        for section, key, value in mutations:
+            with self.subTest(section=section):
+                config_path = self.root / "configs/research.json"
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                document = {
+                    "research_bots": [
+                        {
+                            "data_source": {"root": "research_data/a_share"},
+                            "market_data": {
+                                "meta_root": "research_data/a_share_meta"
+                            },
+                            "side_data": {"root": "research_data/a_share_meta"},
+                        }
+                    ]
+                }
+                document["research_bots"][0][section][key] = value
+                config_path.write_text(json.dumps(document), encoding="utf-8")
+                before = config_path.read_bytes()
+                self.manifest["services"][2]["config_path"] = "configs/research.json"
+                migrate = getattr(bootstrap_runtime, "migrate_research_paths", None)
+                self.assertIsNotNone(migrate)
+                if migrate is None:
+                    return
+
+                with (
+                    mock.patch.object(bootstrap_runtime, "_atomic_write_text") as atomic_write,
+                    self.assertRaisesRegex(ValueError, "research path migration"),
+                ):
+                    migrate(self.root, self.manifest)
+
+                atomic_write.assert_not_called()
+                self.assertEqual(config_path.read_bytes(), before)
+
+    def test_parser_exposes_explicit_research_path_migration_action(self) -> None:
+        self.assertIn("migrate-research-paths", bootstrap_runtime.build_parser().format_help())
+
     def test_verify_requires_data_and_backtest_directories_for_every_service(self) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 

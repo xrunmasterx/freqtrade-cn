@@ -698,6 +698,7 @@ def validate_compose(
         strategy_paths = option_values(tokens, "--strategy-path")
         if user_data_directories != [EXPECTED_USER_DATA_DIR]:
             errors.append(f"{name}: userdata directory differs from runtime contract")
+        expected_log = f"/freqtrade/state/logs/{name}.log"
         if role == "trading":
             if option_values(tokens, "--config") != EXPECTED_CONFIGS:
                 errors.append(f"{name}: trading safety config must be last")
@@ -710,6 +711,23 @@ def validate_compose(
                 errors.append(f"{name}: strategy differs from runtime manifest")
             if strategy_paths != [EXPECTED_STRATEGY_PATH]:
                 errors.append(f"{name}: strategy path differs from runtime contract")
+            expected_tokens = [
+                "trade",
+                "--logfile",
+                expected_log,
+                "--db-url",
+                expected_database,
+                "--config",
+                EXPECTED_CONFIGS[0],
+                "--config",
+                EXPECTED_CONFIGS[1],
+                "--user-data-dir",
+                EXPECTED_USER_DATA_DIR,
+                "--strategy-path",
+                EXPECTED_STRATEGY_PATH,
+                "--strategy",
+                expected.get("strategy"),
+            ]
         else:
             if databases:
                 errors.append(f"{name}: research service cannot use a trading database")
@@ -717,6 +735,17 @@ def validate_compose(
                 errors.append(f"{name}: research service cannot select a strategy")
             if strategy_paths:
                 errors.append(f"{name}: research service cannot use a strategy path")
+            expected_tokens = [
+                "webserver",
+                "--logfile",
+                expected_log,
+                "--config",
+                "/freqtrade/config/runtime.json",
+                "--user-data-dir",
+                EXPECTED_USER_DATA_DIR,
+            ]
+        if tokens != expected_tokens:
+            errors.append(f"{name}: formal argv differs from runtime contract")
 
     if len(runtime_users) > 1:
         errors.append("runtime user must be identical for every service")

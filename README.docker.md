@@ -15,6 +15,7 @@ Set-Location freqtrade-cn
 
 Copy-Item .env.example .env
 python tools/bootstrap_runtime.py init
+python tools/bootstrap_runtime.py migrate-research-paths
 python tools/bootstrap_runtime.py sanitize-api-configs
 python tools/bootstrap_runtime.py verify
 python tools/runtime_contract.py --check-configs-only
@@ -27,6 +28,12 @@ sentinel; the real API password, JWT secret, and WebSocket token are separate
 ignored files below `ft_userdata/secrets/<service>/`. A UI username may come from
 the template, but the repository provides no UI password. Never write login
 information to logs or paste it into an issue, chat, or screenshot.
+
+`migrate-research-paths` is the explicit, idempotent migration for an existing
+ignored `config.research.json`. It changes only the known legacy A-share data,
+metadata, and side-data roots to their absolute paths below the read-only
+Research input mount. Unknown or customized values are rejected without writing
+the file; neither `init` nor `sanitize-api-configs` performs this migration.
 
 QQE is not part of the formal root runtime contract. Adding it requires one
 reviewed change that includes its manifest entry, template, strategy, tests, and

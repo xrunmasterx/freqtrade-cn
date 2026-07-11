@@ -8,15 +8,15 @@
             "market": "a_share",
             "data_source": {
                 "type": "local_csv",
-                "root": "research_data/a_share"
+                "root": "/freqtrade/user_data/research_data/a_share"
             },
             "market_data": {
-                "meta_root": "research_data/a_share_meta",
+                "meta_root": "/freqtrade/user_data/research_data/a_share_meta",
                 "calendar": "calendar/trade_dates.csv",
                 "daily_status": "status/daily_status.csv"
             },
             "side_data": {
-                "root": "research_data/a_share_meta",
+                "root": "/freqtrade/user_data/research_data/a_share_meta",
                 "enabled_datasets": [
                     "fund_flow_daily",
                     "limit_pool",
