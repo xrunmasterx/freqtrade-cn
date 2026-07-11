@@ -51,6 +51,7 @@ jobs:
           python -m pytest \
             tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders_keeps_recent_missing_orders \
             tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders \
+            tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders_keeps_missing_orders_at_five_day_boundary \
             tests/test_directory_operations.py \
             tests/strategy/test_interface.py::test_get_signal_old_dataframe \
             tests/strategy/test_interface.py::test_ignore_expired_candle \
@@ -111,6 +112,9 @@ jobs:
       - name: Build integrated image
         run: docker build -t freqtrade-cn:local .
 
+      - name: Initialize empty trading state fixtures
+        run: python tools/init_empty_state.py
+
       - name: Verify unprivileged runtime image
         run: |
           docker run --rm --entrypoint python freqtrade-cn:local -c '
@@ -147,6 +151,15 @@ jobs:
           python tools/compose_runtime.py ci-probe-mounts freqtrade
           python tools/compose_runtime.py ci-probe-mounts freqtrade-futures
           python tools/compose_runtime.py ci-probe-mounts freqtrade-research
+
+      - name: Verify empty state through Freqtrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          spot_state="$(python tools/compose_runtime.py check-state freqtrade)"
+          test "${spot_state}" = "[]"
+          futures_state="$(python tools/compose_runtime.py check-state freqtrade-futures)"
+          test "${futures_state}" = "[]"
 
       - name: Scan current committed trees for secrets
         shell: bash
