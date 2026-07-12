@@ -109,6 +109,9 @@ This design does not:
     permanent platform service category.
 11. `platform-control` is the fixed loopback application API on
     `127.0.0.1:8090`; Bot and Worker instances have no public host ports.
+12. `platform-control` includes a Registry-bound Runtime Access Gateway so removal
+    of per-instance ports does not remove Bot/Research application behavior. It
+    accepts only committed route policies and never arbitrary upstream targets.
 
 ## 5. Product hierarchy
 
@@ -163,6 +166,7 @@ flowchart TB
         POLICY["Capability, RBAC, and Policy"]
         AUDIT["Audit and Provenance"]
         JOBS["Job and Worker Orchestrator"]
+        ACCESS["Runtime Access Gateway"]
     end
 
     subgraph WORKERS["Isolated Workers"]
@@ -193,6 +197,7 @@ flowchart TB
     API --> RISK
     API --> POLICY
     API --> JOBS
+    API --> ACCESS
 
     JOBS --> MARKET
     JOBS --> GLOBAL
@@ -214,6 +219,8 @@ flowchart TB
     EXEC --> FREQ
     EXEC --> BROKER
     EXEC --> OPTIONS
+    ACCESS --> EXEC
+    ACCESS --> SPECIAL
 ```
 
 ### 6.1 Control-kernel responsibilities
@@ -641,6 +648,12 @@ Ports 8081, 8082, and 8083 may exist only during the bounded compatibility and
 rollback window. Final Phase 2 cutover removes all three listeners after 8090
 control, chart, and research compatibility acceptance.
 
+Application runtimes receive private per-instance access networks shared only
+with `platform-control`. The Runtime Access Gateway resolves exact healthy
+attempt endpoints from the Registry and accepts neither caller-selected URLs nor
+Docker identities. This preserves Bot status, overlays, Research, and approved
+compatibility actions without reopening per-Bot host ports.
+
 ## 14. Data architecture
 
 ### 14.1 PostgreSQL control plane
@@ -763,6 +776,12 @@ the old endpoints are stopped. Base K-lines are platform market data and remain
 available when a Bot is stopped; strategy overlays are Bot-specific and may
 degrade independently.
 
+Bot and Research application APIs move behind an instance-scoped Runtime Access
+Gateway. Runtime lifecycle HTTP remains read-only in Phase 2. Approved existing
+application writes may be forwarded only through closed route policies, with
+instance-bound credentials, capability checks, audit, bounded timeout, and no
+automatic retry after an ambiguous result.
+
 Live views distinguish forming from closed candles and provisional from confirmed
 signals. Historical decision replay uses recorded Bot/strategy/data/Research/risk
 snapshot identities; a present-day recomputation over revised data is labelled
@@ -881,6 +900,7 @@ Deliver:
 
 - runtime-instance and adapter-template schemas;
 - fixed `platform-control:8090` read API;
+- closed-policy Runtime Access Gateway and per-instance access networks;
 - existing-runtime migration records;
 - immutable runtime-spec compiler;
 - dynamic state and secret references;
@@ -897,6 +917,11 @@ Gate:
 - Spot/Futures run as managed Bot-like instances and Research as a managed
   Workspace Worker instance;
 - no active listener remains on 8081, 8082, or 8083 after acceptance;
+- Bot status, logs, strategy overlays, Research reads, and approved existing
+  application actions remain reachable through exact Registry identities;
+- lifecycle HTTP mutation, arbitrary proxy destinations, cross-instance tokens,
+  Research-to-trading routes, Paper-to-Live routes, and ambiguous write retries
+  remain forbidden;
 - base K-lines remain available when a Bot is stopped and every supported
   timeframe preserves its current cadence;
 - AI and strategy readers receive the same canonical freshness metadata without
@@ -1102,3 +1127,7 @@ No merge or PR-state change is implied by approval of this design.
     is never presented as the original decision.
 20. Chart and market-data refresh are read-only observations and never trigger
     strategy evaluation or execution.
+21. Removing per-instance ports cannot remove Bot or Research application
+    behavior; access uses exact Registry identities and committed route policies.
+22. Runtime Access compatibility writes are not lifecycle authority and are
+    replaced route by route by governed Platform Command/Central Risk APIs.

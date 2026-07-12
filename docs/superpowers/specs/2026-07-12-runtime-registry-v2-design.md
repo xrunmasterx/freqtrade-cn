@@ -57,6 +57,11 @@ The approved decisions are:
 16. Phase 2 is delivered as five gated sub-phases: 2A Registry and Platform
     Control, 2B Compiler, 2C Supervisor, 2D Market-Data Compatibility, and 2E
     Controlled Cutover and Operations.
+17. `platform-control` contains a closed-policy Runtime Access Gateway. It routes
+    only approved application API calls to exact healthy Registry endpoints so
+    Bot and Research functionality survives removal of 8081/8082/8083. It is not
+    an arbitrary reverse proxy and receives no Docker, secret-root, or state
+    authority.
 
 ## 2. Product-domain invariant carried into later phases
 
@@ -108,6 +113,8 @@ retired or imported into the Phase 3 BotRelease model.
   reference, alias, observation, endpoint, and audit contracts;
 - fixed `platform-control` service on `127.0.0.1:8090`;
 - authenticated read-only Runtime Registry and Market Data API v2;
+- a Registry-bound Runtime Access Gateway for approved Bot and Research
+  application routes, including explicitly governed compatibility writes;
 - trusted local Operator CLI;
 - committed AdapterTemplate publication;
 - deterministic immutable RuntimeSpec compilation;
@@ -143,7 +150,7 @@ retired or imported into the Phase 3 BotRelease model.
   Compose fragments, or Docker project names;
 - unattended or destructive runtime cutover;
 - automatic state deletion, reuse, overwrite restore, or destructive recovery;
-- arbitrary dynamic-runtime proxy routing;
+- arbitrary URL, IP, port, Docker-name, or unrestricted dynamic-runtime proxying;
 - automatic trading-runtime restart or retry loops;
 - Vault, cloud secret manager, HSM, or encrypted secret storage in PostgreSQL.
 
@@ -153,6 +160,7 @@ retired or imported into the Phase 3 BotRelease model.
 flowchart LR
     UI["FreqUI"] --> CONTROL["platform-control :8090"]
     CONTROL --> QUERY["Runtime and MarketData Query Services"]
+    CONTROL --> GATEWAY["Closed-policy Runtime Access Gateway"]
     CLI["Trusted Operator CLI"] --> APP["RuntimeApplicationService"]
     APP --> PG[("PostgreSQL Control Plane")]
     QUERY --> PG
@@ -166,6 +174,8 @@ flowchart LR
     EMERGENCY["Offline Emergency CLI"] --> DOCKER
     BOT["Bot RuntimeInstances"] -. "no Docker access" .-> DOCKER
     RESEARCH["Workspace Worker RuntimeInstances"] -. "no Docker access" .-> DOCKER
+    GATEWAY -->|"approved application routes"| BOT
+    GATEWAY -->|"approved application routes"| RESEARCH
     CONTROL -. "no Docker/secret/state authority" .-> DOCKER
 ```
 
@@ -173,9 +183,13 @@ Trust rules:
 
 - only the host Runtime Supervisor and trusted offline emergency tools invoke
   Docker lifecycle commands;
-- `platform-control` has database read access appropriate to its query services
-  and outbound access only to approved public-data adapters. It has no Docker
-  socket, Docker CLI authority, secret-file read authority, or Bot-state mount;
+- `platform-control` has database SELECT access appropriate to its query/gateway
+  services and INSERT/UPDATE access only to gateway-owned request/audit records.
+  It has no Registry lifecycle-table mutation, Docker socket, Docker CLI
+  authority, secret-root read authority, or Bot-state mount;
+- the Runtime Access Gateway resolves targets only from Registry endpoints,
+  connects only through the exact per-instance access network, and never accepts
+  a caller-supplied upstream URL, IP, port, container, project, or service name;
 - Bot, Research, AI, and data workers have neither Docker nor PostgreSQL control-
   plane credentials;
 - PostgreSQL is internal-only and has no public host port;
@@ -267,12 +281,20 @@ secret_references
 secret_version_metadata
 runtime_endpoints
 runtime_migration_records
+runtime_access_requests
 runtime_audit_events
 ```
 
 Foreign keys use explicit restrict semantics for immutable audit history. No
 runtime, attempt, allocation, template revision, or audit record is cascade-
 deleted by a product-owner deletion.
+
+`runtime_access_requests` is owned by the Gateway and records request identity,
+instance/attempt, closed route-policy revision, method, idempotency key, timing,
+and stable result code without bodies, credentials, tokens, or secret headers.
+The platform-control database role may insert a request and update only its
+terminal result fields and may insert audit events. It cannot change desired
+state, jobs, attempts, specs, templates, allocations, endpoints, or migrations.
 
 ## 7. RuntimeInstance and RuntimeAttempt
 
@@ -714,7 +736,7 @@ The Phase 2 paper probe and migrated Bot/Workspace instances:
 - has outbound market-data access through a closed network policy;
 - has no host-port mapping;
 - does not join the PostgreSQL control-plane network;
-- does not share Docker DNS with another dynamic runtime;
+- does not share Docker DNS with another managed runtime;
 - does not receive Docker access.
 
 `RuntimeEndpoint` records endpoint kind, internal port, protocol, and exposure
@@ -727,8 +749,8 @@ window, 8081/8082/8083 may remain available only until equivalent 8090 read path
 and rollback proof pass. Final Phase 2 acceptance requires those listeners to be
 absent.
 
-Arbitrary proxying to a RuntimeInstance is not implemented. Only reviewed,
-typed read use cases are exposed by `platform-control`.
+Only committed, typed Runtime Access route policies are implemented. Arbitrary
+proxying and caller-selected upstream destinations are forbidden.
 
 ### 13.1 Human and machine market-data refresh compatibility
 
@@ -837,6 +859,54 @@ Every AI input snapshot carries market/product/venue/instrument/timeframe,
 forming-or-closed status, event/ingestion/availability times, freshness, source
 provenance, and policy revision. Stale or unavailable data is explicit input
 state; an AI consumer cannot silently treat it as current.
+
+### 13.4 Closed-policy Runtime Access Gateway
+
+Removing per-instance host ports must not remove existing Bot and Research
+application behavior. `platform-control` therefore exposes a typed compatibility
+gateway under:
+
+```text
+/api/runtime-access/v1/instances/{instance_id}/...
+```
+
+The client supplies only `instance_id` and a route defined by a committed closed
+policy. The gateway loads the RuntimeInstance and exact active RuntimeAttempt,
+requires healthy state, validates owner kind/environment/capability/method, and
+resolves the internal endpoint recorded by the Supervisor. It never accepts an
+upstream URL, IP address, port, hostname, container name, Compose project, or
+network name from the request.
+
+Each managed application runtime receives a private per-instance access network
+shared only with `platform-control`, in addition to any private execution network.
+The Supervisor verifies the fixed platform-control identity before attaching it
+to that network and reconciles the attachment on start/stop. Two managed runtimes
+never share an access network or Docker DNS.
+
+`platform-control` joins the PostgreSQL control-plane network and the separately
+identified per-instance access networks. Bot runtimes do not join PostgreSQL,
+Docker, or another Bot's network. Endpoint alias, attempt identity, RuntimeSpec
+digest, network identity, and route policy must match before forwarding.
+
+The gateway separates two authorities:
+
+- Runtime lifecycle commands remain unavailable from HTTP in Phase 2 and are
+  accepted only by the trusted Operator CLI/Supervisor path;
+- approved existing Bot/Research application calls may be forwarded so migration
+  does not remove status, logs, chart overlays, Research, or previously available
+  trading actions.
+
+Application writes are explicit compatibility routes, not generic passthrough.
+They require instance-scoped authentication and capability checks, are audited,
+carry an idempotency key where the upstream contract supports one, use a bounded
+timeout, and are never automatically retried after an ambiguous result. A Paper
+runtime cannot reach a Live-only route. A Research worker cannot reach a trading
+route. Credentials or tokens scoped to one instance cannot target another.
+
+Base market data never traverses this gateway. The gateway is a migration bridge
+for runtime-owned application behavior. Later Platform Command and Central Risk
+Gateway APIs replace compatibility trading writes route by route; removal is
+allowed only after equivalent behavior and authorization are accepted.
 
 ## 14. Safe Compose Snapshot Driver
 
@@ -954,10 +1024,12 @@ path. It rejects unknown flags and raw Docker/Compose inputs.
 
 ### 17.2 platform-control API v2
 
-The fixed `platform-control` service binds `127.0.0.1:8090`. Its authenticated API
-is read-only and exposes registry views for instances, attempts, jobs, template
-revisions, RuntimeSpec revisions, migration records, endpoints, health, market-
-data candles, and stable failure codes.
+The fixed `platform-control` service binds `127.0.0.1:8090`. Its authenticated
+control-plane API is read-only and exposes registry views for instances, attempts,
+jobs, template revisions, RuntimeSpec revisions, migration records, endpoints,
+health, market-data candles, and stable failure codes. The separate Runtime
+Access namespace may forward only the closed application-route policy described
+in section 13.4.
 
 It adds no POST, PUT, PATCH, or DELETE lifecycle route. Existing Basic/JWT
 credentials therefore do not gain container-control authority. A later RBAC-
@@ -1072,6 +1144,8 @@ Gate:
 - idempotent job creation and stale lease reclaim are proven;
 - API is authenticated and read-only and has no Docker, secret-root, or Bot-state
   authority;
+- Runtime Access route policy is a committed closed contract; no forwarding is
+  enabled before endpoint and network identity exist;
 - Phase 1 catalog remains available through the 8090 compatibility surface.
 
 ### 21.2 Phase 2B: Trusted Template and RuntimeSpec Compiler
@@ -1093,7 +1167,8 @@ Gate:
 
 Deliver jobs, leases, reconciler, attempts, state provisioning, secret resolution,
 Compose snapshot driver, isolated network, health, latching, retry, and offline
-emergency identity.
+emergency identity. Deliver deterministic per-instance access networks and exact
+platform-control attachment reconciliation for application runtimes.
 
 Gate:
 
@@ -1104,6 +1179,10 @@ Gate:
 - failure latch prevents automatic relaunch;
 - state survives explicit restart;
 - no host port, Docker socket, privilege, mutable image, or unapproved mount;
+- each application runtime access network contains only that runtime and the
+  verified platform-control identity;
+- stale/mismatched endpoint, attempt, network, or platform-control identity fails
+  closed before forwarding;
 - all P0 provenance and TOCTOU controls remain.
 
 ### 21.4 Phase 2D: Market-Data and UI Compatibility
@@ -1111,8 +1190,9 @@ Gate:
 Deliver the read-only canonical candle route on 8090, approved public-data
 adapter, immutable `MarketDataRefreshPolicy`, bounded TTL/in-flight coalescing,
 base-chart/strategy-overlay separation, internal `MarketDataReadPort`, and
-frontend cutover from Bot-specific candle reads to the platform candle route. No
-lifecycle write UI is introduced.
+frontend cutover from Bot-specific candle reads to the platform candle route.
+Deliver read-only Runtime Access policies for status, logs, chart overlays, and
+Research reads. No lifecycle write UI is introduced.
 
 Gate:
 
@@ -1132,6 +1212,8 @@ Gate:
   distinguishable;
 - chart or AI refresh never triggers strategy evaluation, OrderIntent creation,
   risk approval, or exchange execution;
+- a stopped or identity-mismatched runtime produces stable `runtime_unavailable`
+  or `runtime_identity_mismatch` errors without a fallback target;
 - replay evidence cannot be silently replaced by a current-data recomputation.
 
 ### 21.5 Phase 2E: Controlled Cutover and Operations
@@ -1139,7 +1221,8 @@ Gate:
 Deliver idempotent migration records, stopped-instance import, verified state
 copy, controlled Spot/Futures/Research cutover, generalized health/emergency/
 backup/verify/restore, rollback rehearsal, Root Safety gates, runbooks, fresh
-recursive-checkout proof, and authorized online paper acceptance.
+recursive-checkout proof, governed compatibility application-write routes, and
+authorized online paper acceptance.
 
 Gate:
 
@@ -1148,6 +1231,11 @@ Gate:
 - the original state roots are retained but not mounted writable by new instances;
 - 8090 control, chart, research, and required compatibility reads pass before old
   listeners are stopped;
+- existing approved Bot application actions remain reachable through instance-
+  scoped route policies; lifecycle actions remain absent from HTTP;
+- Research cannot reach trading routes, Paper cannot reach Live-only routes, and
+  credentials for one instance cannot target another;
+- ambiguous application-write results are never automatically retried;
 - no active listener remains on 8081, 8082, or 8083 after acceptance;
 - dynamic backup/restore is identity-bound and non-destructive;
 - invalid runtime inputs fail before Docker;
@@ -1171,6 +1259,8 @@ Required layers:
 - emergency database-down tests;
 - backup/restore identity and fault-injection tests;
 - migration and cutover compatibility selectors;
+- Runtime Access route-policy, target-confusion, cross-instance authorization,
+  per-instance network, timeout, retry, and audit tests;
 - market-data canonicalization, refresh-policy, cache, coalescing, every supported
   cadence, signal-layer alignment, AI-read, and UI tests;
 - Root Safety structural mutation tests;
@@ -1189,6 +1279,12 @@ Phase 2 is rejected if any path permits:
 - Web/API Docker access;
 - Worker control-plane database or secret-root access;
 - lifecycle mutation through current Basic/JWT API;
+- arbitrary Runtime Access upstream URL, IP, port, hostname, container, project,
+  network, method, or unregistered route;
+- one runtime reaching another runtime's private or access network;
+- instance-scoped credentials targeting another RuntimeInstance;
+- Research invoking a trading route or Paper invoking a Live-only route;
+- automatic retry of an ambiguous application write;
 - secret value in PostgreSQL, API, RuntimeSpec, audit, log, environment, or error;
 - two writable users of one state allocation;
 - two active attempts or jobs for one instance;
@@ -1245,11 +1341,15 @@ Phase 2 is complete only when:
     cadence even when the related Bot RuntimeInstance is stopped;
 13. canonical market snapshots expose freshness and forming/closed state to UI,
     Research, strategy, and AI consumers without exchange-write credentials;
-14. emergency stop/inspection remains available without PostgreSQL;
-15. backup/restore remains identity-bound and non-destructive;
-16. fresh remote recursive checkout and exact-SHA Root Safety pass;
-17. authorized online acceptance proves paper-only behavior and no exchange write;
-18. whole-branch architecture, code-quality/security, compatibility, and
+14. the Runtime Access Gateway preserves approved Bot/Research application
+    behavior through exact instance-scoped routes without arbitrary proxying;
+15. HTTP exposes no Runtime lifecycle mutation, while compatibility application
+    writes are capability-checked, audited, bounded, and never blindly retried;
+16. emergency stop/inspection remains available without PostgreSQL;
+17. backup/restore remains identity-bound and non-destructive;
+18. fresh remote recursive checkout and exact-SHA Root Safety pass;
+19. authorized online acceptance proves paper-only behavior and no exchange write;
+20. whole-branch architecture, code-quality/security, compatibility, and
     execution-safety reviews are approved.
 
 Publishing, PR state changes, merge, online acceptance, exchange connectivity,
