@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "root-safety.yml"
+PLATFORM_RUNBOOK_PATH = REPO_ROOT / "docs" / "operations" / "platform-control.md"
 SETUP_COMPOSE_ACTION = (
     "docker/setup-compose-action@4eb059ff7f16592f9c84d5ca339c53cb7c5064e2"
 )
@@ -47,6 +48,15 @@ RUNTIME_ROOT_COMMAND = (
     "tests.test_trading_config_safety.TradingConfigSafetyTests."
     "test_actual_research_profile_paths_resolve_below_read_only_input -v"
 )
+BUILD_IMAGE_STEP = "Build integrated image"
+PLATFORM_CI_STEPS = (
+    "Start platform PostgreSQL",
+    "Upgrade platform schema",
+    "Run platform PostgreSQL integration tests",
+    "Run Phase 2A backend regressions",
+    "Verify platform-control least privilege",
+    "Clean platform control plane",
+)
 
 
 def named_workflow_step(workflow: str, step_name: str) -> str:
@@ -76,6 +86,12 @@ def named_workflow_step(workflow: str, step_name: str) -> str:
 
 def step_has_exact_line(step: str, line: str) -> bool:
     return line in step.splitlines()
+
+
+def active_step_text(step: str) -> str:
+    return "\n".join(
+        line for line in step.splitlines() if not line.lstrip().startswith("#")
+    )
 
 
 class RootSafetyWorkflowTests(unittest.TestCase):
@@ -291,6 +307,167 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         setup = named_workflow_step(mutated_workflow, PNPM_SETUP_STEP)
 
         self.assertFalse(step_has_exact_line(setup, SETUP_PNPM_ACTION_LINE))
+
+    def test_platform_ci_steps_are_unique_and_follow_the_image_build_in_order(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        previous_position = workflow.index(named_workflow_step(workflow, BUILD_IMAGE_STEP))
+
+        for step_name in PLATFORM_CI_STEPS:
+            with self.subTest(step=step_name):
+                step = named_workflow_step(workflow, step_name)
+                position = workflow.index(step)
+                self.assertLess(previous_position, position)
+                previous_position = position
+
+    def test_platform_ci_cleanup_is_unconditional(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cleanup = named_workflow_step(workflow, PLATFORM_CI_STEPS[-1])
+
+        self.assertTrue(step_has_exact_line(cleanup, "        if: always()"))
+
+    def test_platform_postgres_step_is_file_secreted_loopback_and_volume_free(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[0]))
+        required = (
+            'platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"',
+            'install -d -m 0700 "${platform_ci_dir}"',
+            "postgres_admin_password \\",
+            "platform_control_db_password \\",
+            "platform_supervisor_db_password \\",
+            "api_password \\",
+            "jwt_secret_key",
+            '"ft_userdata/secrets/platform/${secret_name}"',
+            'docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.before"',
+            "docker network create --internal freqtrade-platform-ci",
+            "--name platform-postgres-ci",
+            "--publish 127.0.0.1:55432:5432",
+            "--tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=512m",
+            "POSTGRES_PASSWORD_FILE=/run/secrets/postgres_admin_password",
+            "postgres:17.10-alpine",
+            "docker network connect freqtrade-platform-ci platform-postgres-ci",
+            "for attempt in $(seq 1 60); do",
+            "CREATE DATABASE platform_test_ci",
+            'PGPASSFILE=${platform_ci_dir}/pgpass',
+            "PLATFORM_TEST_POSTGRES_URL=postgresql+psycopg://postgres@127.0.0.1:55432/platform_test_ci",
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        self.assertNotIn("POSTGRES_PASSWORD=", step)
+        self.assertNotIn("docker compose", step)
+        self.assertNotIn("docker network disconnect bridge platform-postgres-ci", step)
+
+    def test_platform_upgrade_and_backend_selectors_are_executable(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        upgrade = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[1]))
+        postgres = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[2]))
+        regressions = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[3]))
+
+        for fragment in (
+            "PlatformDatabaseSettings",
+            "settings.sqlalchemy_url()",
+            'command.upgrade(config, "head")',
+            "ScriptDirectory.from_config(config).get_current_head()",
+            "SqlCatalogRepository",
+            "default_catalog_snapshot",
+            "docker exec platform-postgres-ci sh /docker-entrypoint-initdb.d/init-platform-roles.sh",
+        ):
+            self.assertIn(fragment, upgrade)
+        for selector in (
+            "tests/platform/test_platform_migrations.py",
+            "tests/platform/test_runtime_repository.py",
+        ):
+            self.assertIn(selector, postgres)
+        for selector in (
+            "tests/markets/test_catalog.py",
+            "tests/platform/test_database.py",
+            "tests/platform/test_catalog_repository.py",
+            "tests/platform/test_runtime_domain.py",
+            "tests/platform/test_runtime_service.py",
+            "tests/platform_control",
+            "tests/rpc/test_api_catalog.py",
+        ):
+            self.assertIn(selector, regressions)
+        self.assertIn("ruff check \\", regressions)
+
+    def test_least_privilege_step_reconciles_roles_and_probes_hardened_http(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+        required = (
+            "ALTER ROLE platform_control WITH SUPERUSER CREATEDB CREATEROLE INHERIT REPLICATION BYPASSRLS",
+            "ALTER ROLE platform_supervisor WITH SUPERUSER CREATEDB CREATEROLE INHERIT REPLICATION BYPASSRLS",
+            "column_grantor_role.rolname",
+            "ORDER BY column_grantor_role.rolname",
+            "permission denied for table runtime_instances",
+            "docker network disconnect bridge platform-postgres-ci",
+            'test "${database_networks}" = "freqtrade-platform-ci"',
+            "--name platform-control-ci",
+            "--user 1000:1000",
+            "--read-only",
+            "--init",
+            "--cap-drop ALL",
+            "--security-opt no-new-privileges:true",
+            "--network freqtrade-platform-ci",
+            "--publish 127.0.0.1:8090:8090",
+            "--netrc-file",
+            '"http://127.0.0.1:8090/api/v2/ping"',
+            '"http://127.0.0.1:8090/api/v2/catalog"',
+            '"http://127.0.0.1:8090/api/v2/runtime-instances"',
+            '"/openapi.json"',
+            '"/docs"',
+            '"/api/v2/runtime-instances/ci-instance/start"',
+            '"/api/v2/runtime-access/ci-instance"',
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        self.assertLess(
+            step.index("SET ROLE platform_ci_delegate"),
+            step.index("ALTER ROLE platform_control WITH SUPERUSER"),
+        )
+        self.assertLess(
+            step.index("GRANT UPDATE (desired_state) ON TABLE public.runtime_instances\n"
+                       "            TO platform_ci_downstream"),
+            step.index("ALTER ROLE platform_control WITH SUPERUSER"),
+        )
+        for forbidden in ("docker.sock", "ft_userdata/runtime", "docker compose"):
+            self.assertNotIn(forbidden, step)
+
+    def test_platform_cleanup_removes_exact_resources_and_asserts_no_volume_drift(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[5]))
+
+        for fragment in (
+            "docker rm -f platform-control-ci platform-postgres-ci",
+            "docker network rm freqtrade-platform-ci",
+            'docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.after"',
+            'cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after"',
+            'rm -rf "${platform_ci_dir}"',
+        ):
+            self.assertIn(fragment, cleanup)
+
+    def test_platform_contract_text_in_comments_or_unrelated_steps_is_rejected(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        marker = "--security-opt no-new-privileges:true"
+        mutated = workflow.replace(marker, f"# {marker}", 1)
+        mutated += f"\n      - name: Unrelated platform text\n        run: echo '{marker}'\n"
+        least_privilege = active_step_text(
+            named_workflow_step(mutated, PLATFORM_CI_STEPS[4])
+        )
+
+        self.assertNotIn(marker, least_privilege)
+
+    def test_platform_runbook_keeps_production_start_fail_closed(self) -> None:
+        self.assertTrue(PLATFORM_RUNBOOK_PATH.is_file())
+        runbook = PLATFORM_RUNBOOK_PATH.read_text(encoding="utf-8")
+
+        for statement in (
+            "Production platform start/stop is not exposed in Phase 2A.",
+            "Raw `docker compose up` is unsupported and bypasses review gates.",
+            "`compose_runtime` remains platform config-only.",
+            "A Supervisor or dedicated infrastructure launcher must land before production use.",
+        ):
+            self.assertIn(statement, runbook)
 
 
 if __name__ == "__main__":
