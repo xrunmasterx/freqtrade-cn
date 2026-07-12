@@ -40,7 +40,6 @@
 
 ### Root repository
 
-- Create `docker/platform_control_entrypoint.py`: exact secret-file loading and process exec.
 - Create `docker/postgres/init-platform-roles.sh`: least-privilege fixed roles.
 - Modify `docker-compose.yml`: internal PostgreSQL and loopback platform-control services.
 - Modify `tools/bootstrap_runtime.py`: provision only the exact new platform secret files.
@@ -611,7 +610,6 @@ Expected: tests/Ruff/import pass and API schema contains no lifecycle mutation.
 ### Task 6: Root PostgreSQL/platform-control runtime and least privilege
 
 **Files:**
-- Create: `docker/platform_control_entrypoint.py`
 - Create: `docker/postgres/init-platform-roles.sh`
 - Modify: `docker-compose.yml`
 - Modify: `Dockerfile`
@@ -659,10 +657,10 @@ Expected: missing platform services.
 
 - [ ] **Step 3: Add fixed Compose services and entrypoints**
 
-Add `platform-postgres` with `expose: [5432]`, no `ports`, fixed health check, fixed named volume, and secret-file password. Add `platform-control` with exact command:
+Add `platform-postgres` with `expose: [5432]`, no `ports`, fixed health check, fixed named volume, and secret-file password. Override the image's Bot-specific ENTRYPOINT for `platform-control` with:
 
 ```yaml
-command: ["python", "-m", "freqtrade.platform_control"]
+entrypoint: ["python", "-m", "freqtrade.platform_control"]
 ports:
   - target: 8090
     published: "8090"
@@ -670,7 +668,7 @@ ports:
     protocol: tcp
 ```
 
-It mounts only its exact password/JWT/DB secret files. Add no Docker socket and no runtime state mount. `platform_control_entrypoint.py` validates exact secret files for regular-file/permission/single-line/NUL/sentinel/distinct-value rules, discards the read values, and `execvpe()` runs the module with only the existing `*_FILE` path variables. Secret values are never copied into ordinary environment variables; `PlatformControlSettings` reads the exact files when the owning component needs them.
+It mounts only its exact password/JWT/DB secret files. Add no Docker socket and no runtime state mount. Secret values are never copied into ordinary environment variables; `PlatformControlSettings` is the single owner that reads and validates exact files for regular-file/permission/single-line/NUL/sentinel/distinct-value rules.
 
 `init-platform-roles.sh` creates fixed `platform_control` and `platform_supervisor` roles using mounted secret files, grants schema usage, grants platform-control SELECT plus `runtime_access_requests` terminal-field update and audit INSERT only, and grants Supervisor/Operator the reviewed Registry application permissions. The script uses `psql` variables, never shell-interpolated SQL passwords.
 
@@ -684,7 +682,7 @@ Add exact platform secret specifications to `bootstrap_runtime.py` without addin
 python -S -m unittest tests.test_platform_control_contract tests.test_bootstrap_runtime tests.test_runtime_contract -v
 python tools/compose_runtime.py --profile platform config --format json > $env:TEMP\platform-compose.json
 python tools/runtime_contract.py --compose-json $env:TEMP\platform-compose.json
-git add Dockerfile docker-compose.yml docker/platform_control_entrypoint.py docker/postgres/init-platform-roles.sh tools/bootstrap_runtime.py tools/runtime_contract.py tests/test_platform_control_contract.py tests/test_bootstrap_runtime.py tests/test_runtime_contract.py
+git add Dockerfile docker-compose.yml docker/postgres/init-platform-roles.sh tools/bootstrap_runtime.py tools/runtime_contract.py tests/test_platform_control_contract.py tests/test_bootstrap_runtime.py tests/test_runtime_contract.py
 git commit -m "feat(platform): add isolated control-plane services"
 ```
 
