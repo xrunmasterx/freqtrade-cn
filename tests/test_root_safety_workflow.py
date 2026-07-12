@@ -290,6 +290,23 @@ def active_shell_function_bodies(script: str, function_name: str) -> list[str]:
     return bodies
 
 
+REVIEWED_DENIAL_HELPER_BODY = (
+    '  role_name="$1"\n'
+    '  probe_name="$2"\n'
+    '  statement="$3"\n'
+    "  set +e\n"
+    "  docker exec platform-postgres-ci \\\n"
+    '    psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \\\n'
+    '    --command "BEGIN; ${statement}; ROLLBACK;" \\\n'
+    '    >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1\n'
+    "  denied_status=$?\n"
+    "  set -e\n"
+    '  test "${denied_status}" -ne 0\n'
+    '  grep --extended-regexp --quiet "permission denied|must be owner of" \\\n'
+    '    "${platform_ci_dir}/denied-${role_name}-${probe_name}.log"\n'
+)
+
+
 CONTROL_TOPOLOGY_FRAGMENTS = (
     "docker create",
     "--name platform-control-ci",
@@ -451,7 +468,8 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     if len(denial_bodies) != 1:
         errors.append("least-privilege active denial helper differs")
     else:
-        denial_statements = executable_shell_statements(denial_bodies[0])
+        denial_body = denial_bodies[0].replace("\r\n", "\n")
+        denial_statements = executable_shell_statements(denial_body)
         denial_text = "\n".join(denial_statements)
         denial_fragments = (
             'psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on',
@@ -476,7 +494,8 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
             if re.match(r"^role_name=", statement)
         ]
         if (
-            any(position < 0 for position in denial_positions)
+            denial_body != REVIEWED_DENIAL_HELPER_BODY
+            or any(position < 0 for position in denial_positions)
             or denial_positions != sorted(denial_positions)
             or denial_positions[1] != denial_positions[0] + 1
             or len(role_assignments) != 1
@@ -979,6 +998,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(helper)
         helper_text = helper.group(0) if helper is not None else ""
+        probe_anchor = "            set +e\n            docker exec platform-postgres-ci \\\n"
         mutations = {
             "postgres substitution": workflow.replace(
                 'psql --username "${role_name}" --dbname platform',
@@ -1018,18 +1038,57 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 1,
             ),
             "role reassignment before probe": workflow.replace(
-                "            set +e\n            docker exec platform-postgres-ci \\",
+                probe_anchor,
                 "            set +e\n"
                 "            role_name=platform_supervisor\n"
                 "            docker exec platform-postgres-ci \\",
                 1,
             ),
+            **{
+                f"{statement.split()[0]} role mutation": workflow.replace(
+                    probe_anchor,
+                    "            set +e\n"
+                    f"            {statement}\n"
+                    "            docker exec platform-postgres-ci \\",
+                    1,
+                )
+                for statement in (
+                    "local role_name=postgres",
+                    "export role_name=postgres",
+                    "declare role_name=postgres",
+                    "typeset role_name=postgres",
+                    "readonly role_name=postgres",
+                    "eval role_name=postgres",
+                )
+            },
         }
 
         for name, mutated in mutations.items():
             with self.subTest(name=name):
                 self.assertNotEqual(mutated, workflow)
-                self.assertTrue(validate_root_safety_workflow(mutated))
+                self.assertIn(
+                    "least-privilege active denial helper differs",
+                    validate_root_safety_workflow(mutated),
+                )
+
+    def test_denial_helper_pin_ignores_inactive_text_outside_helper(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        marker = "          docker create \\\n"
+        mutated = workflow.replace(
+            marker,
+            "          # role_name=postgres outside the reviewed helper\n"
+            "          python - <<'PY'\n"
+            "          role_name=postgres\n"
+            "          PY\n"
+            "          if false; then\n"
+            "            role_name=postgres\n"
+            "          fi\n"
+            + marker,
+            1,
+        )
+
+        self.assertNotEqual(mutated, workflow)
+        self.assertEqual(validate_root_safety_workflow(mutated), [])
 
     def test_reusable_platform_contract_rejects_privilege_boundary_reordering(
         self,
