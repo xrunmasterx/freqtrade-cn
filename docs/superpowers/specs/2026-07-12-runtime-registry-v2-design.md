@@ -289,6 +289,41 @@ Foreign keys use explicit restrict semantics for immutable audit history. No
 runtime, attempt, allocation, template revision, or audit record is cascade-
 deleted by a product-owner deletion.
 
+The first Phase 2A migration uses the following exact persistence boundary:
+
+- `runtime_instances` stores the fields in Section 7.1. References to the
+  RuntimeSpec and StateAllocation are identifier columns until those immutable
+  tables are introduced by Phase 2B; Phase 2B adds the corresponding foreign
+  keys without rewriting instance identity.
+- `runtime_attempts` stores the fields in Section 7.2. `instance_id` is a
+  restrictive foreign key. Resolved secret-version identities and health
+  evidence are JSON, never secret values or secret/host paths. RuntimeSpec and
+  AdapterTemplate identifiers receive foreign keys only when their Phase 2B
+  tables exist.
+- `runtime_lifecycle_jobs` stores the fields in Section 8.1 with a restrictive
+  instance foreign key.
+- `runtime_endpoints` contains `endpoint_id`, restrictive `instance_id` and
+  `attempt_id` foreign keys, `endpoint_kind`, `internal_port`, `protocol`,
+  `exposure_policy`, and `created_at`. It contains no host port, caller-selected
+  host, URL, network, project, container, or service name.
+- `runtime_access_requests` contains only `request_id`, restrictive
+  `instance_id` and `attempt_id` foreign keys, `route_policy_revision`,
+  `method`, nullable `idempotency_key`, `status`, nullable `result_code`,
+  `requested_at`, and nullable `completed_at`.
+- `runtime_audit_events` contains `audit_event_id`, `actor_type`, `request_id`,
+  nullable `idempotency_key`, nullable owner reference fields, nullable
+  restrictive `instance_id`, nullable RuntimeSpec/AdapterTemplate identifiers,
+  `action`, nullable JSON `previous_state`, nullable JSON `next_state`,
+  `result_code`, `occurred_at`, and non-null JSON `provenance`. Audit JSON is
+  non-secret and contains no values, credentials, tokens, headers, bodies, DSN,
+  or secret/host paths.
+
+Closed owner/state/action/management values are protected both by typed domain
+construction and named database check constraints. Identity and code columns
+are at most 128 characters; image identities may be at most 256 characters;
+component commits are at most 64 characters; timestamps are timezone-aware.
+All runtime-owned foreign keys created in Phase 2A use `ON DELETE RESTRICT`.
+
 `runtime_access_requests` is owned by the Gateway and records request identity,
 instance/attempt, closed route-policy revision, method, idempotency key, timing,
 and stable result code without bodies, credentials, tokens, or secret headers.

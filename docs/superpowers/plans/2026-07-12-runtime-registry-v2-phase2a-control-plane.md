@@ -440,6 +440,15 @@ def test_empty_postgres_upgrades_to_registry_head(postgres_url: str) -> None:
 
 Add tests for downgrade/upgrade, non-empty catalog fixture preservation, active-attempt/job partial uniqueness, and startup source paths containing no `metadata.create_all()` call.
 
+Define the `postgres_url` fixture in this test module. It reads only
+`PLATFORM_TEST_POSTGRES_URL`, requires the database name to match
+`^platform_test[a-z0-9_]*$`, and resets only that database's `public` schema
+before and after each test. If the variable is absent, the PostgreSQL tests
+skip with one stable reason; Task 3 acceptance itself must set the variable and
+run with zero skips against an isolated PostgreSQL instance. Never reset a URL
+that fails the test-database name guard. The fixture and test logs must not print
+the URL or password.
+
 - [ ] **Step 2: Run RED**
 
 ```powershell
@@ -451,6 +460,102 @@ Expected: missing Alembic configuration/migration.
 - [ ] **Step 3: Implement ORM records**
 
 Define records using `PlatformBase` and typed SQLAlchemy mappings. Identity columns are `String(128)`, timestamps are timezone-aware, payload/provenance fields use `JSON`, and optimistic version is a non-negative integer. Use nullable terminal timestamps/codes only where the state machine allows them.
+
+Use these exact record fields and nullability:
+
+```text
+RuntimeInstanceRecord
+- instance_id PK String(128)
+- instance_kind String(128)
+- owner_kind String(128)
+- owner_id String(128)
+- owner_revision String(128)
+- management_mode String(128)
+- runtime_spec_revision_id String(128)
+- environment String(16)
+- state_allocation_id String(128)
+- desired_state String(32)
+- lifecycle_status String(32)
+- failure_latched Boolean
+- optimistic_version Integer >= 0
+- created_at DateTime(timezone=True)
+- retired_at nullable DateTime(timezone=True)
+
+RuntimeAttemptRecord
+- attempt_id PK String(128)
+- instance_id restrictive FK
+- attempt_number Integer >= 1
+- runtime_spec_revision_id String(128)
+- adapter_template_revision_id String(128)
+- resolved_secret_versions non-null JSON
+- image_id String(256)
+- root_commit/backend_commit/frontend_commit/strategies_commit String(64)
+- project_identity/container_identity String(128)
+- status String(32)
+- health_result nullable JSON
+- started_at nullable DateTime(timezone=True)
+- stopped_at nullable DateTime(timezone=True)
+- exit_code nullable Integer
+- failure_code nullable String(128)
+
+RuntimeLifecycleJobRecord
+- job_id PK String(128)
+- instance_id restrictive FK
+- requested_action String(32)
+- idempotency_key String(128)
+- expected_instance_version Integer >= 0
+- status String(32)
+- lease_owner nullable String(128)
+- lease_expires_at nullable DateTime(timezone=True)
+- requested_at DateTime(timezone=True)
+- started_at/completed_at nullable DateTime(timezone=True)
+- failure_code nullable String(128)
+
+RuntimeEndpointRecord
+- endpoint_id PK String(128)
+- instance_id restrictive FK
+- attempt_id restrictive FK
+- endpoint_kind String(128)
+- internal_port Integer in 1..65535
+- protocol String(16)
+- exposure_policy String(32)
+- created_at DateTime(timezone=True)
+
+RuntimeAccessRequestRecord
+- request_id PK String(128)
+- instance_id restrictive FK
+- attempt_id restrictive FK
+- route_policy_revision String(128)
+- method String(16)
+- idempotency_key nullable String(128)
+- status String(32)
+- result_code nullable String(128)
+- requested_at DateTime(timezone=True)
+- completed_at nullable DateTime(timezone=True)
+
+RuntimeAuditEventRecord
+- audit_event_id PK String(128)
+- actor_type String(128)
+- request_id String(128)
+- idempotency_key nullable String(128)
+- owner_kind/owner_id/owner_revision nullable String(128)
+- instance_id nullable restrictive FK
+- runtime_spec_revision_id/adapter_template_revision_id nullable String(128)
+- action String(128)
+- previous_state/next_state nullable JSON
+- result_code String(128)
+- occurred_at DateTime(timezone=True)
+- provenance non-null JSON
+```
+
+All unspecified fields above are non-null. Add named check constraints for the
+closed Phase 2 owner kinds, management mode, environment, desired/lifecycle/
+attempt/job states, lifecycle actions, non-negative versions, positive attempt
+numbers, endpoint ports, endpoint protocols (`http`, `https`), and exposure
+policies (`internal_only`, `none`). Add unique `(attempt_id, endpoint_kind)`.
+The JSON columns store identities/evidence only and reject secret values at the
+application boundary; no request/response body or Authorization/Cookie header
+column exists.
 
 Define PostgreSQL partial indexes:
 
@@ -488,15 +593,24 @@ from freqtrade.platform import catalog_repository, runtime_models
 target_metadata = PlatformBase.metadata
 ```
 
+`alembic-platform.ini` contains no DSN or credential. `env.py` accepts a URL
+already set programmatically on the Alembic `Config`. For test-only CLI drift
+checking, it may fall back to `PLATFORM_TEST_POSTGRES_URL`; if neither is
+present it fails closed. Production migration invocation later constructs the
+URL from `PlatformDatabaseSettings` and never copies a password into an
+ordinary environment variable.
+
 - [ ] **Step 5: Run PostgreSQL GREEN**
 
 ```powershell
 python -m pytest tests/platform/test_platform_migrations.py -q -p no:cacheprovider
+$env:PLATFORM_TEST_POSTGRES_URL = "<isolated platform_test database URL>"
+alembic -c alembic-platform.ini upgrade head
 alembic -c alembic-platform.ini check
 ruff check freqtrade/platform/runtime_models.py platform_migrations tests/platform/test_platform_migrations.py
 ```
 
-Expected: empty upgrade, downgrade/upgrade, constraints, and Alembic drift checks pass.
+Expected: empty upgrade, downgrade/upgrade, constraints, and Alembic drift checks pass with zero PostgreSQL skips; command output contains no database URL or password. Remove the test-only environment value after the commands.
 
 - [ ] **Step 6: Commit backend task**
 
