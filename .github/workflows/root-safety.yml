@@ -878,6 +878,7 @@ jobs:
               docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.detected"
               comm -13 "${platform_ci_dir}/volumes.before" \
                 "${platform_ci_dir}/volumes.detected" > "${platform_ci_dir}/volumes.created"
+              test ! -s "${platform_ci_dir}/volumes.created" || cleanup_status=1
               while IFS= read -r volume_name; do
                 test -n "${volume_name}" || continue
                 if ! docker volume rm "${volume_name}" >/dev/null; then

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -111,6 +112,46 @@ def step_run_script(workflow: str, step_name: str) -> str:
     return "\n".join(script_lines) + "\n"
 
 
+def split_shell_compound(command: str) -> list[str]:
+    segments: list[str] = []
+    start = 0
+    index = 0
+    quote: str | None = None
+    escaped = False
+    while index < len(command):
+        character = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            continue
+        operator_length = 2 if command[index : index + 2] in {"&&", "||"} else 0
+        if character == ";" or operator_length:
+            segment = command[start:index].strip()
+            if segment:
+                segments.append(segment)
+            index += operator_length or 1
+            start = index
+            continue
+        index += 1
+    segment = command[start:].strip()
+    if segment:
+        segments.append(segment)
+    return segments
+
+
 def executable_shell_statements(script: str) -> list[str]:
     statements: list[str] = []
     pending = ""
@@ -143,19 +184,24 @@ def executable_shell_statements(script: str) -> list[str]:
             elif stripped == "fi":
                 dead_depth -= 1
             continue
-        if re.search(r"(?:^|;)\s*exit\s+0(?:\s*(?:;|#).*)?$", stripped):
-            break
-        if re.match(r"^(?:echo|printf)\b", stripped):
-            continue
         pending = f"{pending} {stripped}".strip()
         if pending.endswith("\\"):
             pending = pending[:-1].rstrip()
             continue
-        statements.append(pending)
         heredoc = re.search(r"<<-?['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*$", pending)
+        stop = False
+        for segment in split_shell_compound(pending):
+            if re.match(r"^exit\s+0(?:\s*(?:#.*)?)?$", segment):
+                stop = True
+                break
+            if re.match(r"^(?:echo|printf)\b", segment):
+                continue
+            statements.append(segment)
         pending = ""
         if heredoc is not None:
             heredoc_delimiter = heredoc.group(1)
+        if stop:
+            break
     if pending:
         statements.append(pending)
     return statements
@@ -185,6 +231,63 @@ def executable_sql_payloads(script: str) -> list[str]:
             payloads.append("\n".join(payload))
         index += 1
     return payloads
+
+
+def active_shell_function_bodies(script: str, function_name: str) -> list[str]:
+    bodies: list[str] = []
+    lines = script.splitlines()
+    heredoc_delimiter: str | None = None
+    dead_depth = 0
+    index = 0
+    function_pattern = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{$")
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if heredoc_delimiter is not None:
+            if stripped == heredoc_delimiter:
+                heredoc_delimiter = None
+            index += 1
+            continue
+        heredoc = re.search(r"<<-?['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*$", stripped)
+        if heredoc is not None:
+            heredoc_delimiter = heredoc.group(1)
+            index += 1
+            continue
+        if re.match(r"^if\s+(?:false|test\s+1\s+-eq\s+0)\s*;?\s*then$", stripped):
+            dead_depth += 1
+            index += 1
+            continue
+        if dead_depth:
+            if re.match(r"^if\b", stripped):
+                dead_depth += 1
+            elif stripped == "fi":
+                dead_depth -= 1
+            index += 1
+            continue
+        function_match = function_pattern.match(stripped)
+        if function_match is None:
+            index += 1
+            continue
+        is_target = function_match.group(1) == function_name
+        body: list[str] = []
+        function_depth = 1
+        index += 1
+        while index < len(lines) and function_depth:
+            nested = lines[index].strip()
+            if function_pattern.match(nested):
+                function_depth += 1
+            elif nested == "}":
+                function_depth -= 1
+                if not function_depth:
+                    break
+            if is_target:
+                body.append(lines[index])
+            index += 1
+        if index == len(lines):
+            return []
+        if is_target:
+            bodies.append("\n".join(body) + "\n")
+        index += 1
+    return bodies
 
 
 CONTROL_TOPOLOGY_FRAGMENTS = (
@@ -343,7 +446,179 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     ):
         if fragment not in active_shell:
             errors.append(f"least-privilege executable SQL query missing: {fragment}")
+
+    denial_bodies = active_shell_function_bodies(least_privilege, "expect_role_denied")
+    if len(denial_bodies) != 1:
+        errors.append("least-privilege active denial helper differs")
+    else:
+        denial_statements = executable_shell_statements(denial_bodies[0])
+        denial_text = "\n".join(denial_statements)
+        denial_fragments = (
+            'psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on',
+            "denied_status=$?",
+            'test "${denied_status}" -ne 0',
+            'grep --extended-regexp --quiet "permission denied|must be owner of"',
+        )
+        denial_positions = [
+            next(
+                (
+                    index
+                    for index, statement in enumerate(denial_statements)
+                    if fragment in statement
+                ),
+                -1,
+            )
+            for fragment in denial_fragments
+        ]
+        if (
+            any(position < 0 for position in denial_positions)
+            or denial_positions != sorted(denial_positions)
+            or denial_positions[1] != denial_positions[0] + 1
+            or "psql --username postgres" in denial_text
+            or any(
+                re.match(r"^return\s+0(?:\s*(?:#.*)?)?$", statement)
+                for statement in denial_statements
+            )
+        ):
+            errors.append("least-privilege active denial helper differs")
+
+    contamination = (
+        "ALTER ROLE platform_control WITH SUPERUSER CREATEDB CREATEROLE "
+        "INHERIT REPLICATION BYPASSRLS;"
+    )
+    reconciliation = (
+        "docker exec platform-postgres-ci sh "
+        "/docker-entrypoint-initdb.d/init-platform-roles.sh"
+    )
+    effective_inventory = "effective_after="
+    boundary_positions = [
+        least_privilege.find(fragment)
+        for fragment in (contamination, reconciliation, effective_inventory)
+    ]
+    if all(position >= 0 for position in boundary_positions) and (
+        boundary_positions != sorted(boundary_positions)
+    ):
+        errors.append("least-privilege contamination reconciliation order differs")
+    denial_call_positions = [
+        least_privilege.find(fragment)
+        for fragment in WORKFLOW_EXECUTABLE_CONTRACT[PLATFORM_CI_STEPS[4]]
+        if fragment.startswith("expect_role_denied ")
+    ]
+    if (
+        all(position >= 0 for position in boundary_positions[:2])
+        and all(position >= 0 for position in denial_call_positions)
+        and any(
+            position <= max(boundary_positions[:2])
+            for position in denial_call_positions
+        )
+    ):
+        errors.append("least-privilege fixed-role denial order differs")
+
+    cleanup = scripts.get(PLATFORM_CI_STEPS[5], "")
+    cleanup_statements = executable_shell_statements(cleanup)
+    drift_line = 'test ! -s "${platform_ci_dir}/volumes.created" || cleanup_status=1'
+    drift_check = 'test ! -s "${platform_ci_dir}/volumes.created"'
+    drift_indices = [
+        index
+        for index in range(len(cleanup_statements) - 1)
+        if cleanup_statements[index] == drift_check
+        and cleanup_statements[index + 1] == "cleanup_status=1"
+    ]
+    cleanup_order = [
+        executable_statement_position(cleanup_statements, fragment)
+        for fragment in ("comm -13", drift_check, "docker volume rm")
+    ]
+    if (
+        drift_line not in (line.strip() for line in cleanup.splitlines())
+        or len(drift_indices) != 1
+        or any(position < 0 for position in cleanup_order)
+        or cleanup_order != sorted(cleanup_order)
+    ):
+        errors.append("cleanup created-volume drift status differs")
     return errors
+
+
+def run_cleanup_with_stubbed_volumes(
+    before: tuple[str, ...],
+    detected: tuple[str, ...],
+    final: tuple[str, ...],
+    *,
+    failed_removal: str = "",
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    cleanup_script = step_run_script(workflow, PLATFORM_CI_STEPS[5])
+
+    def inventory(names: tuple[str, ...]) -> str:
+        return "".join(f"{name}\n" for name in names)
+
+    stub_environment = {
+        "STUB_BEFORE_VOLUMES": inventory(before),
+        "STUB_DETECTED_VOLUMES": inventory(detected),
+        "STUB_FINAL_VOLUMES": inventory(final),
+        "STUB_FAILED_REMOVAL": failed_removal,
+    }
+    exports = "".join(
+        f"export {name}={shlex.quote(value)}\n"
+        for name, value in stub_environment.items()
+    )
+    stub = r"""
+RUNNER_TEMP="$(mktemp -d)"
+trap 'rm -rf "${RUNNER_TEMP}"' EXIT
+platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+mkdir -p "${platform_ci_dir}"
+printf '%s' "${STUB_BEFORE_VOLUMES}" > "${platform_ci_dir}/volumes.before"
+STUB_CURRENT_VOLUMES="${RUNNER_TEMP}/current-volumes"
+printf '%s' "${STUB_DETECTED_VOLUMES}" > "${STUB_CURRENT_VOLUMES}"
+
+docker() {
+  if test "$1" = "rm"; then
+    return 0
+  fi
+  if test "$1" = "network" && test "$2" = "rm"; then
+    return 0
+  fi
+  if test "$1" = "ps"; then
+    return 0
+  fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    return 1
+  fi
+  if test "$1" = "volume" && test "$2" = "ls"; then
+    cat "${STUB_CURRENT_VOLUMES}"
+    return 0
+  fi
+  if test "$1" = "volume" && test "$2" = "rm"; then
+    printf 'STUB_REMOVED:%s\n' "$3" >&2
+    if test "$3" = "${STUB_FAILED_REMOVAL}"; then
+      return 1
+    fi
+    printf '%s' "${STUB_FINAL_VOLUMES}" > "${STUB_CURRENT_VOLUMES}"
+    return 0
+  fi
+  return 99
+}
+"""
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        input=(exports + stub + cleanup_script).replace("\r\n", "\n").encode(),
+        capture_output=True,
+        check=False,
+    )
+    stderr = raw_result.stderr.decode()
+    removed = [
+        line.removeprefix("STUB_REMOVED:")
+        for line in stderr.splitlines()
+        if line.startswith("STUB_REMOVED:")
+    ]
+    result = subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        raw_result.stdout.decode(),
+        stderr,
+    )
+    return result, removed
 
 
 class RootSafetyWorkflowTests(unittest.TestCase):
@@ -664,6 +939,112 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
+    def test_reusable_platform_contract_rejects_compound_safety_text(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        required_command = (
+            "docker network connect freqtrade-platform-ci platform-control-ci"
+        )
+        mutations = {
+            "semicolon echo": workflow.replace(
+                required_command,
+                f":; echo '{required_command}'",
+                1,
+            ),
+            "and printf": workflow.replace(
+                required_command,
+                f"true && printf '%s\\n' '{required_command}'",
+                1,
+            ),
+        }
+
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_reusable_platform_contract_validates_active_denial_helper(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        least_privilege_step = named_workflow_step(workflow, PLATFORM_CI_STEPS[4])
+        helper = re.search(
+            r"(?ms)^          expect_role_denied\(\) \{\n.*?^          \}\n",
+            least_privilege_step,
+        )
+        self.assertIsNotNone(helper)
+        helper_text = helper.group(0) if helper is not None else ""
+        mutations = {
+            "postgres substitution": workflow.replace(
+                'psql --username "${role_name}" --dbname platform',
+                "psql --username postgres --dbname platform",
+                1,
+            ),
+            "unconditional true": workflow.replace(
+                helper_text,
+                "          expect_role_denied() {\n            true\n          }\n",
+                1,
+            ),
+            "unconditional return": workflow.replace(
+                helper_text,
+                "          expect_role_denied() {\n            return 0\n          }\n",
+                1,
+            ),
+            "uncalled wrapper": workflow.replace(
+                helper_text,
+                "          uncalled_denial_helper() {\n"
+                + "".join(f"  {line}\n" for line in helper_text.splitlines())
+                + "          }\n",
+                1,
+            ),
+        }
+
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_reusable_platform_contract_rejects_privilege_boundary_reordering(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = named_workflow_step(workflow, PLATFORM_CI_STEPS[4])
+        reconciliation = (
+            "          docker exec platform-postgres-ci sh "
+            "/docker-entrypoint-initdb.d/init-platform-roles.sh\n"
+        )
+        after_effective_inventory = '          test "${effective_after}" = "f|f"\n'
+        reordered_reconciliation = step.replace(reconciliation, "", 1).replace(
+            after_effective_inventory,
+            after_effective_inventory + reconciliation,
+            1,
+        )
+
+        helper_start = step.index("          expect_role_denied() {\n")
+        denial_end_marker = (
+            '          expect_role_denied platform_supervisor update "UPDATE '
+            'platform_catalog_revisions SET payload = payload"\n'
+        )
+        helper_end = step.index(denial_end_marker, helper_start) + len(
+            denial_end_marker
+        )
+        denial_block = step[helper_start:helper_end]
+        without_denials = step[:helper_start] + step[helper_end:]
+        contamination_boundary = without_denials.index(
+            "          docker exec --interactive platform-postgres-ci \\\n"
+        )
+        reordered_denials = (
+            without_denials[:contamination_boundary]
+            + denial_block
+            + without_denials[contamination_boundary:]
+        )
+        mutations = (
+            workflow.replace(step, reordered_reconciliation, 1),
+            workflow.replace(step, reordered_denials, 1),
+        )
+
+        for mutated in mutations:
+            with self.subTest(order=mutated.index("expect_role_denied()")):
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
+
     def test_reusable_platform_contract_rejects_all_deny_and_identity_mutations(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         deny_fragments = tuple(
@@ -875,6 +1256,40 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             'rm -rf "${platform_ci_dir}"',
         ):
             self.assertIn(fragment, cleanup)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_platform_cleanup_preserves_created_volume_drift_failure(self) -> None:
+        no_drift, no_drift_removed = run_cleanup_with_stubbed_volumes(
+            ("existing-a", "existing-b"),
+            ("existing-a", "existing-b"),
+            ("existing-a", "existing-b"),
+        )
+        self.assertEqual(no_drift.returncode, 0, no_drift.stdout + no_drift.stderr)
+        self.assertEqual(no_drift_removed, [])
+
+        cleaned_drift, cleaned_drift_removed = run_cleanup_with_stubbed_volumes(
+            ("existing-a", "existing-b"),
+            ("created-one", "existing-a", "existing-b"),
+            ("existing-a", "existing-b"),
+        )
+        self.assertNotEqual(cleaned_drift.returncode, 0)
+        self.assertEqual(cleaned_drift_removed, ["created-one"])
+
+        failed_delete, failed_delete_removed = run_cleanup_with_stubbed_volumes(
+            ("existing-a", "existing-b"),
+            ("created-one", "existing-a", "existing-b"),
+            ("created-one", "existing-a", "existing-b"),
+            failed_removal="created-one",
+        )
+        self.assertNotEqual(failed_delete.returncode, 0)
+        self.assertEqual(failed_delete_removed, ["created-one"])
+
+    def test_reusable_contract_requires_created_volume_drift_status(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        marker = 'test ! -s "${platform_ci_dir}/volumes.created" || cleanup_status=1'
+        self.assertIn(marker, workflow)
+        mutated = workflow.replace(marker, "removed-created-volume-drift-status", 1)
+        self.assertTrue(validate_root_safety_workflow(mutated))
 
     def test_platform_contract_text_in_comments_or_unrelated_steps_is_rejected(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
