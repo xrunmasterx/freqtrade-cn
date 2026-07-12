@@ -116,7 +116,7 @@ PLATFORM_CONTROL_ENVIRONMENT = {
     "PLATFORM_DATABASE_USERNAME": "platform_control",
 }
 PLATFORM_ROLE_SCRIPT_SHA256 = (
-    "51f862ca35827ade4d1384c57ac44e4f0ca70796421fd5a254e60951c4140a14"
+    "e10d7394c9ba1a55625a0510d9fc6c7b3329c4c898b98e594561d495e224d67b"
 )
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
@@ -931,7 +931,8 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     column_fragments = (
         "FORMAT('REVOKE %S (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE', "
         "PRIVILEGE.PRIVILEGE_TYPE, ATTRIBUTE.ATTNAME, NAMESPACE.NSPNAME, "
-        "RELATION.RELNAME, COLUMN_GRANTEE_ROLE.ROLNAME, COLUMN_GRANTOR_ROLE.ROLNAME)",
+        "RELATION.RELNAME, COLUMN_GRANTEE_ROLE.ROLNAME, COLUMN_GRANTOR_ROLE.ROLNAME) "
+        "AS REVOKE_PRIVILEGE",
         "FROM PG_ATTRIBUTE AS ATTRIBUTE",
         "JOIN PG_CLASS AS RELATION ON RELATION.OID = ATTRIBUTE.ATTRELID",
         "JOIN PG_NAMESPACE AS NAMESPACE ON NAMESPACE.OID = RELATION.RELNAMESPACE",
@@ -947,9 +948,20 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         "ORDER BY COLUMN_GRANTEE_ROLE.ROLNAME, NAMESPACE.NSPNAME, RELATION.RELNAME, "
         "ATTRIBUTE.ATTNAME, PRIVILEGE.PRIVILEGE_TYPE, COLUMN_GRANTOR_ROLE.ROLNAME",
     )
+    column_execution = (
+        "SELECT FORMAT('SET ROLE %I', COLUMN_GRANTOR_ROLE.ROLNAME) AS SET_ROLE, "
+        "FORMAT('REVOKE %S (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, ATTRIBUTE.ATTNAME, NAMESPACE.NSPNAME, "
+        "RELATION.RELNAME, COLUMN_GRANTEE_ROLE.ROLNAME, COLUMN_GRANTOR_ROLE.ROLNAME) "
+        "AS REVOKE_PRIVILEGE, 'RESET ROLE' AS RESET_ROLE FROM PG_ATTRIBUTE AS ATTRIBUTE"
+    )
     if (
         any(compact.count(fragment) != 1 for fragment in column_fragments)
         or compact.count("GRANTED BY %I CASCADE") != 5
+        or compact.count(column_execution) != 1
+        or compact.count(" AS SET_ROLE") != 1
+        or compact.count(" AS REVOKE_PRIVILEGE") != 1
+        or compact.count(" AS RESET_ROLE") != 1
     ):
         errors.append("platform role initializer residual column cleanup differs")
 

@@ -89,15 +89,18 @@ REVOKE ALL PRIVILEGES ON SCHEMA public FROM platform_control, platform_superviso
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM platform_control, platform_supervisor CASCADE;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM platform_control, platform_supervisor CASCADE;
 
-SELECT format(
-    'REVOKE %s (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE',
-    privilege.privilege_type,
-    attribute.attname,
-    namespace.nspname,
-    relation.relname,
-    column_grantee_role.rolname,
-    column_grantor_role.rolname
-)
+SELECT
+    format('SET ROLE %I', column_grantor_role.rolname) AS set_role,
+    format(
+        'REVOKE %s (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        attribute.attname,
+        namespace.nspname,
+        relation.relname,
+        column_grantee_role.rolname,
+        column_grantor_role.rolname
+    ) AS revoke_privilege,
+    'RESET ROLE' AS reset_role
 FROM pg_attribute AS attribute
 JOIN pg_class AS relation ON relation.oid = attribute.attrelid
 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace

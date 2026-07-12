@@ -272,6 +272,14 @@ class PlatformControlContractTests(unittest.TestCase):
             script,
         )
         self.assertIn("FROM %I GRANTED BY %I CASCADE", script)
+        set_role = "FORMAT('SET ROLE %I', COLUMN_GRANTOR_ROLE.ROLNAME) AS SET_ROLE"
+        revoke = "AS REVOKE_PRIVILEGE"
+        reset_role = "'RESET ROLE' AS RESET_ROLE"
+        self.assertEqual(script.count(set_role), 1)
+        self.assertEqual(script.count(revoke), 1)
+        self.assertEqual(script.count(reset_role), 1)
+        self.assertLess(script.index(set_role), script.index(revoke))
+        self.assertLess(script.index(revoke), script.index(reset_role))
         self.assertIn(
             "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
             script,
@@ -327,12 +335,53 @@ class PlatformControlContractTests(unittest.TestCase):
                 "FROM %I CASCADE",
             ),
             "wrong grantor field": script.replace(
-                "    column_grantor_role.rolname\n)",
-                "    column_grantee_role.rolname\n)",
+                "        column_grantor_role.rolname\n    ) AS revoke_privilege",
+                "        column_grantee_role.rolname\n    ) AS revoke_privilege",
             ),
             "retargeted grantee": script.replace(
-                "    column_grantee_role.rolname,\n    column_grantor_role.rolname",
-                "    'PUBLIC',\n    column_grantor_role.rolname",
+                "        column_grantee_role.rolname,\n"
+                "        column_grantor_role.rolname",
+                "        'PUBLIC',\n        column_grantor_role.rolname",
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                errors = self.role_script_errors(mutated)
+                self.assertIn(
+                    "platform role initializer residual column cleanup differs",
+                    errors,
+                )
+
+    def test_role_validator_rejects_grantor_execution_context_mutations(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "missing set role": script.replace(
+                "    format('SET ROLE %I', column_grantor_role.rolname) AS set_role,\n",
+                "",
+            ),
+            "wrong set role source": script.replace(
+                "format('SET ROLE %I', column_grantor_role.rolname)",
+                "format('SET ROLE %I', column_grantee_role.rolname)",
+            ),
+            "missing reset role": script.replace(
+                "    'RESET ROLE' AS reset_role\n",
+                "",
+            ),
+            "reset before revoke": script.replace(
+                "    format(\n"
+                "        'REVOKE %s (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE',\n",
+                "    'RESET ROLE' AS reset_role,\n"
+                "    format(\n"
+                "        'REVOKE %s (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE',\n",
+            ).replace(
+                "    ) AS revoke_privilege,\n    'RESET ROLE' AS reset_role\n",
+                "    ) AS revoke_privilege\n",
+            ),
+            "extra statement between revoke and reset": script.replace(
+                "    ) AS revoke_privilege,\n    'RESET ROLE' AS reset_role\n",
+                "    ) AS revoke_privilege,\n"
+                "    'SELECT 1' AS extra_statement,\n"
+                "    'RESET ROLE' AS reset_role\n",
             ),
         }
         for name, mutated in mutations.items():
