@@ -457,4 +457,3 @@ git commit -m "ci: gate phase2c runtime supervisor"
 ```
 
 Expected: reviewed backend gitlink, root supervisor/CI/runbook only, clean worktree.
-

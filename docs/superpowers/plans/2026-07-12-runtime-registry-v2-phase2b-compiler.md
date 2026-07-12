@@ -537,4 +537,3 @@ git commit -m "ci: gate phase2b runtime compiler"
 ```
 
 Expected: reviewed backend gitlink plus root CLI/CI only; clean worktree.
-
