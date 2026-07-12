@@ -330,8 +330,43 @@ jobs:
           CREATE ROLE platform_ci_control_outbound NOLOGIN;
           CREATE ROLE platform_ci_supervisor_inbound NOLOGIN;
           CREATE ROLE platform_ci_supervisor_outbound NOLOGIN;
+          CREATE ROLE platform_ci_owner NOLOGIN;
           CREATE ROLE platform_ci_delegate NOLOGIN;
           CREATE ROLE platform_ci_downstream NOLOGIN;
+          ALTER DATABASE platform OWNER TO platform_ci_owner;
+          ALTER SCHEMA public OWNER TO platform_ci_owner;
+          SET ROLE platform_ci_owner;
+          CREATE TABLE public.platform_ci_acl_table (id integer);
+          CREATE SEQUENCE public.platform_ci_acl_sequence;
+          CREATE SCHEMA platform_ci_private;
+          CREATE TABLE platform_ci_private.probe (id integer);
+          CREATE SEQUENCE platform_ci_private.probe_sequence;
+          GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT DELETE ON TABLE public.platform_ci_acl_table
+            TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT UPDATE ON SEQUENCE public.platform_ci_acl_sequence
+            TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT USAGE ON SCHEMA platform_ci_private
+            TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT SELECT ON TABLE platform_ci_private.probe
+            TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT USAGE ON SEQUENCE platform_ci_private.probe_sequence
+            TO platform_ci_delegate WITH GRANT OPTION;
+          RESET ROLE;
+          SET ROLE platform_ci_delegate;
+          GRANT CREATE ON DATABASE platform TO platform_control;
+          GRANT CREATE ON SCHEMA public TO platform_supervisor;
+          GRANT DELETE ON TABLE public.platform_ci_acl_table
+            TO platform_control WITH GRANT OPTION;
+          GRANT UPDATE ON SEQUENCE public.platform_ci_acl_sequence TO platform_supervisor;
+          GRANT USAGE ON SCHEMA platform_ci_private TO platform_control;
+          GRANT SELECT ON TABLE platform_ci_private.probe TO platform_supervisor;
+          GRANT USAGE ON SEQUENCE platform_ci_private.probe_sequence TO platform_control;
+          RESET ROLE;
+          SET ROLE platform_control;
+          GRANT DELETE ON TABLE public.platform_ci_acl_table TO platform_ci_downstream;
+          RESET ROLE;
           GRANT UPDATE (desired_state) ON TABLE public.runtime_instances
             TO platform_ci_delegate WITH GRANT OPTION;
           SET ROLE platform_ci_delegate;
@@ -366,6 +401,35 @@ jobs:
                 AND column_grantee_role.rolname IN ('platform_control', 'platform_ci_downstream')
               ORDER BY column_grantor_role.rolname")"
           test "${acl_before}" = $'platform_ci_delegate|platform_control|UPDATE|t\nplatform_control|platform_ci_downstream|UPDATE|f'
+
+          object_acl_before="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM (
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+                WHERE database.datname = 'platform'
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+              ) AS object_acl
+              JOIN pg_roles AS grantor_role ON grantor_role.oid = object_acl.grantor
+              JOIN pg_roles AS grantee_role ON grantee_role.oid = object_acl.grantee
+              WHERE (grantor_role.rolname = 'platform_ci_delegate'
+                  AND grantee_role.rolname IN ('platform_control', 'platform_supervisor'))
+                 OR (grantor_role.rolname = 'platform_control'
+                  AND grantee_role.rolname = 'platform_ci_downstream')")"
+          test "${object_acl_before}" = "8"
 
           docker exec platform-postgres-ci sh /docker-entrypoint-initdb.d/init-platform-roles.sh
 
@@ -408,6 +472,48 @@ jobs:
               SELECT has_column_privilege('platform_control', 'public.runtime_instances', 'desired_state', 'UPDATE'),
                      has_column_privilege('platform_ci_downstream', 'public.runtime_instances', 'desired_state', 'UPDATE')")"
           test "${effective_after}" = "f|f"
+
+          object_acl_after="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM (
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+                WHERE database.datname = 'platform'
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+              ) AS object_acl
+              JOIN pg_roles AS grantor_role ON grantor_role.oid = object_acl.grantor
+              JOIN pg_roles AS grantee_role ON grantee_role.oid = object_acl.grantee
+              WHERE (grantor_role.rolname = 'platform_ci_delegate'
+                  AND grantee_role.rolname IN ('platform_control', 'platform_supervisor'))
+                 OR (grantor_role.rolname = 'platform_control'
+                  AND grantee_role.rolname = 'platform_ci_downstream')")"
+          test "${object_acl_after}" = "0"
+
+          object_effective_after="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT has_database_privilege('platform_control', 'platform', 'CREATE'),
+                     has_schema_privilege('platform_supervisor', 'public', 'CREATE'),
+                     has_table_privilege('platform_control', 'public.platform_ci_acl_table', 'DELETE'),
+                     has_sequence_privilege('platform_supervisor', 'public.platform_ci_acl_sequence', 'UPDATE'),
+                     has_schema_privilege('platform_control', 'platform_ci_private', 'USAGE'),
+                     has_table_privilege('platform_supervisor', 'platform_ci_private.probe', 'SELECT'),
+                     has_sequence_privilege('platform_control', 'platform_ci_private.probe_sequence', 'USAGE'),
+                     has_table_privilege('platform_ci_downstream', 'public.platform_ci_acl_table', 'DELETE')")"
+          test "${object_effective_after}" = "f|f|f|f|f|f|f|f"
 
           database_privileges="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
@@ -766,6 +872,11 @@ jobs:
           expect_role_denied platform_supervisor delete "DELETE FROM runtime_instances WHERE instance_id = 'ci-instance'"
           expect_role_denied platform_supervisor truncate "TRUNCATE TABLE runtime_instances"
           expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions SET payload = payload"
+          expect_role_denied platform_control database-create "CREATE SCHEMA phase2a_control_database_probe"
+          expect_role_denied platform_control delegated-table "DELETE FROM public.platform_ci_acl_table"
+          expect_role_denied platform_supervisor delegated-sequence "SELECT setval('public.platform_ci_acl_sequence', 1)"
+          expect_role_denied platform_control private-schema "SELECT * FROM platform_ci_private.probe"
+          expect_role_denied platform_supervisor private-table "SELECT * FROM platform_ci_private.probe"
 
           docker create \
             --name platform-control-ci \
@@ -810,6 +921,47 @@ jobs:
             sleep 1
           done
           test "${ready}" -eq 1
+
+          python - "${platform_ci_dir}" <<'PY'
+          import os
+          import secrets
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          sentinel = secrets.token_urlsafe(32)
+          sentinel_file = root / "query-sentinel"
+          response_file = root / "query-rejection.json"
+          config_file = root / "query-rejection.curl"
+          sentinel_file.write_text(sentinel, encoding="utf-8")
+          config_file.write_text(
+              'url = "http://127.0.0.1:8090/api/v2/ping?private_key='
+              + sentinel
+              + '"\n'
+              + f'output = "{response_file}"\n'
+              + 'write-out = "%{http_code}"\n'
+              + "silent\nshow-error\n",
+              encoding="utf-8",
+          )
+          os.chmod(sentinel_file, 0o600)
+          os.chmod(config_file, 0o600)
+          PY
+          query_status="$(curl --config "${platform_ci_dir}/query-rejection.curl")"
+          test "${query_status}" = "400"
+          python - "${platform_ci_dir}/query-rejection.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if response != {"detail": "unexpected_query_parameters"}:
+              raise SystemExit("query rejection response differs")
+          PY
+          docker logs platform-control-ci > "${platform_ci_dir}/query-container.log" 2>&1
+          if grep --fixed-strings --file "${platform_ci_dir}/query-sentinel" \
+            "${platform_ci_dir}/query-container.log"; then
+            exit 1
+          fi
 
           python - "${platform_ci_dir}/api_password" "${platform_ci_dir}/login.netrc" <<'PY'
           import os

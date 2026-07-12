@@ -276,7 +276,7 @@ class PlatformControlContractTests(unittest.TestCase):
             ),
             4,
         )
-        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 5)
+        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 9)
         self.assertGreaterEqual(script.count(" CASCADE"), 5)
 
     def test_role_script_clears_residual_column_privileges_before_regrant(self) -> None:
@@ -315,6 +315,107 @@ class PlatformControlContractTests(unittest.TestCase):
         cleanup = script.index("CROSS JOIN LATERAL ACLEXPLODE(ATTRIBUTE.ATTACL)")
         first_grant = script.index("GRANT CONNECT ON DATABASE PLATFORM")
         self.assertLess(cleanup, first_grant)
+
+    def test_role_script_sweeps_all_object_acls_by_original_grantor(self) -> None:
+        script = " ".join(self.role_script().upper().split())
+        fragments = (
+            "ACLEXPLODE(DATABASE.DATACL)",
+            "DATABASE.DATNAME = 'PLATFORM'",
+            "ACLEXPLODE(NAMESPACE.NSPACL)",
+            "ACLEXPLODE(RELATION.RELACL)",
+            "RELATION.RELKIND IN ('R', 'P', 'V', 'M', 'F')",
+            "RELATION.RELKIND = 'S'",
+            "NAMESPACE.NSPNAME <> 'INFORMATION_SCHEMA'",
+            "NAMESPACE.NSPNAME !~ '^PG_'",
+            "PRIVILEGE.PRIVILEGE_TYPE IN ('CONNECT', 'CREATE', 'TEMPORARY')",
+            "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'CREATE')",
+            "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', "
+            "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')",
+            "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'SELECT', 'UPDATE')",
+        )
+        for fragment in fragments:
+            self.assertIn(fragment, script)
+        self.assertEqual(script.count("AS OBJECT_SET_ROLE"), 4)
+        self.assertEqual(script.count("AS OBJECT_REVOKE_PRIVILEGE"), 4)
+        self.assertEqual(script.count("AS OBJECT_RESET_ROLE"), 4)
+        self.assertLess(
+            script.index("ACLEXPLODE(DATABASE.DATACL)"),
+            script.index("GRANT CONNECT ON DATABASE PLATFORM"),
+        )
+
+    def test_role_validator_rejects_object_acl_sweep_mutations(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "missing grantor join": script.replace(
+                "JOIN pg_roles AS object_grantor_role ON "
+                "object_grantor_role.oid = privilege.grantor\n",
+                "",
+                1,
+            ),
+            "missing database catalog": script.replace(
+                "CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege",
+                "CROSS JOIN LATERAL aclexplode(NULL::aclitem[]) AS privilege",
+                1,
+            ),
+            "public only schema": script.replace(
+                "namespace.nspname <> 'information_schema'",
+                "namespace.nspname = 'public'",
+                1,
+            ),
+            "missing sequence": script.replace("relation.relkind = 'S'", "FALSE", 1),
+            "wrong grantor": script.replace(
+                "object_grantor_role.rolname\n    ) AS object_revoke_privilege",
+                "object_grantee_role.rolname\n    ) AS object_revoke_privilege",
+                1,
+            ),
+            "wrong grantee": script.replace(
+                "        object_grantee_role.rolname,\n"
+                "        object_grantor_role.rolname\n"
+                "    ) AS object_revoke_privilege",
+                "        'PUBLIC',\n"
+                "        object_grantor_role.rolname\n"
+                "    ) AS object_revoke_privilege",
+                1,
+            ),
+            "interposed statement": script.replace(
+                "    ) AS object_revoke_privilege,\n"
+                "    'RESET ROLE' AS object_reset_role",
+                "    ) AS object_revoke_privilege,\n"
+                "    'SELECT 1' AS object_extra_statement,\n"
+                "    'RESET ROLE' AS object_reset_role",
+                1,
+            ),
+            "widened table privileges": script.replace(
+                "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')",
+                "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')",
+                1,
+            ),
+            "widened relation kinds": script.replace(
+                "relation.relkind IN ('r', 'p', 'v', 'm', 'f')",
+                "relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'i')",
+                1,
+            ),
+            "omitted non-public schemas": script.replace(
+                "  AND namespace.nspname !~ '^pg_'\n",
+                "  AND namespace.nspname = 'public'\n",
+                1,
+            ),
+            "comment-only database sweep": script.replace(
+                "FROM pg_database AS database\n"
+                "CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege\n",
+                "FROM pg_database AS database\n"
+                "CROSS JOIN LATERAL aclexplode(NULL::aclitem[]) AS privilege\n"
+                "-- CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege\n",
+                1,
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, script)
+                self.assertIn(
+                    "platform role initializer residual object cleanup differs",
+                    self.role_script_errors(mutated),
+                )
 
     def test_role_validator_rejects_closed_artifact_byte_drift(self) -> None:
         errors = self.role_script_errors(self.role_script() + "\n# harmless byte drift\n")

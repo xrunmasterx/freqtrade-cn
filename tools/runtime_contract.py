@@ -116,7 +116,7 @@ PLATFORM_CONTROL_ENVIRONMENT = {
     "PLATFORM_DATABASE_USERNAME": "platform_control",
 }
 PLATFORM_ROLE_SCRIPT_SHA256 = (
-    "10f4d7cce0d9a4081ea910181fd990ddde86234dd0f8ac9c44f5a990942230aa"
+    "638ea0d149b808662b39671d2e61247a0f7d34e820da2105727b664da87738de"
 )
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
@@ -934,6 +934,68 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     if any(active.count(fragment) != 1 for fragment in revocations):
         errors.append("platform role initializer revocation inventory differs")
 
+    object_formats = (
+        "FORMAT('REVOKE %S ON DATABASE %I FROM %I GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, DATABASE.DATNAME, OBJECT_GRANTEE_ROLE.ROLNAME, "
+        "OBJECT_GRANTOR_ROLE.ROLNAME) AS OBJECT_REVOKE_PRIVILEGE",
+        "FORMAT('REVOKE %S ON SCHEMA %I FROM %I GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, NAMESPACE.NSPNAME, OBJECT_GRANTEE_ROLE.ROLNAME, "
+        "OBJECT_GRANTOR_ROLE.ROLNAME) AS OBJECT_REVOKE_PRIVILEGE",
+        "FORMAT('REVOKE %S ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, NAMESPACE.NSPNAME, RELATION.RELNAME, "
+        "OBJECT_GRANTEE_ROLE.ROLNAME, OBJECT_GRANTOR_ROLE.ROLNAME) "
+        "AS OBJECT_REVOKE_PRIVILEGE",
+        "FORMAT('REVOKE %S ON SEQUENCE %I.%I FROM %I GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, NAMESPACE.NSPNAME, RELATION.RELNAME, "
+        "OBJECT_GRANTEE_ROLE.ROLNAME, OBJECT_GRANTOR_ROLE.ROLNAME) "
+        "AS OBJECT_REVOKE_PRIVILEGE",
+    )
+    object_fragment_counts = {
+        "CROSS JOIN LATERAL ACLEXPLODE(DATABASE.DATACL) AS PRIVILEGE": 2,
+        "CROSS JOIN LATERAL ACLEXPLODE(NAMESPACE.NSPACL) AS PRIVILEGE": 2,
+        "CROSS JOIN LATERAL ACLEXPLODE(RELATION.RELACL) AS PRIVILEGE": 3,
+        "DATABASE.DATNAME = 'PLATFORM'": 1,
+        "NAMESPACE.NSPNAME <> 'INFORMATION_SCHEMA'": 4,
+        "NAMESPACE.NSPNAME !~ '^PG_'": 4,
+        "RELATION.RELKIND IN ('R', 'P', 'V', 'M', 'F')": 3,
+        "RELATION.RELKIND = 'S'": 2,
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('CONNECT', 'CREATE', 'TEMPORARY')": 1,
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'CREATE')": 1,
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE', "
+        "'TRUNCATE', 'REFERENCES', 'TRIGGER')": 1,
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'SELECT', 'UPDATE')": 1,
+        "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('CONNECT', 'CREATE', 'TEMPORARY')": 1,
+        "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('USAGE', 'CREATE')": 1,
+        "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE', "
+        "'TRUNCATE', 'REFERENCES', 'TRIGGER')": 1,
+        "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('USAGE', 'SELECT', 'UPDATE')": 1,
+        "OBJECT_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')": 4,
+        "JOIN PG_ROLES AS OBJECT_GRANTOR_ROLE ON "
+        "OBJECT_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR": 4,
+        "RAISE EXCEPTION 'FIXED_PLATFORM_ROLE_OWNS_OBJECT'": 1,
+        "RAISE EXCEPTION 'UNSUPPORTED_PLATFORM_ROLE_AUTHORITY'": 1,
+    }
+    object_execution_prefix = (
+        "SELECT FORMAT('SET ROLE %I', OBJECT_GRANTOR_ROLE.ROLNAME) "
+        "AS OBJECT_SET_ROLE, FORMAT("
+    )
+    if (
+        any(
+            compact.count(fragment) != expected_count
+            for fragment, expected_count in object_fragment_counts.items()
+        )
+        or any(compact.count(fragment) != 1 for fragment in object_formats)
+        or compact.count(object_execution_prefix) != 4
+        or compact.count(" AS OBJECT_SET_ROLE") != 4
+        or compact.count(" AS OBJECT_REVOKE_PRIVILEGE") != 4
+        or compact.count(" AS OBJECT_RESET_ROLE") != 4
+        or compact.count(
+            "AS OBJECT_REVOKE_PRIVILEGE, 'RESET ROLE' AS OBJECT_RESET_ROLE"
+        )
+        != 4
+    ):
+        errors.append("platform role initializer residual object cleanup differs")
+
     column_fragments = (
         "FORMAT('REVOKE %S (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE', "
         "PRIVILEGE.PRIVILEGE_TYPE, ATTRIBUTE.ATTNAME, NAMESPACE.NSPNAME, "
@@ -962,8 +1024,8 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         "AS REVOKE_PRIVILEGE, 'RESET ROLE' AS RESET_ROLE FROM PG_ATTRIBUTE AS ATTRIBUTE"
     )
     if (
-        any(compact.count(fragment) != 1 for fragment in column_fragments)
-        or compact.count("GRANTED BY %I CASCADE") != 5
+        any(compact.count(fragment) < 1 for fragment in column_fragments)
+        or compact.count("GRANTED BY %I CASCADE") != 9
         or compact.count(column_execution) != 1
         or compact.count(" AS SET_ROLE") != 1
         or compact.count(" AS REVOKE_PRIVILEGE") != 1
@@ -1014,11 +1076,19 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
 
     membership_position = active.find("FROM PG_AUTH_MEMBERS AS MEMBERSHIP")
     revoke_position = active.find("REVOKE ALL PRIVILEGES ON DATABASE PLATFORM")
-    column_position = active.find("FROM PG_ATTRIBUTE AS ATTRIBUTE")
+    object_position = active.find("AS OBJECT_SET_ROLE")
+    column_position = active.find("AS SET_ROLE")
     grant_position = active.find("GRANT CONNECT ON DATABASE PLATFORM")
     if (
-        min(membership_position, revoke_position, column_position, grant_position) < 0
-        or not membership_position < revoke_position < column_position < grant_position
+        min(
+            membership_position,
+            revoke_position,
+            object_position,
+            column_position,
+            grant_position,
+        )
+        < 0
+        or not membership_position < revoke_position < object_position < column_position < grant_position
     ):
         errors.append("platform role initializer must revoke before granting")
     return errors

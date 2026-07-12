@@ -90,6 +90,170 @@ REVOKE ALL PRIVILEGES ON SCHEMA public FROM platform_control, platform_superviso
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM platform_control, platform_supervisor CASCADE;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM platform_control, platform_supervisor CASCADE;
 
+DO $authority_guard$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_database AS database
+        JOIN pg_roles AS owner_role ON owner_role.oid = database.datdba
+        WHERE owner_role.rolname IN ('platform_control', 'platform_supervisor')
+        UNION ALL
+        SELECT 1
+        FROM pg_namespace AS namespace
+        JOIN pg_roles AS owner_role ON owner_role.oid = namespace.nspowner
+        WHERE owner_role.rolname IN ('platform_control', 'platform_supervisor')
+        UNION ALL
+        SELECT 1
+        FROM pg_class AS relation
+        JOIN pg_roles AS owner_role ON owner_role.oid = relation.relowner
+        WHERE owner_role.rolname IN ('platform_control', 'platform_supervisor')
+    ) THEN
+        RAISE EXCEPTION 'fixed_platform_role_owns_object';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_database AS database
+        CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+        JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
+        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+          AND (database.datname <> 'platform'
+            OR privilege.privilege_type NOT IN ('CONNECT', 'CREATE', 'TEMPORARY'))
+        UNION ALL
+        SELECT 1
+        FROM pg_namespace AS namespace
+        CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+        JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
+        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+          AND (namespace.nspname = 'information_schema'
+            OR namespace.nspname ~ '^pg_'
+            OR privilege.privilege_type NOT IN ('USAGE', 'CREATE'))
+        UNION ALL
+        SELECT 1
+        FROM pg_class AS relation
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+        JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
+        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+          AND (namespace.nspname = 'information_schema'
+            OR namespace.nspname ~ '^pg_'
+            OR (relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND privilege.privilege_type NOT IN
+                ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'))
+            OR (relation.relkind = 'S'
+              AND privilege.privilege_type NOT IN ('USAGE', 'SELECT', 'UPDATE'))
+            OR relation.relkind NOT IN ('r', 'p', 'v', 'm', 'f', 'S'))
+        UNION ALL
+        SELECT 1
+        FROM pg_attribute AS attribute
+        JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+        JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
+        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+          AND (namespace.nspname = 'information_schema'
+            OR namespace.nspname ~ '^pg_'
+            OR relation.relkind NOT IN ('r', 'p', 'v', 'm', 'f')
+            OR privilege.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES'))
+    ) THEN
+        RAISE EXCEPTION 'unsupported_platform_role_authority';
+    END IF;
+END
+$authority_guard$;
+
+SELECT
+    format('SET ROLE %I', object_grantor_role.rolname) AS object_set_role,
+    format(
+        'REVOKE %s ON DATABASE %I FROM %I GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        database.datname,
+        object_grantee_role.rolname,
+        object_grantor_role.rolname
+    ) AS object_revoke_privilege,
+    'RESET ROLE' AS object_reset_role
+FROM pg_database AS database
+CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+JOIN pg_roles AS object_grantee_role ON object_grantee_role.oid = privilege.grantee
+JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.grantor
+WHERE database.datname = 'platform'
+  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND privilege.privilege_type IN ('CONNECT', 'CREATE', 'TEMPORARY')
+ORDER BY object_grantee_role.rolname, privilege.privilege_type, object_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', object_grantor_role.rolname) AS object_set_role,
+    format(
+        'REVOKE %s ON SCHEMA %I FROM %I GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        namespace.nspname,
+        object_grantee_role.rolname,
+        object_grantor_role.rolname
+    ) AS object_revoke_privilege,
+    'RESET ROLE' AS object_reset_role
+FROM pg_namespace AS namespace
+CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+JOIN pg_roles AS object_grantee_role ON object_grantee_role.oid = privilege.grantee
+JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.grantor
+WHERE namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND privilege.privilege_type IN ('USAGE', 'CREATE')
+ORDER BY object_grantee_role.rolname, namespace.nspname,
+    privilege.privilege_type, object_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', object_grantor_role.rolname) AS object_set_role,
+    format(
+        'REVOKE %s ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        namespace.nspname,
+        relation.relname,
+        object_grantee_role.rolname,
+        object_grantor_role.rolname
+    ) AS object_revoke_privilege,
+    'RESET ROLE' AS object_reset_role
+FROM pg_class AS relation
+JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+JOIN pg_roles AS object_grantee_role ON object_grantee_role.oid = privilege.grantee
+JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.grantor
+WHERE namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND privilege.privilege_type IN
+    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')
+ORDER BY object_grantee_role.rolname, namespace.nspname, relation.relname,
+    privilege.privilege_type, object_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', object_grantor_role.rolname) AS object_set_role,
+    format(
+        'REVOKE %s ON SEQUENCE %I.%I FROM %I GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        namespace.nspname,
+        relation.relname,
+        object_grantee_role.rolname,
+        object_grantor_role.rolname
+    ) AS object_revoke_privilege,
+    'RESET ROLE' AS object_reset_role
+FROM pg_class AS relation
+JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+JOIN pg_roles AS object_grantee_role ON object_grantee_role.oid = privilege.grantee
+JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.grantor
+WHERE namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+  AND relation.relkind = 'S'
+  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND privilege.privilege_type IN ('USAGE', 'SELECT', 'UPDATE')
+ORDER BY object_grantee_role.rolname, namespace.nspname, relation.relname,
+    privilege.privilege_type, object_grantor_role.rolname
+\gexec
+
 SELECT
     format('SET ROLE %I', column_grantor_role.rolname) AS set_role,
     format(
@@ -112,6 +276,9 @@ JOIN pg_roles AS column_grantor_role
   ON column_grantor_role.oid = privilege.grantor
 WHERE column_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
   AND privilege.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
   AND attribute.attnum > 0
   AND NOT attribute.attisdropped
 ORDER BY
