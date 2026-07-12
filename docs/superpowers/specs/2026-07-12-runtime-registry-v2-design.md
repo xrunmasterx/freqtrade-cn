@@ -513,6 +513,46 @@ Job invariants:
 - retry is rejected unless the failure latch is set;
 - retire requires no active attempt and retained state policy.
 
+Phase 2A fixes the command semantics before the Supervisor exists:
+
+- an idempotency lookup occurs before optimistic-version validation; the same
+  instance/key/action/expected-version returns the original job without another
+  version increment or audit, while a changed payload is
+  `idempotency_key_conflict`;
+- a new accepted command increments the instance optimistic version exactly
+  once and persists the job, instance change, and one append-only audit event in
+  one transaction;
+- `start` requires desired `stopped`, observed `registered` or `stopped`, no
+  failure latch, and no active attempt; it changes desired state to `running`
+  and queues a pending job;
+- `stop` is rejected only for a retired instance. It changes desired state to
+  `stopped` and queues a pending job when runtime work may remain. If desired
+  and observed state are already stopped/registered and no active attempt
+  exists, it records an immediately `succeeded` no-op job. Both forms increment
+  the version once for a new idempotency key;
+- `retry` requires desired `running`, observed `failed`, and
+  `failure_latched=true`; it clears the latch and queues a pending job;
+- `retire` requires desired `stopped`, observed `registered`, `stopped`, or
+  `failed`, and no active attempt. It retains the StateAllocation, immediately
+  sets desired/observed state to `retired`, records `retired_at`, and creates a
+  terminal `succeeded` job without Docker or filesystem mutation;
+- an active `pending`/`claimed`/`running` job rejects another new command;
+  `needs_reconciliation` also blocks new commands until a later explicit
+  reconciliation transition;
+- rejected commands create neither a job nor an instance mutation. Phase 2A
+  audits accepted lifecycle decisions; rejected-attempt auditing is added only
+  with a separate durable rejection contract rather than a second transaction.
+
+Claiming uses a lease of 1 through 3600 seconds. It first locks the oldest
+expired `claimed`/`running` job, marks it `needs_reconciliation`, writes an audit,
+and returns it without claiming another job. Otherwise it claims the oldest
+pending job with `FOR UPDATE SKIP LOCKED`, sets `started_at`, lease owner and
+expiry, writes an audit, and returns it. Completion accepts only `succeeded` or
+`failed`; success has no failure code and failure requires one. A completion
+observed after lease expiry becomes `needs_reconciliation` instead of trusting
+the late result. Supervisor-specific instance/attempt transitions remain Phase
+2C and are not invented by Phase 2A `complete_job()`.
+
 ### 8.2 Supervisor topology
 
 The Supervisor is a host-local Python process with two entry points:

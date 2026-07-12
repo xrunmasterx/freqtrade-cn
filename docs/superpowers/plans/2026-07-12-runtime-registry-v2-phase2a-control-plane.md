@@ -627,26 +627,54 @@ git commit -m "feat(platform): add registry alembic schema"
 - Create: `freqtrade/freqtrade/platform/runtime_repository.py`
 - Create: `freqtrade/freqtrade/platform/runtime_service.py`
 - Modify: `freqtrade/freqtrade/platform/__init__.py`
+- Create: `freqtrade/tests/platform/postgres_test_support.py`
+- Create: `freqtrade/tests/platform/conftest.py`
+- Modify: `freqtrade/tests/platform/test_platform_migrations.py`
 - Test: `freqtrade/tests/platform/test_runtime_repository.py`
 - Test: `freqtrade/tests/platform/test_runtime_service.py`
 
 **Interfaces:**
-- Produces `RuntimeRepository.get_instance()`, `list_instances()`, `create_job()`, `claim_next_job()`, `complete_job()`, `append_audit()`.
-- Produces `RuntimeApplicationService.request(command, actor) -> RuntimeJobView`.
+- Produces read-only `RuntimeQueryRepository` protocol with `get_instance()`,
+  `list_instances()`, `list_attempts()`, and `list_jobs()`.
+- Produces `RuntimeRepository` protocol extending the query contract with
+  `create_job()`, `claim_next_job()`, `complete_job()`, and `append_audit()`.
+- Produces `SqlRuntimeRepository(engine, clock, id_factory)` as the sole SQL
+  implementation. Every public call owns a short SQLAlchemy `Session`
+  transaction; no global or long-lived mutable Session is stored.
+- Produces stable exceptions `RuntimeNotFound`, `RuntimeConflict`, and
+  `RuntimeInvalidTransition`; their messages are stable codes without caller
+  payload, database details, or secrets.
+- Produces frozen, extra-forbidding `RuntimeInstanceAuditState` and
+  `RuntimeAuditEvent` inputs. Audit state contains only desired/lifecycle state,
+  failure latch, and optimistic version; provenance is a closed source value,
+  not caller-supplied JSON. `append_audit(event)` cannot accept bodies, headers,
+  credentials, tokens, paths, DSNs, secret identity/version, or arbitrary
+  provenance.
+- Produces `RuntimeApplicationService.request(command, actor) -> RuntimeJobView`;
+  actor is one identifier-pattern actor type such as `operator_cli` and is
+  validated before repository access.
 - `claim_next_job()` uses `SELECT ... FOR UPDATE SKIP LOCKED` on PostgreSQL.
+- Exact mutating signatures are:
+
+```text
+create_job(command: RuntimeLifecycleCommand, actor: Identifier) -> RuntimeJobView
+claim_next_job(lease_owner: Identifier, lease_seconds: int[1..3600]) -> RuntimeJobView | None
+complete_job(job_id: Identifier, status: succeeded|failed, failure_code: Identifier|None) -> RuntimeJobView
+append_audit(event: RuntimeAuditEvent) -> None
+```
 
 - [ ] **Step 1: Write RED tests for idempotency, stale versions, and lease claim**
 
 ```python
 def test_create_job_is_idempotent_for_same_instance_key(repository, stopped_instance) -> None:
-    first = repository.create_job(stopped_instance, command("start", "key-1", version=0))
-    second = repository.create_job(stopped_instance, command("start", "key-1", version=0))
+    first = repository.create_job(command(stopped_instance, "start", "key-1", version=0), "operator_cli")
+    second = repository.create_job(command(stopped_instance, "start", "key-1", version=0), "operator_cli")
     assert second.job_id == first.job_id
 
 
 def test_stale_expected_version_fails_without_job(repository, stopped_instance) -> None:
     with pytest.raises(RuntimeConflict, match="stale_instance_version"):
-        repository.create_job(stopped_instance, command("start", "key-2", version=9))
+        repository.create_job(command(stopped_instance, "start", "key-2", version=9), "operator_cli")
     assert repository.list_jobs(stopped_instance.instance_id) == ()
 
 
@@ -655,6 +683,24 @@ def test_postgres_claimers_skip_locked_jobs(postgres_repository) -> None:
     second = postgres_repository.claim_next_job("supervisor-b", lease_seconds=30)
     assert first.job_id != second.job_id
 ```
+
+Add RED coverage for: conflicting reuse of an idempotency key; exactly one
+version increment and audit; rollback of job/instance/audit on injected audit
+failure; active-job and `needs_reconciliation` blocking; all start/stop/retry/
+retire rules; terminal no-op stop and retire; read-view ordering and unknown
+instance behavior; closed actor/audit inputs; lease bounds; stale lease reclaim;
+late completion reconciliation; completion failure-code invariants; two real
+PostgreSQL claimers skipping locked rows; and zero SQLite claims of PostgreSQL
+locking semantics.
+
+Move the hardened Task 3 test-PostgreSQL URL validation/reset helpers into
+`tests/platform/postgres_test_support.py` and expose the `postgres_url` fixture
+from `tests/platform/conftest.py`. Refactor the migration test to import those
+helpers. This is a mechanical single-source move: preserve the pre-connect
+`dbname`/`database` rejection, `SELECT current_database()` pre-DDL guard,
+redacted representation, stable skip reason, `platform_test*` exact match, and
+all existing guard regressions. Task 4 and later tests must not copy a second
+schema-reset implementation.
 
 - [ ] **Step 2: Run RED**
 
@@ -667,6 +713,40 @@ Expected: missing repository/service imports.
 - [ ] **Step 3: Implement transactional repository**
 
 Use a repository-owned `Session` transaction. `create_job()` locks the instance row, checks optimistic version and action/state rules, returns the existing row for an identical idempotency key, rejects a conflicting key payload, increments instance optimistic version once, and inserts job plus append-only audit in one commit.
+
+The idempotency lookup is before the version check so replay of the original
+command still returns the original job after the first request incremented the
+instance version. Identical means the same instance, action, idempotency key,
+and expected version. Replays add no audit. New accepted commands use these
+exact rules:
+
+```text
+start  : desired=stopped, lifecycle in {registered,stopped}, latch=false,
+         no active attempt -> desired=running, pending job
+stop   : any non-retired instance -> desired=stopped, pending job;
+         if already desired=stopped, lifecycle in {registered,stopped}, and no
+         active attempt -> immediately succeeded no-op job
+retry  : desired=running, lifecycle=failed, latch=true
+         -> latch=false, pending job
+retire : desired=stopped, lifecycle in {registered,stopped,failed}, no active
+         attempt -> retain allocation, desired/lifecycle=retired,
+         retired_at=now, immediately succeeded job
+```
+
+Every new accepted command increments optimistic version once, including
+terminal no-op stop/retire. Active attempt states are exactly
+`pending/validating/launching/healthy/stopping`. Existing active jobs
+`pending/claimed/running` reject with `active_job_exists`; an existing
+`needs_reconciliation` rejects with `reconciliation_required`. Retired, latch,
+retry, start, and retire failures use stable action-specific transition codes.
+Rejected commands persist no job, audit, or instance mutation.
+
+`RuntimeAuditEvent` maps only its typed fields into `RuntimeAuditEventRecord`.
+Internally generated state JSON has the exact four keys in
+`RuntimeInstanceAuditState`; provenance JSON has only the closed `source` key.
+Job IDs, audit IDs, and UTC-aware timestamps come from injected factories for
+deterministic tests; production defaults use collision-resistant UUID-based
+identifiers and UTC time.
 
 `claim_next_job()` uses:
 
@@ -685,16 +765,34 @@ statement = (
 
 Lease reclaim returns the stale row as `needs_reconciliation`; it never directly creates another attempt.
 
+Before pending claim, lock the oldest expired `claimed`/`running` row ordered by
+lease expiry and job ID. Reclaim sets status `needs_reconciliation`,
+`completed_at=now`, and stable `failure_code=stale_lease`, appends an audit, and
+returns that row without claiming another. Otherwise claim the oldest pending
+row, set status `claimed`, `started_at` once, lease owner/expiry, append an audit,
+and commit. `complete_job()` accepts only claimed/running jobs. If its lease is
+expired, it records and returns `needs_reconciliation` rather than accepting the
+late result. `succeeded` requires no failure code; `failed` requires one. It
+sets terminal time, clears lease fields, and appends an audit in the same
+transaction. Phase 2C adds attempt/instance observed-state transitions; Task 4
+does not guess them.
+
 - [ ] **Step 4: Run GREEN and commit**
 
 ```powershell
 python -m pytest tests/platform/test_runtime_repository.py tests/platform/test_runtime_service.py -q -p no:cacheprovider
-ruff check freqtrade/platform/runtime_repository.py freqtrade/platform/runtime_service.py tests/platform/test_runtime_repository.py tests/platform/test_runtime_service.py
-git add freqtrade/platform/runtime_repository.py freqtrade/platform/runtime_service.py freqtrade/platform/__init__.py tests/platform/test_runtime_repository.py tests/platform/test_runtime_service.py
+$env:PLATFORM_TEST_POSTGRES_URL = "<isolated platform_test database URL>"
+python -m pytest tests/platform/test_platform_migrations.py tests/platform/test_runtime_repository.py tests/platform/test_runtime_service.py -q -p no:cacheprovider
+ruff check freqtrade/platform/runtime_repository.py freqtrade/platform/runtime_service.py tests/platform/postgres_test_support.py tests/platform/conftest.py tests/platform/test_platform_migrations.py tests/platform/test_runtime_repository.py tests/platform/test_runtime_service.py
+git add freqtrade/platform/runtime_repository.py freqtrade/platform/runtime_service.py freqtrade/platform/__init__.py tests/platform/postgres_test_support.py tests/platform/conftest.py tests/platform/test_platform_migrations.py tests/platform/test_runtime_repository.py tests/platform/test_runtime_service.py
 git commit -m "feat(platform): persist idempotent runtime jobs"
 ```
 
-Expected: dialect-neutral tests pass on SQLite and lock/constraint semantics pass on PostgreSQL.
+Expected: dialect-neutral tests pass on SQLite; locking, claim concurrency,
+lease, rollback, and constraint semantics pass on PostgreSQL with zero skips;
+the complete platform suite and Task 3 migration safety regressions remain
+green. Remove the test-only environment value and all uniquely named temporary
+PostgreSQL containers/anonymous volumes after verification.
 
 ---
 
