@@ -221,7 +221,7 @@ git commit -m "feat(platform): establish production database boundary"
 
 **Interfaces:**
 - Produces closed enums: `RuntimeOwnerKind`, `RuntimeManagementMode`, `RuntimeDesiredState`, `RuntimeLifecycleStatus`, `RuntimeAttemptStatus`, `RuntimeAction`, `RuntimeJobStatus`.
-- Produces frozen models: `RuntimeOwnerRef`, `RuntimeInstanceView`, `RuntimeAttemptView`, `RuntimeLifecycleCommand`.
+- Produces frozen models: `RuntimeOwnerRef`, `RuntimeInstanceView`, `RuntimeAttemptView`, `RuntimeJobView`, `RuntimeLifecycleCommand`.
 
 - [ ] **Step 1: Write failing state-machine tests**
 
@@ -299,14 +299,87 @@ class RuntimeLifecycleStatus(StrEnum):
     RETIRED = "retired"
 
 
+class RuntimeAttemptStatus(StrEnum):
+    PENDING = "pending"
+    VALIDATING = "validating"
+    LAUNCHING = "launching"
+    HEALTHY = "healthy"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    FAILED = "failed"
+
+
 class RuntimeAction(StrEnum):
     START = "start"
     STOP = "stop"
     RETRY = "retry"
     RETIRE = "retire"
+
+
+class RuntimeJobStatus(StrEnum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    NEEDS_RECONCILIATION = "needs_reconciliation"
 ```
 
 Use one frozen Pydantic base model with identifier pattern `^[a-z0-9][a-z0-9_-]{0,127}$`. `RuntimeLifecycleCommand` contains only `instance_id`, `action`, `idempotency_key`, and non-negative `expected_instance_version`; it has no raw arguments field.
+
+Use `AwareDatetime` for every timestamp and `Literal["paper", "live"]` for
+the closed environment field. The query contracts are exact summaries:
+
+```text
+RuntimeInstanceView
+- instance_id: Identifier
+- instance_kind: Identifier
+- owner_ref: RuntimeOwnerRef
+- management_mode: RuntimeManagementMode
+- runtime_spec_revision_id: Identifier
+- environment: Literal["paper", "live"]
+- state_allocation_id: Identifier
+- desired_state: RuntimeDesiredState
+- lifecycle_status: RuntimeLifecycleStatus
+- failure_latched: bool
+- optimistic_version: int >= 0
+- created_at: AwareDatetime
+- retired_at: AwareDatetime | None
+
+RuntimeAttemptView
+- attempt_id: Identifier
+- instance_id: Identifier
+- attempt_number: int >= 1
+- runtime_spec_revision_id: Identifier
+- adapter_template_revision_id: Identifier
+- status: RuntimeAttemptStatus
+- health_result: Identifier | None
+- started_at: AwareDatetime | None
+- stopped_at: AwareDatetime | None
+- exit_code: int | None
+- failure_code: Identifier | None
+
+RuntimeJobView
+- job_id: Identifier
+- instance_id: Identifier
+- requested_action: RuntimeAction
+- idempotency_key: Identifier
+- expected_instance_version: int >= 0
+- status: RuntimeJobStatus
+- lease_owner: Identifier | None
+- lease_expires_at: AwareDatetime | None
+- requested_at: AwareDatetime
+- started_at: AwareDatetime | None
+- completed_at: AwareDatetime | None
+- failure_code: Identifier | None
+```
+
+These views do not include arbitrary payloads, secret identities/versions,
+secret or host paths, Docker project internals, or request/response bodies.
+The complete immutable attempt provenance remains a persistence concern for
+Task 3 and later purpose-specific read contracts. Repository/application rules
+in Task 4 must treat `needs_reconciliation` as blocking a new lifecycle command
+until explicit reconciliation has established external state.
 
 - [ ] **Step 4: Run GREEN and commit**
 

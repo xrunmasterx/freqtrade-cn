@@ -390,6 +390,22 @@ Attempt status is one of:
 Attempt numbers are unique per instance and monotonically increasing. Attempt
 records cannot be updated to another RuntimeSpec, image, or secret version.
 
+The Phase 2A read model is deliberately smaller than the immutable attempt
+record. `RuntimeAttemptView` contains exactly `attempt_id`, `instance_id`,
+`attempt_number`, `runtime_spec_revision_id`, `adapter_template_revision_id`,
+`status`, nullable `health_result`, nullable `started_at`, nullable
+`stopped_at`, nullable `exit_code`, and nullable `failure_code`. Exact image,
+component, secret-version, project, and container provenance remains persisted
+on the attempt record and is exposed only through later purpose-specific,
+non-secret contracts. The summary view never carries secret values, secret
+paths, host paths, or an arbitrary JSON payload.
+
+The Phase 2A `RuntimeInstanceView` contains exactly `instance_id`,
+`instance_kind`, typed `owner_ref`, `management_mode`,
+`runtime_spec_revision_id`, closed `environment` (`paper` or `live`),
+`state_allocation_id`, `desired_state`, `lifecycle_status`, `failure_latched`,
+non-negative `optimistic_version`, `created_at`, and nullable `retired_at`.
+
 ### 7.3 Restart semantics
 
 - a controlled restart stops the active attempt and creates the next attempt;
@@ -419,6 +435,27 @@ RuntimeLifecycleJob
 - completed_at
 - failure_code
 ```
+
+Job status is closed to:
+
+- `pending`;
+- `claimed`;
+- `running`;
+- `succeeded`;
+- `failed`;
+- `needs_reconciliation`.
+
+`pending`, `claimed`, and `running` are active states. `succeeded` and `failed`
+are definitive terminal states. `needs_reconciliation` is a blocked terminal
+claim outcome: it does not authorize a retry or another attempt, and the
+application service must reject a new lifecycle command until explicit
+reconciliation has established the external state.
+
+The Phase 2A `RuntimeJobView` contains exactly `job_id`, `instance_id`,
+`requested_action`, `idempotency_key`, non-negative
+`expected_instance_version`, `status`, nullable `lease_owner`, nullable
+`lease_expires_at`, `requested_at`, nullable `started_at`, nullable
+`completed_at`, and nullable `failure_code`.
 
 Actions are closed to:
 
