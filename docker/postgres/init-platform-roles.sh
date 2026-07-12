@@ -90,17 +90,33 @@ REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM platform_control, plat
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM platform_control, platform_supervisor CASCADE;
 
 SELECT format(
-    'REVOKE %s (%I) ON TABLE %I.%I FROM %I CASCADE',
-    privilege_type,
-    column_name,
-    table_schema,
-    table_name,
-    grantee
+    'REVOKE %s (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE',
+    privilege.privilege_type,
+    attribute.attname,
+    namespace.nspname,
+    relation.relname,
+    column_grantee_role.rolname,
+    column_grantor_role.rolname
 )
-FROM information_schema.column_privileges
-WHERE grantee IN ('platform_control', 'platform_supervisor')
-  AND privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
-ORDER BY grantee, table_schema, table_name, column_name, privilege_type
+FROM pg_attribute AS attribute
+JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+JOIN pg_roles AS column_grantee_role
+  ON column_grantee_role.oid = privilege.grantee
+JOIN pg_roles AS column_grantor_role
+  ON column_grantor_role.oid = privilege.grantor
+WHERE column_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND privilege.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+  AND attribute.attnum > 0
+  AND NOT attribute.attisdropped
+ORDER BY
+    column_grantee_role.rolname,
+    namespace.nspname,
+    relation.relname,
+    attribute.attname,
+    privilege.privilege_type,
+    column_grantor_role.rolname
 \gexec
 
 GRANT CONNECT ON DATABASE platform TO platform_control, platform_supervisor;

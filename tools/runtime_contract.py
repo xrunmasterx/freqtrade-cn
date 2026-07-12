@@ -116,7 +116,7 @@ PLATFORM_CONTROL_ENVIRONMENT = {
     "PLATFORM_DATABASE_USERNAME": "platform_control",
 }
 PLATFORM_ROLE_SCRIPT_SHA256 = (
-    "baa604f6bfcf494e33cd2c1b8486ea6e0deea33120edf77175e4fdc6384d71c5"
+    "51f862ca35827ade4d1384c57ac44e4f0ca70796421fd5a254e60951c4140a14"
 )
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
@@ -802,11 +802,16 @@ def _platform_path_matches(value: object, expected: Path) -> bool:
 
 
 def _normalize_platform_role_script(content: bytes) -> str | None:
+    if content.startswith(b"\xef\xbb\xbf") or b"\x00" in content:
+        return None
     try:
         script = content.decode("utf-8")
     except UnicodeError:
         return None
-    return script.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = script.replace("\r\n", "\n")
+    if "\r" in normalized:
+        return None
+    return normalized
 
 
 def _active_platform_role_script(script: str) -> str:
@@ -924,14 +929,28 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         errors.append("platform role initializer revocation inventory differs")
 
     column_fragments = (
-        "FORMAT('REVOKE %S (%I) ON TABLE %I.%I FROM %I CASCADE', PRIVILEGE_TYPE, "
-        "COLUMN_NAME, TABLE_SCHEMA, TABLE_NAME, GRANTEE)",
-        "FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES",
-        "GRANTEE IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
-        "PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
-        "ORDER BY GRANTEE, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, PRIVILEGE_TYPE",
+        "FORMAT('REVOKE %S (%I) ON TABLE %I.%I FROM %I GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, ATTRIBUTE.ATTNAME, NAMESPACE.NSPNAME, "
+        "RELATION.RELNAME, COLUMN_GRANTEE_ROLE.ROLNAME, COLUMN_GRANTOR_ROLE.ROLNAME)",
+        "FROM PG_ATTRIBUTE AS ATTRIBUTE",
+        "JOIN PG_CLASS AS RELATION ON RELATION.OID = ATTRIBUTE.ATTRELID",
+        "JOIN PG_NAMESPACE AS NAMESPACE ON NAMESPACE.OID = RELATION.RELNAMESPACE",
+        "CROSS JOIN LATERAL ACLEXPLODE(ATTRIBUTE.ATTACL) AS PRIVILEGE",
+        "JOIN PG_ROLES AS COLUMN_GRANTEE_ROLE ON "
+        "COLUMN_GRANTEE_ROLE.OID = PRIVILEGE.GRANTEE",
+        "JOIN PG_ROLES AS COLUMN_GRANTOR_ROLE ON "
+        "COLUMN_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR",
+        "COLUMN_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
+        "ATTRIBUTE.ATTNUM > 0",
+        "NOT ATTRIBUTE.ATTISDROPPED",
+        "ORDER BY COLUMN_GRANTEE_ROLE.ROLNAME, NAMESPACE.NSPNAME, RELATION.RELNAME, "
+        "ATTRIBUTE.ATTNAME, PRIVILEGE.PRIVILEGE_TYPE, COLUMN_GRANTOR_ROLE.ROLNAME",
     )
-    if any(compact.count(fragment) != 1 for fragment in column_fragments):
+    if (
+        any(compact.count(fragment) != 1 for fragment in column_fragments)
+        or compact.count("GRANTED BY %I CASCADE") != 5
+    ):
         errors.append("platform role initializer residual column cleanup differs")
 
     expected_catalog = [
@@ -977,7 +996,7 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
 
     membership_position = active.find("FROM PG_AUTH_MEMBERS AS MEMBERSHIP")
     revoke_position = active.find("REVOKE ALL PRIVILEGES ON DATABASE PLATFORM")
-    column_position = active.find("FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES")
+    column_position = active.find("FROM PG_ATTRIBUTE AS ATTRIBUTE")
     grant_position = active.find("GRANT CONNECT ON DATABASE PLATFORM")
     if (
         min(membership_position, revoke_position, column_position, grant_position) < 0

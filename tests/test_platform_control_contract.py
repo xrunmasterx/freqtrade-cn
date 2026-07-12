@@ -252,21 +252,35 @@ class PlatformControlContractTests(unittest.TestCase):
             ),
             4,
         )
-        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 4)
+        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 5)
         self.assertGreaterEqual(script.count(" CASCADE"), 5)
 
     def test_role_script_clears_residual_column_privileges_before_regrant(self) -> None:
         script = " ".join(self.role_script().upper().split())
-        self.assertIn("FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES", script)
         self.assertIn(
-            "PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
+            "CROSS JOIN LATERAL ACLEXPLODE(ATTRIBUTE.ATTACL) AS PRIVILEGE",
             script,
         )
         self.assertIn(
-            "GRANTEE IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
+            "JOIN PG_ROLES AS COLUMN_GRANTEE_ROLE ON "
+            "COLUMN_GRANTEE_ROLE.OID = PRIVILEGE.GRANTEE",
             script,
         )
-        cleanup = script.index("FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES")
+        self.assertIn(
+            "JOIN PG_ROLES AS COLUMN_GRANTOR_ROLE ON "
+            "COLUMN_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR",
+            script,
+        )
+        self.assertIn("FROM %I GRANTED BY %I CASCADE", script)
+        self.assertIn(
+            "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
+            script,
+        )
+        self.assertIn(
+            "COLUMN_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
+            script,
+        )
+        cleanup = script.index("CROSS JOIN LATERAL ACLEXPLODE(ATTRIBUTE.ATTACL)")
         first_grant = script.index("GRANT CONNECT ON DATABASE PLATFORM")
         self.assertLess(cleanup, first_grant)
 
@@ -277,6 +291,57 @@ class PlatformControlContractTests(unittest.TestCase):
     def test_role_validator_normalizes_crlf_before_hashing(self) -> None:
         crlf_script = self.role_script().replace("\n", "\r\n")
         self.assertEqual(self.role_script_errors(crlf_script), [])
+
+    def test_role_script_byte_normalization_rejects_non_shell_equivalent_bytes(self) -> None:
+        lf = self.role_script().encode("utf-8")
+        self.assertEqual(runtime_contract._normalize_platform_role_script(lf), lf.decode())
+        self.assertEqual(
+            runtime_contract._normalize_platform_role_script(lf.replace(b"\n", b"\r\n")),
+            lf.decode(),
+        )
+        mixed = lf.replace(b"\n", b"\r\n", 1)
+        self.assertEqual(runtime_contract._normalize_platform_role_script(mixed), lf.decode())
+
+        parts = lf.split(b"\n", 2)
+        invalid = {
+            "lone CR": parts[0] + b"\r" + parts[1] + b"\n" + parts[2],
+            "mixed with lone CR": mixed.replace(b"set -eu", b"set\r-eu", 1),
+            "UTF-8 BOM": b"\xef\xbb\xbf" + lf,
+            "NUL": lf[:8] + b"\x00" + lf[8:],
+            "invalid UTF-8": b"\xff" + lf,
+        }
+        for name, content in invalid.items():
+            with self.subTest(name=name):
+                self.assertIsNone(runtime_contract._normalize_platform_role_script(content))
+
+    def test_role_validator_rejects_column_original_grantor_mutations(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "removed grantor join": script.replace(
+                "JOIN pg_roles AS column_grantor_role\n"
+                "  ON column_grantor_role.oid = privilege.grantor\n",
+                "",
+            ),
+            "current user only revoke": script.replace(
+                "FROM %I GRANTED BY %I CASCADE",
+                "FROM %I CASCADE",
+            ),
+            "wrong grantor field": script.replace(
+                "    column_grantor_role.rolname\n)",
+                "    column_grantee_role.rolname\n)",
+            ),
+            "retargeted grantee": script.replace(
+                "    column_grantee_role.rolname,\n    column_grantor_role.rolname",
+                "    'PUBLIC',\n    column_grantor_role.rolname",
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                errors = self.role_script_errors(mutated)
+                self.assertIn(
+                    "platform role initializer residual column cleanup differs",
+                    errors,
+                )
 
     def test_role_validator_rejects_grant_inventory_and_recipient_mutations(self) -> None:
         script = self.role_script()
@@ -347,7 +412,10 @@ class PlatformControlContractTests(unittest.TestCase):
             ),
             "column cleanup": (
                 "platform role initializer residual column cleanup differs",
-                script.replace("FROM information_schema.column_privileges", "FROM (SELECT NULL)"),
+                script.replace(
+                    "CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege",
+                    "CROSS JOIN LATERAL (SELECT NULL) AS privilege",
+                ),
             ),
             "sequence revoke": (
                 "platform role initializer revocation inventory differs",
