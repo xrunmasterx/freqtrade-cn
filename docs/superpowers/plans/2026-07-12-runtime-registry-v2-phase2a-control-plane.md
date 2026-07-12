@@ -1111,6 +1111,9 @@ files,
 and uses `pg_read_file` plus `format(..., %L)`/`\gexec` or an equivalently safe
 psql-variable mechanism. Passwords must never be shell-interpolated into SQL,
 placed on process arguments, printed, or included in ordinary environment.
+Secret normalization removes at most one terminal LF or CRLF sequence and
+preserves every other character, including leading/trailing spaces and tabs;
+generic `trim`/`btrim` is forbidden.
 
 The script revokes PUBLIC database/schema creation privileges and grants only:
 
@@ -1128,7 +1131,12 @@ The script revokes PUBLIC database/schema creation privileges and grants only:
 
 The script conditionally grants table privileges only when migrated tables
 exist; Task 7 reruns it after Alembic upgrade and verifies effective privileges.
-Do not use broad `ALTER DEFAULT PRIVILEGES` for future tables.
+Before regrant, every rerun resets both fixed roles to `NOSUPERUSER`,
+`NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`, and `NOINHERIT`;
+removes every inbound/outbound role membership; and revokes table-, sequence-,
+schema-, database-, and residual column-level privileges with downstream grant
+cleanup before applying the exact allowlist. Do not use broad
+`ALTER DEFAULT PRIVILEGES` for future tables.
 
 - [ ] **Step 4: Extend bootstrap and contract validation**
 
@@ -1163,8 +1171,13 @@ DSN environment values, exact secret allocation, and every least-privilege
 mount/process rule above. Mutation tests must prove it rejects an admin or
 supervisor secret on platform-control, a wildcard host publication, a loopback
 container bind in container mode, Docker/root/state mounts, direct passwords or
-DSNs, extra services/secrets/networks/volumes, and broadened privilege script
-statements.
+DSNs, extra services/secrets/networks/volumes, and any role-script byte drift.
+The reviewed role script is a closed artifact whose SHA-256 is pinned by the
+validator; semantic checks additionally require exact hardening/revocation
+clauses. Mutation tests must reject narrow extra column grants, a valid grant
+retargeted to `PUBLIC` or another role, changed SELECT/INSERT/UPDATE inventory,
+required text moved into comments, duplicate grants, and missing role-attribute,
+membership, or residual-column cleanup.
 
 Extend `compose_runtime.py` only enough to permit the exact read-only command
 `--profile platform config [--quiet] [--format json]`. It must reject platform
