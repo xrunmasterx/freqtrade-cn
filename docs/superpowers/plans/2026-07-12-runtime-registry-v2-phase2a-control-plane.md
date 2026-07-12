@@ -1137,7 +1137,12 @@ removes every inbound/outbound role membership; and revokes table-, sequence-,
 schema-, database-, and residual column-level privileges with downstream grant
 cleanup before applying the exact allowlist. Membership and residual-column
 revocation enumerate and quote each original grantor and use `GRANTED BY ...
-CASCADE`, so delegated grants cannot survive a rerun. Do not use broad
+CASCADE`, so delegated grants cannot survive a rerun. For database-object/column
+privileges, `GRANTED BY` must name the current user: each residual revoke first
+uses a quoted `SET ROLE` to its recorded original grantor, performs the exact
+revoke, and immediately `RESET ROLE` before processing the next ACL entry. The
+initializer runs as the bootstrap superuser, which may select any recorded
+grantor. Do not use broad
 `ALTER DEFAULT PRIVILEGES` for future tables.
 
 - [ ] **Step 4: Extend bootstrap and contract validation**
@@ -1183,7 +1188,8 @@ retargeted to `PUBLIC` or another role, changed SELECT/INSERT/UPDATE inventory,
 required text moved into comments, duplicate grants, and missing role-attribute,
 membership, or residual-column cleanup.
 Residual-column mutation tests must also reject missing/incorrect original
-grantor joins or `GRANTED BY`, and artifact tests must accept LF/CRLF while
+grantor joins, missing/incorrect `SET ROLE`/`RESET ROLE` ordering, or
+`GRANTED BY`, and artifact tests must accept LF/CRLF while
 rejecting lone-CR and mixed shell-invalid line endings.
 
 Extend `compose_runtime.py` only enough to permit the exact read-only command
