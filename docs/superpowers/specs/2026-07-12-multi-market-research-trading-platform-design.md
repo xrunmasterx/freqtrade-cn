@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-12
 
-**Status:** Approved design; implementation planning not started
+**Status:** Approved target design; Phase 2 detailed planning in progress
 
 **Migration strategy:** Backward-compatible, staged migration
 
@@ -43,7 +43,9 @@ The architecture must remove the three-service ceiling without discarding the P0
 ### 2.1 Primary goals
 
 1. Make market, product, venue, account, strategy, bot, workspace, and runtime instance first-class domain objects instead of encoded service names.
-2. Preserve the existing Spot 8081, Futures 8082, and Research 8083 flows throughout migration.
+2. Preserve the existing Spot, Futures, Research, and human market-watch behavior
+   during migration, then remove the fixed 8081/8082/8083 service topology after
+   equivalent `platform-control:8090` paths pass acceptance.
 3. Let a user select a market at the top of the UI, then select a product, after which research and bot lists reflect that context.
 4. Define Research as a workspace, not as a bot or a single fixed service.
 5. Share non-market-specific global intelligence across research workspaces.
@@ -68,7 +70,12 @@ The architecture is successful when:
 - every bot decision records the research snapshot versions it consumed;
 - every live order can be traced to strategy, account, bot release, research, risk decision, execution adapter, and final execution report;
 - no AI agent can directly submit an exchange or broker write request;
-- the three legacy endpoints and state roots continue working until separately deprecated.
+- the original state roots remain untouched rollback evidence while 8081/8082/
+  8083 cease to be permanent services or public endpoints;
+- every supported K-line timeframe retains the current lower-cadence refresh
+  policy and does not depend on a Bot runtime being active;
+- human charts and governed AI/strategy consumers read the same canonical,
+  freshness-labelled market snapshot for the same market-data key.
 
 ## 3. Non-goals
 
@@ -97,7 +104,11 @@ This design does not:
 7. Broker and options live execution require later dedicated adapters and separate acceptance.
 8. Multiple accounts, strategies, and bots are supported.
 9. Every live order requires central risk approval.
-10. The existing three services become legacy registered instances, not permanent system categories.
+10. Existing Spot and Futures become migrated Bot RuntimeInstances; existing
+    Research becomes a migrated Workspace Worker RuntimeInstance. None is a
+    permanent platform service category.
+11. `platform-control` is the fixed loopback application API on
+    `127.0.0.1:8090`; Bot and Worker instances have no public host ports.
 
 ## 5. Product hierarchy
 
@@ -622,13 +633,13 @@ The current P0 protections remain binding:
 
 ### 13.4 Network and ports
 
-New runtime instances use internal addresses behind the control-plane proxy. They do not each require a public host port.
+Runtime instances use isolated internal addresses and do not each require a
+public host port. The fixed loopback application ingress is
+`platform-control` on `127.0.0.1:8090`.
 
-Legacy aliases preserve:
-
-- 8081 for legacy spot;
-- 8082 for legacy OKX perpetual/futures;
-- 8083 for legacy A-share research.
+Ports 8081, 8082, and 8083 may exist only during the bounded compatibility and
+rollback window. Final Phase 2 cutover removes all three listeners after 8090
+control, chart, and research compatibility acceptance.
 
 ## 14. Data architecture
 
@@ -661,6 +672,31 @@ Multiple bots do not share a Freqtrade SQLite database. Existing P0 backup and r
 The initial research store uses Parquet plus DuckDB-compatible layouts for OHLCV, normalized events, features, reports, and backtest inputs. Object storage or an approved local artifact root owns immutable artifacts.
 
 ClickHouse, TimescaleDB, Redis, and distributed queues are deferred until measured scale requires them.
+
+Human market-watch reads use a canonical candle contract exposed by
+`platform-control`. The Phase 2 compatibility implementation may use a bounded
+in-process TTL cache and request coalescing over approved public-data adapters;
+it does not store high-frequency candles in control-plane PostgreSQL. Later
+market-data workers and hot storage can replace that implementation without
+changing the UI contract.
+
+The current multi-timeframe cadence is preserved as a versioned backend policy:
+
+| Timeframe | Refresh interval |
+|---|---:|
+| `1m` | 10 seconds |
+| `3m` | 30 seconds |
+| `5m`, `15m`, `30m` | 60 seconds |
+| `1h` / alias `60m` | 180 seconds |
+| `2h`, `4h` | 300 seconds |
+| `6h`, `8h`, `12h` | 600 seconds |
+| `1d`, `3d`, `1w`, `2w`, `1M`, `1y` | 900 seconds |
+
+The chart, Research, strategy, and AI layers consume one canonical market-data
+read contract. Market observation may run at the refresh cadence, while costly
+AI inference follows a separately governed schedule or material-change trigger.
+This prevents the requirement for fresh data from turning into an uncontrolled
+LLM invocation loop.
 
 ### 14.4 Time semantics
 
@@ -722,7 +758,20 @@ Normal market isolation must not create an operational blind spot.
 
 Existing v1 APIs and routes continue during migration. API v2 introduces catalogs, contexts, workspaces, bot releases, registry, and capabilities.
 
-Legacy 8081/8082/8083 routes map to legacy registered objects and may be deprecated only after separate evidence shows all callers migrated.
+The 8090 compatibility surface must preserve current human-watch behavior before
+the old endpoints are stopped. Base K-lines are platform market data and remain
+available when a Bot is stopped; strategy overlays are Bot-specific and may
+degrade independently.
+
+Live views distinguish forming from closed candles and provisional from confirmed
+signals. Historical decision replay uses recorded Bot/strategy/data/Research/risk
+snapshot identities; a present-day recomputation over revised data is labelled
+analysis rather than replay.
+
+Chart refresh is read-only observation. It never evaluates a trading strategy,
+creates an OrderIntent, wakes a Bot decision loop, changes a position, or submits
+an order. Strategy evaluation cadence and forming-candle policy belong to the
+immutable StrategyRelease/Bot policy.
 
 ## 16. Security, reliability, and failure handling
 
@@ -755,38 +804,44 @@ Existing workers may continue their immutable revision. New lifecycle changes fa
 
 ## 17. Compatibility migration
 
-The three existing services map to:
+The three existing processes map to:
 
 ```text
 freqtrade
-  -> legacy digital-asset spot bot and execution instance
+  -> migrated digital-asset spot bot runtime instance
 
 freqtrade-futures
-  -> legacy OKX digital-asset perpetual bot and execution instance
+  -> migrated OKX digital-asset perpetual bot runtime instance
 
 freqtrade-research
-  -> legacy A-share equity research workspace and web instance
+  -> migrated A-share equity workspace worker runtime instance
 ```
 
 Migration states are:
 
-- `legacy`;
-- `shadow`;
+- `discovered`;
+- `imported_stopped`;
+- `state_copied`;
 - `managed`;
-- `deprecated`.
+- `accepted`;
+- `rollback_retained`.
 
 The transition is:
 
 ```text
-Legacy
-  -> shadow registration
-  -> state and behavior comparison
+Existing Compose process
+  -> stopped registry import
+  -> verified backup and copied state
   -> managed lifecycle
-  -> legacy alias remains
-  -> separately approved deprecation
+  -> 8090 behavior comparison
+  -> remove 8081/8082/8083 listeners
+  -> retain inactive source as rollback evidence
 ```
 
-Existing SQLite files are mapped in place during the shadow phase. No destructive migration or silent state-root relocation is permitted.
+Existing SQLite files and research state are never shared writable or moved in
+place. The source remains untouched, the managed instance uses a new allocation,
+and rollback first proves the managed writer is absent. No destructive migration
+or silent state-root relocation is permitted.
 
 ## 18. Phased delivery plan
 
@@ -797,7 +852,8 @@ Deliver:
 - this architecture specification;
 - domain glossary;
 - current behavior and compatibility matrix;
-- explicit classification of the three current services as legacy instances.
+- explicit classification of Spot/Futures as Bot-like migration instances and
+  Research as a Workspace Worker migration instance.
 
 No runtime behavior changes.
 
@@ -815,7 +871,7 @@ Gate:
 
 - the three services behave unchanged;
 - planned markets cannot claim unavailable capability;
-- legacy tests remain green.
+- current compatibility tests remain green.
 
 Estimated effort: 4-7 person-weeks.
 
@@ -824,20 +880,30 @@ Estimated effort: 4-7 person-weeks.
 Deliver:
 
 - runtime-instance and adapter-template schemas;
-- legacy aliases;
+- fixed `platform-control:8090` read API;
+- existing-runtime migration records;
 - immutable runtime-spec compiler;
 - dynamic state and secret references;
 - internal addressing;
-- generalized health, emergency, backup, and restore contracts.
+- canonical Bot-independent candle reads preserving the complete current multi-
+  timeframe refresh policy, shared by UI and governed machine consumers;
+- forming/closed candle and provisional/confirmed signal semantics;
+- generalized health, emergency, backup, restore, and controlled cutover contracts.
 
 Gate:
 
 - a fourth paper bot launches without a Python service allowlist change or a hand-written arbitrary Compose service;
 - all current P0 provenance and launch controls remain;
-- legacy ports and state remain;
+- Spot/Futures run as managed Bot-like instances and Research as a managed
+  Workspace Worker instance;
+- no active listener remains on 8081, 8082, or 8083 after acceptance;
+- base K-lines remain available when a Bot is stopped and every supported
+  timeframe preserves its current cadence;
+- AI and strategy readers receive the same canonical freshness metadata without
+  obtaining trading credentials;
 - invalid runtime input fails before Docker.
 
-Estimated effort: 6-10 person-weeks.
+Estimated effort: 8-14 person-weeks.
 
 ### Phase 3: Strategy, account, and bot releases
 
@@ -848,11 +914,11 @@ Deliver:
 - bot definitions and releases;
 - scope derivation and immutable capability snapshots;
 - research-subscription schema;
-- legacy config importer.
+- migration config importer.
 
 Gate:
 
-- existing spot and futures configs import as legacy bot releases;
+- existing spot and futures migration owners rebind to ordinary BotReleases;
 - invalid strategy/account combinations cannot be created;
 - environment changes create a new release.
 
@@ -867,7 +933,7 @@ Deliver:
 - backend scope enforcement;
 - capability reasons;
 - global operations center;
-- legacy-route compatibility.
+- 8090 route compatibility.
 
 Gate:
 
@@ -974,7 +1040,8 @@ This is separately designed and authorized. It requires broker-specific executio
 
 Every phase must:
 
-1. preserve legacy service behavior unless deprecation is explicitly approved;
+1. preserve accepted product behavior through an explicit compatibility and
+   rollback gate;
 2. add schema and contract tests;
 3. provide adapter compliance tests where applicable;
 4. enforce capabilities on the backend and UI;
@@ -999,10 +1066,13 @@ Recommended path:
 
 1. retain the current P0 commits;
 2. implement Phase 1 and Phase 2 compatibly on this line or a reviewed child line;
-3. prove all three legacy services are registered aliases;
+3. prove the three existing processes are migrated into correctly typed managed
+   RuntimeInstances and the old public listeners are absent;
 4. prove a fourth paper instance does not require a hard-coded service change;
-5. rerun exact-SHA CI, remote checkout, online paper acceptance, and whole-branch review;
-6. then reassess readiness for main.
+5. prove the complete multi-timeframe chart cadence through 8090 with related Bots
+   stopped, including 1m/10-second behavior;
+6. rerun exact-SHA CI, remote checkout, online paper acceptance, and whole-branch review;
+7. then reassess readiness for main.
 
 No merge or PR-state change is implied by approval of this design.
 
@@ -1020,8 +1090,15 @@ No merge or PR-state change is implied by approval of this design.
 10. AI agents do not hold exchange write credentials.
 11. Every live order requires central risk approval.
 12. Runtime instances come from validated registry objects and trusted templates.
-13. Legacy services migrate through aliases and shadow validation.
+13. Existing services migrate through stopped import, copied state, managed
+    acceptance, and rollback retention; no permanent Legacy Facade remains.
 14. UI filtering and backend authorization remain consistent.
 15. PostgreSQL owns platform control data; Freqtrade SQLite remains per instance.
 16. Options research and options live execution are separate programs.
 17. The modular monolith is split only when measured operational needs justify service extraction.
+18. Market-data observation cadence, strategy evaluation cadence, and AI model-
+    inference cadence are separate governed policies.
+19. Historical replay uses recorded decision evidence; current-data recomputation
+    is never presented as the original decision.
+20. Chart and market-data refresh are read-only observations and never trigger
+    strategy evaluation or execution.
