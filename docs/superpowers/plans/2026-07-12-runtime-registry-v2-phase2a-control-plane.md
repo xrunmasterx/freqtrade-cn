@@ -819,6 +819,14 @@ PostgreSQL containers/anonymous volumes after verification.
 - Binds only configured loopback; production defaults exactly `127.0.0.1:8090`.
 - Exposes `/api/v2/ping`, `/api/v2/catalog`, `/api/v2/runtime-instances`, `/api/v2/runtime-instances/{instance_id}` and GET-only child views.
 - Mounts no lifecycle POST/PUT/PATCH/DELETE route and no Runtime Access forwarding in 2A.
+- Produces read-only `PlatformControlQueryRepository` with `ready()`,
+  `current_catalog()`, and the four `RuntimeQueryRepository` methods. Produces
+  `SqlPlatformControlQueryRepository(engine)` by composition; it does not expose
+  `create_job`, claim, complete, audit append, Session, Engine, or a lifecycle
+  repository property.
+- Exact protected response wrappers are `RuntimeInstancesResponse(instances)`,
+  `RuntimeAttemptsResponse(instance_id, attempts)`, and
+  `RuntimeJobsResponse(instance_id, jobs)`; models are frozen and extra-forbid.
 
 - [ ] **Step 1: Write failing API/auth tests**
 
@@ -840,6 +848,13 @@ def test_openapi_contains_no_lifecycle_write(client, auth_headers) -> None:
     assert set(paths["/api/v2/runtime-instances"]) == {"get"}
 ```
 
+Add RED tests for the exact route set and shapes; hidden-schema HEAD support;
+public ping readiness and protected Catalog/Registry reads; SQL Catalog rather
+than default snapshot behavior; unknown instance, invalid Registry data,
+Catalog unavailable, and database unavailable stable errors; absence of any
+lifecycle/Runtime Access/raw proxy route; no arbitrary query credential; and a
+repository object whose public surface contains no lifecycle method.
+
 - [ ] **Step 2: Run RED**
 
 ```powershell
@@ -852,6 +867,38 @@ Expected: missing `platform_control` package.
 
 `PlatformControlSettings` contains listen host/port, username, API password file, JWT secret file, and `PlatformDatabaseSettings`. It rejects non-loopback listen addresses in Phase 2. Secret files use constant-time comparison and the existing HS256 access/refresh token payload contract so FreqUI can authenticate without Bot credentials.
 
+Use a frozen, extra-forbidding settings model. `listen_host` accepts only the
+literal IPs `127.0.0.1` and `::1`, defaulting to `127.0.0.1`; it rejects names
+such as `localhost` and every non-loopback/wildcard address. Port defaults to
+8090 and is bounded to 1..65535. Username follows the platform Identifier
+contract. API/JWT secret paths must be absolute and distinct from one another
+and the database password path.
+
+`PlatformControlSettings.from_env()` reads only these fixed names:
+
+```text
+PLATFORM_CONTROL_LISTEN_HOST          optional, default 127.0.0.1
+PLATFORM_CONTROL_LISTEN_PORT          optional, default 8090
+PLATFORM_CONTROL_USERNAME             required
+PLATFORM_CONTROL_API_PASSWORD_FILE    required absolute path
+PLATFORM_CONTROL_JWT_SECRET_FILE      required absolute path
+PLATFORM_DATABASE_HOST                required
+PLATFORM_DATABASE_PORT                required
+PLATFORM_DATABASE_NAME                required
+PLATFORM_DATABASE_USERNAME            required
+PLATFORM_DATABASE_PASSWORD_FILE       required absolute path
+```
+
+No environment variable contains a secret value or DSN. Missing/invalid values
+raise stable errors that do not echo environment values or paths.
+
+The sole exact secret reader removes trailing CR/LF only and rejects empty,
+embedded CR/LF, or NUL content. JWT secrets are at least 32 characters. File,
+decode, and validation errors contain neither path nor content. App construction
+loads the two platform secrets once into a private redacted container; settings
+model dump/repr and OpenAPI never contain their values. Reject equal API/JWT
+secret values as well as equal paths.
+
 Auth routes are exactly:
 
 ```text
@@ -860,6 +907,15 @@ POST /api/v2/token/refresh
 ```
 
 Do not accept credentials in query parameters or log request headers.
+
+Reuse the existing HS256 token functions/payload, not the legacy global
+`get_api_config` dependency. Login and direct Basic reads compare both username
+and password with `secrets.compare_digest`. Bearer decode permits only HS256,
+requires the configured identity, and enforces token type. Access lifetime is
+15 minutes; refresh lifetime is 30 days. Login returns the existing
+`AccessAndRefreshToken` shape; refresh returns only `AccessToken`. Wrong token
+type, identity, algorithm, expiry, signature, Basic value, or query-only
+credential returns 401 without reflecting input.
 
 - [ ] **Step 4: Implement app and query routes**
 
@@ -882,7 +938,39 @@ def create_platform_app(
     return app
 ```
 
+The exact routes and responses are:
+
+```text
+GET/HEAD /ping                                      {"status":"pong"}, public;
+                                                    503 if repository.ready false/errors
+GET/HEAD /catalog                                   existing CatalogResponse, authenticated
+GET/HEAD /runtime-instances                         {"instances":[...]}, authenticated
+GET/HEAD /runtime-instances/{instance_id}           RuntimeInstanceView, authenticated
+GET/HEAD /runtime-instances/{instance_id}/attempts  {"instance_id":...,"attempts":[...]}
+GET/HEAD /runtime-instances/{instance_id}/jobs      {"instance_id":...,"jobs":[...]}
+```
+
+Register HEAD with `include_in_schema=False`; OpenAPI for each read path contains
+only `get`, while token paths contain only `post`. All protected routes use the
+same auth dependency. Resolve the instance before child queries. Stable errors:
+404 `runtime_instance_not_found`; 500 `invalid_registry_data` for
+`RuntimeDataError`; 503 `catalog_unavailable` for an uninitialized Catalog; 503
+`control_plane_unavailable` for SQLAlchemy/database readiness failures. Never
+return exception text, SQL, evidence, URL, file path, or credentials.
+
+`SqlPlatformControlQueryRepository` composes `SqlRuntimeRepository` and
+`SqlCatalogRepository` privately and delegates reads only. `current_catalog()`
+therefore reads the latest PostgreSQL revision and preserves the Phase 1 API
+shape without importing the legacy Catalog route or Bot API dependency.
+
 `__main__.py` loads settings from fixed environment variable names pointing to exact secret files, builds the engine/repository, and runs Uvicorn. It does not initialize schema.
+
+Importing `freqtrade.platform_control` or `__main__` has no startup side effect.
+`main()` creates `PlatformDatabaseSettings` through `from_env()`, creates the
+engine and read-only SQL composition, builds the app, and calls Uvicorn with the
+validated host/port. It never imports Docker tooling, reads Bot config/state,
+calls `create_all()`, runs Alembic, or copies a secret value into an environment
+variable.
 
 - [ ] **Step 5: Run GREEN, import audit, and commit**
 
@@ -894,7 +982,11 @@ git add freqtrade/platform_control tests/platform_control
 git commit -m "feat(platform): add authenticated control service"
 ```
 
-Expected: tests/Ruff/import pass and API schema contains no lifecycle mutation.
+Expected: tests/Ruff/import pass; token compatibility and secret non-disclosure
+pass; every protected route rejects unauthenticated/query-only credentials;
+HEAD works but is hidden from schema; API schema contains no lifecycle mutation
+or Runtime Access forwarding; imports and app construction perform no schema,
+Docker, Bot-state, or service-start side effect.
 
 ---
 

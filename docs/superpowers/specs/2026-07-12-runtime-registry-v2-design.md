@@ -1154,6 +1154,50 @@ It adds no POST, PUT, PATCH, or DELETE lifecycle route. Existing Basic/JWT
 credentials therefore do not gain container-control authority. A later RBAC-
 protected write API reuses `RuntimeApplicationService`.
 
+Phase 2A uses a read-only `PlatformControlQueryRepository` capability surface.
+It composes Catalog and Runtime query repositories and exposes only readiness,
+current Catalog, instance list/detail, attempts, and jobs. The API process is
+not handed a `RuntimeRepository` lifecycle interface even though both read and
+write implementations use the same database.
+
+The exact Phase 2A routes are:
+
+```text
+GET/HEAD /api/v2/ping                                      public liveness/readiness
+POST     /api/v2/token/login                               Basic login
+POST     /api/v2/token/refresh                             Bearer refresh token
+GET/HEAD /api/v2/catalog                                   authenticated
+GET/HEAD /api/v2/runtime-instances                         authenticated
+GET/HEAD /api/v2/runtime-instances/{instance_id}           authenticated
+GET/HEAD /api/v2/runtime-instances/{instance_id}/attempts  authenticated
+GET/HEAD /api/v2/runtime-instances/{instance_id}/jobs      authenticated
+```
+
+HEAD handlers are hidden from OpenAPI so each read path advertises only GET;
+they execute the same authorization/query boundary and return no body. Ping is
+the only unauthenticated read and returns `{"status":"pong"}` when the database
+readiness probe succeeds. Query parameters never carry usernames, passwords,
+tokens, instance credentials, or upstream targets.
+
+List responses are stable wrappers: `{"instances": [...]}` and child responses
+are `{"instance_id": "...", "attempts": [...]}` or
+`{"instance_id": "...", "jobs": [...]}`. Instance detail is the exact
+`RuntimeInstanceView`; Catalog keeps the Phase 1 `CatalogResponse` shape and is
+loaded from PostgreSQL, not a Bot process or global default snapshot. Unknown
+instances use stable `runtime_instance_not_found`; unavailable Catalog/database
+uses a non-secret stable service error; invalid persisted Registry data never
+returns raw validation/SQL/evidence details.
+
+Platform authentication preserves the current FreqUI HS256 payload contract:
+`identity.u`, `iat`, `exp`, and `type` (`access` or `refresh`). Access tokens live
+15 minutes and refresh tokens 30 days. Basic query authentication and token
+login compare both username and password with constant-time comparison. Bearer
+identity must equal the configured platform username; access tokens cannot
+refresh and refresh tokens cannot read protected routes. The API password and
+JWT signing secret are distinct exact files, loaded once at app construction,
+and are never copied into settings serialization, ordinary environment values,
+responses, errors, or logs.
+
 No API response includes secret values, secret paths, host paths, PostgreSQL DSN,
 Docker project internals unnecessary for the user, or research data roots.
 Market-data routes accept only closed catalog identifiers and bounded timeframe/
