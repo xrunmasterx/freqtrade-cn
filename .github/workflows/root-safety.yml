@@ -333,20 +333,18 @@ jobs:
           CREATE ROLE platform_ci_owner NOLOGIN;
           CREATE ROLE platform_ci_delegate NOLOGIN;
           CREATE ROLE platform_ci_downstream NOLOGIN;
-          ALTER DATABASE platform OWNER TO platform_ci_owner;
-          ALTER SCHEMA public OWNER TO platform_ci_owner;
-          SET ROLE platform_ci_owner;
           CREATE TABLE public.platform_ci_acl_table (id integer);
           CREATE SEQUENCE public.platform_ci_acl_sequence;
-          CREATE SCHEMA platform_ci_private;
-          CREATE TABLE platform_ci_private.probe (id integer);
-          CREATE SEQUENCE platform_ci_private.probe_sequence;
+          CREATE SCHEMA platform_ci_private AUTHORIZATION platform_ci_owner;
           GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION;
           GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION;
           GRANT DELETE ON TABLE public.platform_ci_acl_table
             TO platform_ci_delegate WITH GRANT OPTION;
           GRANT UPDATE ON SEQUENCE public.platform_ci_acl_sequence
             TO platform_ci_delegate WITH GRANT OPTION;
+          SET ROLE platform_ci_owner;
+          CREATE TABLE platform_ci_private.probe (id integer);
+          CREATE SEQUENCE platform_ci_private.probe_sequence;
           GRANT USAGE ON SCHEMA platform_ci_private
             TO platform_ci_delegate WITH GRANT OPTION;
           GRANT SELECT ON TABLE platform_ci_private.probe
@@ -735,7 +733,7 @@ jobs:
                 SELECT 'database', 'platform', '', role_name, 'CONNECT', 'postgres', false
                 FROM fixed_roles
                 UNION ALL
-                SELECT 'schema', 'public', '', role_name, 'USAGE', 'postgres', false
+                SELECT 'schema', 'public', '', role_name, 'USAGE', 'pg_database_owner', false
                 FROM fixed_roles
                 UNION ALL
                 SELECT 'table', 'public.' || table_name, '', role_name,
@@ -958,7 +956,7 @@ jobs:
               raise SystemExit("query rejection response differs")
           PY
           docker logs platform-control-ci > "${platform_ci_dir}/query-container.log" 2>&1
-          if grep --fixed-strings --file "${platform_ci_dir}/query-sentinel" \
+          if grep --quiet --fixed-strings --file "${platform_ci_dir}/query-sentinel" \
             "${platform_ci_dir}/query-container.log"; then
             exit 1
           fi

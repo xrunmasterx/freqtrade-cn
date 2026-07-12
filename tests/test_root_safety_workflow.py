@@ -378,7 +378,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'expect_role_denied platform_control delegated-table "DELETE FROM public.platform_ci_acl_table"',
         'expect_role_denied platform_supervisor delegated-sequence "SELECT setval(',
         'query_status="$(curl --config "${platform_ci_dir}/query-rejection.curl")"',
-        'grep --fixed-strings --file "${platform_ci_dir}/query-sentinel"',
+        'grep --quiet --fixed-strings --file "${platform_ci_dir}/query-sentinel"',
         "--user 1000:1000",
         "--read-only",
         "--init",
@@ -473,12 +473,45 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     ):
         if fragment not in active_sql_payload:
             errors.append(f"least-privilege SQL payload missing: {fragment}")
+    owner_changing_fragments = (
+        "ALTER DATABASE platform OWNER",
+        "ALTER SCHEMA public OWNER",
+    )
+    if any(fragment in active_sql_payload for fragment in owner_changing_fragments):
+        errors.append("least-privilege contamination changes production owner")
+    owner_grant_fragments = (
+        "CREATE SCHEMA platform_ci_private AUTHORIZATION platform_ci_owner",
+        "GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION",
+        "GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION",
+        "SET ROLE platform_ci_owner",
+    )
+    owner_grant_positions = [
+        active_sql_payload.find(fragment) for fragment in owner_grant_fragments
+    ]
+    if (
+        any(position < 0 for position in owner_grant_positions)
+        or owner_grant_positions[1] >= owner_grant_positions[3]
+        or owner_grant_positions[2] >= owner_grant_positions[3]
+    ):
+        errors.append("least-privilege owner grantor chain differs")
+    expected_schema_grantor = (
+        "SELECT 'schema', 'public', '', role_name, 'USAGE', "
+        "'pg_database_owner', false"
+    )
+    if least_privilege.count(expected_schema_grantor) != 1:
+        errors.append("least-privilege expected ACL grantor differs")
     for fragment in (
         "has_database_privilege(role_name, 'platform', 'TEMPORARY')",
         "has_column_privilege('platform_control'",
     ):
         if fragment not in active_shell:
             errors.append(f"least-privilege executable SQL query missing: {fragment}")
+
+    sentinel_matcher = (
+        'grep --quiet --fixed-strings --file "${platform_ci_dir}/query-sentinel"'
+    )
+    if active_shell.count(sentinel_matcher) != 1:
+        errors.append("least-privilege query sentinel matcher differs")
 
     denial_bodies = active_shell_function_bodies(least_privilege, "expect_role_denied")
     if len(denial_bodies) != 1:
@@ -1318,7 +1351,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             '"http://127.0.0.1:8090/api/v2/catalog"',
             '"http://127.0.0.1:8090/api/v2/runtime-instances"',
             'query_status="$(curl --config "${platform_ci_dir}/query-rejection.curl")"',
-            'grep --fixed-strings --file "${platform_ci_dir}/query-sentinel"',
+            'grep --quiet --fixed-strings --file "${platform_ci_dir}/query-sentinel"',
             "sentinel = secrets.token_urlsafe(32)",
             "os.chmod(sentinel_file, 0o600)",
             "os.chmod(config_file, 0o600)",
@@ -1342,6 +1375,108 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         )
         for forbidden in ("docker.sock", "ft_userdata/runtime", "docker compose"):
             self.assertNotIn(forbidden, step)
+
+    def test_contamination_preserves_production_owners_and_postgres_grantor(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+
+        self.assertNotIn("ALTER DATABASE platform OWNER", step)
+        self.assertNotIn("ALTER SCHEMA public OWNER", step)
+        self.assertIn(
+            "CREATE SCHEMA platform_ci_private AUTHORIZATION platform_ci_owner",
+            step,
+        )
+        database_grant = (
+            "GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION"
+        )
+        schema_grant = (
+            "GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION"
+        )
+        self.assertIn(database_grant, step)
+        self.assertIn(schema_grant, step)
+        self.assertLess(step.index(database_grant), step.index("SET ROLE platform_ci_owner"))
+        self.assertLess(step.index(schema_grant), step.index("SET ROLE platform_ci_owner"))
+        self.assertIn("'CONNECT', 'postgres', false", step)
+        self.assertIn("'USAGE', 'pg_database_owner', false", step)
+        self.assertNotIn("'schema', 'public', '', role_name, 'USAGE', 'postgres'", step)
+
+        for owner_change in (
+            "ALTER DATABASE platform OWNER TO platform_ci_owner;",
+            "ALTER SCHEMA public OWNER TO platform_ci_owner;",
+        ):
+            mutated = workflow.replace(
+                "CREATE ROLE platform_ci_delegate NOLOGIN;",
+                f"CREATE ROLE platform_ci_delegate NOLOGIN;\n          {owner_change}",
+                1,
+            )
+            self.assertIn(
+                "least-privilege contamination changes production owner",
+                validate_root_safety_workflow(mutated),
+            )
+        wrong_grantor = workflow.replace(
+            "'USAGE', 'pg_database_owner', false",
+            "'USAGE', 'postgres', false",
+            1,
+        )
+        self.assertIn(
+            "least-privilege expected ACL grantor differs",
+            validate_root_safety_workflow(wrong_grantor),
+        )
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_query_sentinel_matcher_is_quiet_and_non_reflective(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        script = step_run_script(workflow, PLATFORM_CI_STEPS[4])
+        lines = script.splitlines()
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("if grep ") and "query-sentinel" in line
+        )
+        end = next(
+            index for index in range(start + 1, len(lines)) if lines[index] == "fi"
+        )
+        checker = "\n".join(lines[start : end + 1]) + "\n"
+
+        self.assertIn("grep --quiet --fixed-strings --file", checker)
+        sentinel = "synthetic-private-sentinel-value"
+
+        def run_checker(log_content: str) -> subprocess.CompletedProcess[bytes]:
+            setup = (
+                'platform_ci_dir="$(mktemp -d)"\n'
+                'trap \'rm -rf "${platform_ci_dir}"\' EXIT\n'
+                "umask 077\n"
+                f"printf %s {shlex.quote(sentinel)} > \"${{platform_ci_dir}}/query-sentinel\"\n"
+                f"printf %s {shlex.quote(log_content)} > \"${{platform_ci_dir}}/query-container.log\"\n"
+                'test "$(stat -c %a "${platform_ci_dir}/query-sentinel")" = "600"\n'
+            )
+            return subprocess.run(
+                [shutil.which("bash") or "bash", "-s"],
+                input=(setup + checker).encode(),
+                capture_output=True,
+                check=False,
+            )
+
+        matched = run_checker(f"prefix {sentinel} suffix\n")
+        self.assertNotEqual(matched.returncode, 0)
+        self.assertEqual(matched.stdout, b"")
+        self.assertEqual(matched.stderr, b"")
+        self.assertNotIn(sentinel, checker)
+
+        unmatched = run_checker("no matching content\n")
+        self.assertEqual(unmatched.returncode, 0)
+        self.assertEqual(unmatched.stdout, b"")
+        self.assertEqual(unmatched.stderr, b"")
+
+        mutated = workflow.replace(
+            "grep --quiet --fixed-strings --file",
+            "grep --fixed-strings --file",
+            1,
+        )
+        self.assertIn(
+            "least-privilege query sentinel matcher differs",
+            validate_root_safety_workflow(mutated),
+        )
 
     def test_control_final_topology_is_exact_and_mutation_resistant(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
