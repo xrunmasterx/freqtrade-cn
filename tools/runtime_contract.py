@@ -116,7 +116,7 @@ PLATFORM_CONTROL_ENVIRONMENT = {
     "PLATFORM_DATABASE_USERNAME": "platform_control",
 }
 PLATFORM_ROLE_SCRIPT_SHA256 = (
-    "e10d7394c9ba1a55625a0510d9fc6c7b3329c4c898b98e594561d495e224d67b"
+    "10f4d7cce0d9a4081ea910181fd990ddde86234dd0f8ac9c44f5a990942230aa"
 )
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
@@ -913,8 +913,14 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     ):
         errors.append("platform role initializer membership cleanup differs")
 
-    revocations = (
+    database_authority_revocations = (
+        "REVOKE TEMPORARY ON DATABASE PLATFORM FROM PUBLIC;",
         "REVOKE CREATE ON DATABASE PLATFORM FROM PUBLIC;",
+    )
+    if any(active.count(fragment) != 1 for fragment in database_authority_revocations):
+        errors.append("platform role initializer database authority differs")
+
+    revocations = (
         "REVOKE CREATE ON SCHEMA PUBLIC FROM PUBLIC;",
         "REVOKE ALL PRIVILEGES ON DATABASE PLATFORM FROM PLATFORM_CONTROL, "
         "PLATFORM_SUPERVISOR CASCADE;",

@@ -74,7 +74,10 @@ The initializer is idempotent. It removes at most one terminal LF or CRLF from
 password files, preserves all other characters, resets dangerous role
 attributes and memberships, removes database/schema/table/sequence/column
 authority with downstream cascades, then applies the exact allowlist. Residual
-column revocation executes as each ACL's recorded original grantor.
+column revocation executes as each ACL's recorded original grantor. It also
+revokes `TEMPORARY` and `CREATE` on `platform` from `PUBLIC`, so neither fixed
+role inherits database DDL or temporary-table authority through PostgreSQL's
+default grants.
 
 ## Least privilege
 
@@ -87,7 +90,11 @@ It cannot update lifecycle state such as `runtime_instances.desired_state`.
 `platform_supervisor` receives CONNECT/USAGE, SELECT on the seven tables, and
 INSERT/UPDATE on the six Registry tables. Neither role receives DELETE,
 TRUNCATE, DDL, role-management, database-owner, broad default-table, or
-platform-control lifecycle authority.
+platform-control lifecycle authority. Root Safety checks the effective database
+matrix for both roles as `CONNECT=true`, `CREATE=false`, `TEMP=false`, then
+checks exact schema, table, column, sequence, ownership, membership, grantable,
+and residual-ACL inventories. Positive and negative SQL probes connect as each
+fixed identity; administrator `SET ROLE` is not acceptance evidence.
 
 ## CI-only acceptance evidence
 
@@ -106,13 +113,21 @@ Acceptance must show:
 - Injected dangerous attributes, bidirectional memberships, delegated column
   authority, and downstream authority are removed.
 - Exact control-role SELECT, request/audit INSERT, and terminal request UPDATE
-  operations succeed, while lifecycle-column UPDATE is denied.
+  operations succeed, while both fixed roles are denied temporary and persistent
+  CREATE, ALTER, DROP, DELETE, TRUNCATE, and out-of-allowlist UPDATE operations.
+- The application container is created while stopped on Docker's default bridge
+  so the exact `127.0.0.1:8090` publish is allocated, connected to
+  `freqtrade-platform-ci`, disconnected from `bridge`, and inspected for the
+  exact final network and port mapping before it is started or probed.
 - Platform-control reaches bounded `/api/v2/ping` readiness; authentication is
   obtained from a private file; Catalog and Registry reads succeed; `/docs`,
   `/redoc`, and `/openapi.json` return 404; lifecycle and Runtime Access routes
   are absent.
 - Both containers, the exact network, passfile, secret copies, token/probe
-  artifacts, and all other transient files are removed, with no volume drift.
+  artifacts, and all other transient files are removed. Cleanup computes the
+  exact before/after volume set difference, deletes only volumes created by the
+  acceptance, rechecks equality with the baseline, and preserves a non-zero
+  cleanup result for any forbidden drift.
 
 ## Health, logs, and backup prerequisite
 

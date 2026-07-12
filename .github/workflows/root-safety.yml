@@ -409,6 +409,252 @@ jobs:
                      has_column_privilege('platform_ci_downstream', 'public.runtime_instances', 'desired_state', 'UPDATE')")"
           test "${effective_after}" = "f|f"
 
+          database_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT role_name,
+                     has_database_privilege(role_name, 'platform', 'CONNECT'),
+                     has_database_privilege(role_name, 'platform', 'CREATE'),
+                     has_database_privilege(role_name, 'platform', 'TEMPORARY')
+              FROM (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              ORDER BY role_name")"
+          test "${database_privileges}" = $'platform_control|t|f|f\nplatform_supervisor|t|f|f'
+
+          schema_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT role_name,
+                     has_schema_privilege(role_name, 'public', 'USAGE'),
+                     has_schema_privilege(role_name, 'public', 'CREATE')
+              FROM (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              ORDER BY role_name")"
+          test "${schema_privileges}" = $'platform_control|t|f\nplatform_supervisor|t|f'
+
+          undeclared_schema_privilege_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_namespace AS namespace
+              CROSS JOIN (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              WHERE namespace.nspname <> 'public'
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND (has_schema_privilege(role_name, namespace.oid, 'USAGE')
+                  OR has_schema_privilege(role_name, namespace.oid, 'CREATE'))")"
+          test "${undeclared_schema_privilege_count}" = "0"
+
+          table_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH expected(role_name, table_name, can_select, can_insert, can_update) AS (
+                VALUES
+                  ('platform_control', 'platform_catalog_revisions', true, false, false),
+                  ('platform_control', 'runtime_instances', true, false, false),
+                  ('platform_control', 'runtime_attempts', true, false, false),
+                  ('platform_control', 'runtime_lifecycle_jobs', true, false, false),
+                  ('platform_control', 'runtime_endpoints', true, false, false),
+                  ('platform_control', 'runtime_access_requests', true, true, false),
+                  ('platform_control', 'runtime_audit_events', true, true, false),
+                  ('platform_supervisor', 'platform_catalog_revisions', true, false, false),
+                  ('platform_supervisor', 'runtime_instances', true, true, true),
+                  ('platform_supervisor', 'runtime_attempts', true, true, true),
+                  ('platform_supervisor', 'runtime_lifecycle_jobs', true, true, true),
+                  ('platform_supervisor', 'runtime_endpoints', true, true, true),
+                  ('platform_supervisor', 'runtime_access_requests', true, true, true),
+                  ('platform_supervisor', 'runtime_audit_events', true, true, true)
+              )
+              SELECT count(*)
+              FROM expected
+              WHERE has_table_privilege(role_name, format('public.%I', table_name), 'SELECT') <> can_select
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'INSERT') <> can_insert
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'UPDATE') <> can_update
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'DELETE')
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'TRUNCATE')
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'REFERENCES')
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'TRIGGER')")"
+          test "${table_privileges}" = "0"
+
+          undeclared_table_privilege_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_class AS relation
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND NOT (
+                  namespace.nspname = 'public'
+                  AND relation.relname IN (
+                    'platform_catalog_revisions', 'runtime_instances', 'runtime_attempts',
+                    'runtime_lifecycle_jobs', 'runtime_endpoints',
+                    'runtime_access_requests', 'runtime_audit_events'
+                  )
+                )
+                AND (has_table_privilege(role_name, relation.oid, 'SELECT')
+                  OR has_table_privilege(role_name, relation.oid, 'INSERT')
+                  OR has_table_privilege(role_name, relation.oid, 'UPDATE')
+                  OR has_table_privilege(role_name, relation.oid, 'DELETE')
+                  OR has_table_privilege(role_name, relation.oid, 'TRUNCATE')
+                  OR has_table_privilege(role_name, relation.oid, 'REFERENCES')
+                  OR has_table_privilege(role_name, relation.oid, 'TRIGGER'))")"
+          test "${undeclared_table_privilege_count}" = "0"
+
+          column_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT string_agg(table_name || '.' || column_name, E'\\n' ORDER BY table_name, column_name)
+              FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND has_column_privilege(
+                  'platform_control', format('public.%I', table_name), column_name, 'UPDATE'
+                )")"
+          test "${column_privileges}" = $'runtime_access_requests.completed_at\nruntime_access_requests.result_code\nruntime_access_requests.status'
+
+          column_acl_inventory="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT grantee.rolname, namespace.nspname, relation.relname,
+                     attribute.attname, privilege.privilege_type, privilege.is_grantable
+              FROM pg_attribute AS attribute
+              JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+              JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+              ORDER BY grantee.rolname, namespace.nspname, relation.relname,
+                       attribute.attname, privilege.privilege_type")"
+          test "${column_acl_inventory}" = $'platform_control|public|runtime_access_requests|completed_at|UPDATE|f\nplatform_control|public|runtime_access_requests|result_code|UPDATE|f\nplatform_control|public|runtime_access_requests|status|UPDATE|f'
+
+          sequence_privilege_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_class AS relation
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              WHERE relation.relkind = 'S'
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND (has_sequence_privilege(role_name, relation.oid, 'USAGE')
+                  OR has_sequence_privilege(role_name, relation.oid, 'SELECT')
+                  OR has_sequence_privilege(role_name, relation.oid, 'UPDATE'))")"
+          test "${sequence_privilege_count}" = "0"
+
+          ownership_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*) FROM (
+                SELECT datname FROM pg_database
+                  WHERE pg_get_userbyid(datdba) IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT nspname FROM pg_namespace
+                  WHERE pg_get_userbyid(nspowner) IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT relname FROM pg_class
+                  WHERE pg_get_userbyid(relowner) IN ('platform_control', 'platform_supervisor')
+              ) AS owned_objects")"
+          test "${ownership_count}" = "0"
+
+          grantable_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT
+                (SELECT count(*) FROM information_schema.role_table_grants
+                  WHERE grantee IN ('platform_control', 'platform_supervisor')
+                    AND is_grantable = 'YES')
+                + (SELECT count(*) FROM information_schema.column_privileges
+                  WHERE grantee IN ('platform_control', 'platform_supervisor')
+                    AND is_grantable = 'YES')")"
+          test "${grantable_count}" = "0"
+
+          acl_inventory_difference_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH fixed_roles(role_name) AS (
+                VALUES ('platform_control'), ('platform_supervisor')
+              ), catalog_tables(table_name) AS (
+                VALUES ('platform_catalog_revisions'), ('runtime_instances'),
+                       ('runtime_attempts'), ('runtime_lifecycle_jobs'),
+                       ('runtime_endpoints'), ('runtime_access_requests'),
+                       ('runtime_audit_events')
+              ), control_writes(table_name) AS (
+                VALUES ('runtime_access_requests'), ('runtime_audit_events')
+              ), supervisor_writes(table_name) AS (
+                VALUES ('runtime_instances'), ('runtime_attempts'),
+                       ('runtime_lifecycle_jobs'), ('runtime_endpoints'),
+                       ('runtime_access_requests'), ('runtime_audit_events')
+              ), actual(
+                object_kind, object_name, column_name, role_name,
+                privilege_type, grantor_name, is_grantable
+              ) AS (
+                SELECT 'database', database.datname, '', grantee.rolname,
+                       privilege.privilege_type, grantor.rolname, privilege.is_grantable
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT 'schema', namespace.nspname, '', grantee.rolname,
+                       privilege.privilege_type, grantor.rolname, privilege.is_grantable
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT 'table', format('%I.%I', namespace.nspname, relation.relname), '',
+                       grantee.rolname, privilege.privilege_type,
+                       grantor.rolname, privilege.is_grantable
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT 'column', format('%I.%I', namespace.nspname, relation.relname),
+                       attribute.attname, grantee.rolname, privilege.privilege_type,
+                       grantor.rolname, privilege.is_grantable
+                FROM pg_attribute AS attribute
+                JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+              ), expected AS (
+                SELECT 'database', 'platform', '', role_name, 'CONNECT', 'postgres', false
+                FROM fixed_roles
+                UNION ALL
+                SELECT 'schema', 'public', '', role_name, 'USAGE', 'postgres', false
+                FROM fixed_roles
+                UNION ALL
+                SELECT 'table', 'public.' || table_name, '', role_name,
+                       'SELECT', 'postgres', false
+                FROM fixed_roles CROSS JOIN catalog_tables
+                UNION ALL
+                SELECT 'table', 'public.' || table_name, '', 'platform_control',
+                       'INSERT', 'postgres', false
+                FROM control_writes
+                UNION ALL
+                SELECT 'table', 'public.' || table_name, '', 'platform_supervisor',
+                       privilege_type, 'postgres', false
+                FROM supervisor_writes CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS grants(privilege_type)
+                UNION ALL
+                SELECT 'column', 'public.runtime_access_requests', column_name,
+                       'platform_control', 'UPDATE', 'postgres', false
+                FROM (VALUES ('status'), ('result_code'), ('completed_at')) AS columns(column_name)
+              ), differences AS (
+                (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+                UNION ALL
+                (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+              )
+              SELECT count(*) FROM differences")"
+          test "${acl_inventory_difference_count}" = "0"
+
           docker exec --interactive platform-postgres-ci \
             psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'
           INSERT INTO runtime_instances (
@@ -433,7 +679,11 @@ jobs:
             repeat('3', 40), repeat('4', 40), 'ci-project', 'ci-container',
             'healthy', '{}'::json, now(), NULL, NULL, NULL
           );
-          SET ROLE platform_control;
+          SQL
+
+          docker exec --interactive platform-postgres-ci \
+            psql --username platform_control --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          BEGIN;
           SELECT instance_id FROM runtime_instances WHERE instance_id = 'ci-instance';
           INSERT INTO runtime_access_requests (
             request_id, instance_id, attempt_id, route_policy_revision, method,
@@ -456,31 +706,69 @@ jobs:
           UPDATE runtime_access_requests
           SET status = 'completed', result_code = 'ok', completed_at = now()
           WHERE request_id = 'ci-request';
-          RESET ROLE;
+          ROLLBACK;
           SQL
 
-          set +e
-          docker exec platform-postgres-ci \
-            psql --username postgres --dbname platform --set ON_ERROR_STOP=on \
-            --command "SET ROLE platform_control; UPDATE runtime_instances SET desired_state = 'running' WHERE instance_id = 'ci-instance';" \
-            >"${platform_ci_dir}/denied.log" 2>&1
-          denied_status=$?
-          set -e
-          test "${denied_status}" -ne 0
-          grep --fixed-strings --quiet "permission denied for table runtime_instances" "${platform_ci_dir}/denied.log"
-          python - "${platform_ci_dir}/denied.log" "${platform_ci_dir}/platform_control_db_password" <<'PY'
-          import sys
-          from pathlib import Path
+          docker exec --interactive platform-postgres-ci \
+            psql --username platform_supervisor --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          BEGIN;
+          SELECT instance_id FROM runtime_instances WHERE instance_id = 'ci-instance';
+          UPDATE runtime_instances
+          SET lifecycle_status = lifecycle_status
+          WHERE instance_id = 'ci-instance';
+          INSERT INTO runtime_access_requests (
+            request_id, instance_id, attempt_id, route_policy_revision, method,
+            idempotency_key, status, result_code, requested_at, completed_at
+          ) VALUES (
+            'ci-supervisor-request', 'ci-instance', 'ci-attempt', 'ci-route-policy', 'GET',
+            'ci-supervisor-request-idempotency', 'pending', NULL, now(), NULL
+          );
+          INSERT INTO runtime_audit_events (
+            audit_event_id, actor_type, request_id, idempotency_key, owner_kind,
+            owner_id, owner_revision, instance_id, runtime_spec_revision_id,
+            adapter_template_revision_id, action, previous_state, next_state,
+            result_code, occurred_at, provenance
+          ) VALUES (
+            'ci-supervisor-audit', 'platform_supervisor', 'ci-supervisor-request', 'ci-supervisor-idempotency',
+            'paper_probe', 'ci-owner', 'ci-owner-revision', 'ci-instance',
+            'ci-runtime-spec', 'ci-adapter-template', 'start', NULL,
+            '{"lifecycle_status":"registered"}'::json, 'accepted', now(), '{}'::json
+          );
+          ROLLBACK;
+          SQL
 
-          output = Path(sys.argv[1]).read_text(encoding="utf-8")
-          secret = Path(sys.argv[2]).read_text(encoding="utf-8").rstrip("\r\n")
-          if secret in output:
-              raise SystemExit("database secret appeared in denial output")
-          PY
+          expect_role_denied() {
+            role_name="$1"
+            probe_name="$2"
+            statement="$3"
+            set +e
+            docker exec platform-postgres-ci \
+              psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \
+              --command "BEGIN; ${statement}; ROLLBACK;" \
+              >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            denied_status=$?
+            set -e
+            test "${denied_status}" -ne 0
+            grep --extended-regexp --quiet "permission denied|must be owner of" \
+              "${platform_ci_dir}/denied-${role_name}-${probe_name}.log"
+          }
+          expect_role_denied platform_control temp "CREATE TEMP TABLE phase2a_control_temp_probe(id integer)"
+          expect_role_denied platform_control create "CREATE TABLE public.phase2a_control_ddl_probe(id integer)"
+          expect_role_denied platform_control alter "ALTER TABLE public.runtime_instances ADD COLUMN phase2a_control_probe integer"
+          expect_role_denied platform_control drop "DROP TABLE public.runtime_instances"
+          expect_role_denied platform_control delete "DELETE FROM runtime_instances WHERE instance_id = 'ci-instance'"
+          expect_role_denied platform_control truncate "TRUNCATE TABLE runtime_instances"
+          expect_role_denied platform_control update "UPDATE runtime_instances SET desired_state = 'running' WHERE instance_id = 'ci-instance'"
+          expect_role_denied platform_supervisor temp "CREATE TEMP TABLE phase2a_supervisor_temp_probe(id integer)"
+          expect_role_denied platform_supervisor create "CREATE TABLE public.phase2a_supervisor_ddl_probe(id integer)"
+          expect_role_denied platform_supervisor alter "ALTER TABLE public.platform_catalog_revisions ADD COLUMN phase2a_supervisor_probe integer"
+          expect_role_denied platform_supervisor drop "DROP TABLE public.platform_catalog_revisions"
+          expect_role_denied platform_supervisor delete "DELETE FROM runtime_instances WHERE instance_id = 'ci-instance'"
+          expect_role_denied platform_supervisor truncate "TRUNCATE TABLE runtime_instances"
+          expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions SET payload = payload"
 
-          docker run --detach \
+          docker create \
             --name platform-control-ci \
-            --network freqtrade-platform-ci \
             --user 1000:1000 \
             --read-only \
             --init \
@@ -503,6 +791,14 @@ jobs:
             --entrypoint python \
             "${{ steps.reviewed-image.outputs.image_id }}" \
             -m freqtrade.platform_control
+
+          docker network connect freqtrade-platform-ci platform-control-ci
+          docker network disconnect bridge platform-control-ci
+          control_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort)"
+          test "${control_networks}" = "freqtrade-platform-ci"
+          control_port_mapping="$(docker inspect --format '{{if eq (len .HostConfig.PortBindings) 1}}{{with (index .HostConfig.PortBindings "8090/tcp")}}{{if eq (len .) 1}}{{(index . 0).HostIp}}|{{(index . 0).HostPort}}{{end}}{{end}}{{end}}' platform-control-ci)"
+          test "${control_port_mapping}" = "127.0.0.1|8090"
+          docker start platform-control-ci
 
           ready=0
           for attempt in $(seq 1 60); do
@@ -578,11 +874,21 @@ jobs:
           test -z "$(docker ps --all --quiet --filter name='^/platform-control-ci$' --filter name='^/platform-postgres-ci$')" || cleanup_status=1
           docker network inspect freqtrade-platform-ci >/dev/null 2>&1 && cleanup_status=1 || true
           if test -d "${platform_ci_dir}"; then
-            docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.after"
             if test -f "${platform_ci_dir}/volumes.before"; then
+              docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.detected"
+              comm -13 "${platform_ci_dir}/volumes.before" \
+                "${platform_ci_dir}/volumes.detected" > "${platform_ci_dir}/volumes.created"
+              while IFS= read -r volume_name; do
+                test -n "${volume_name}" || continue
+                if ! docker volume rm "${volume_name}" >/dev/null; then
+                  cleanup_status=1
+                fi
+              done < "${platform_ci_dir}/volumes.created"
+              docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.after"
               cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after" || cleanup_status=1
             fi
             rm -rf "${platform_ci_dir}"
+            test ! -e "${platform_ci_dir}" || cleanup_status=1
           fi
           exit "${cleanup_status}"
 

@@ -227,6 +227,30 @@ class PlatformControlContractTests(unittest.TestCase):
         )
         self.assertIn("platform role initializer broadens database authority", errors)
 
+    def test_role_validator_requires_exact_public_temporary_revoke(self) -> None:
+        safe_script = self.role_script()
+        self.assertIn(
+            "REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;", safe_script
+        )
+        self.assertEqual(self.role_script_errors(safe_script), [])
+
+        mutations = {
+            "removed": safe_script.replace(
+                "REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;\n", "", 1
+            ),
+            "redirected": safe_script.replace(
+                "REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;",
+                "REVOKE TEMPORARY ON DATABASE platform FROM platform_control;",
+                1,
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertIn(
+                    "platform role initializer database authority differs",
+                    self.role_script_errors(mutated),
+                )
+
     def test_role_password_normalization_removes_only_one_terminal_newline(self) -> None:
         script = self.role_script().lower()
         self.assertNotRegex(script, r"\b(?:btrim|trim)\s*\(")

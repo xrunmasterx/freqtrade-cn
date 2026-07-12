@@ -82,6 +82,7 @@ JOIN pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
 WHERE granted_role.rolname = 'platform_supervisor'
 \gexec
 
+REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;
 REVOKE CREATE ON DATABASE platform FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON DATABASE platform FROM platform_control, platform_supervisor CASCADE;
