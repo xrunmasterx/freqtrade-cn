@@ -470,10 +470,18 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
             )
             for fragment in denial_fragments
         ]
+        role_assignments = [
+            (index, statement)
+            for index, statement in enumerate(denial_statements)
+            if re.match(r"^role_name=", statement)
+        ]
         if (
             any(position < 0 for position in denial_positions)
             or denial_positions != sorted(denial_positions)
             or denial_positions[1] != denial_positions[0] + 1
+            or len(role_assignments) != 1
+            or role_assignments[0][1] != 'role_name="$1"'
+            or role_assignments[0][0] >= denial_positions[0]
             or "psql --username postgres" in denial_text
             or any(
                 re.match(r"^return\s+0(?:\s*(?:#.*)?)?$", statement)
@@ -992,6 +1000,28 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 "          uncalled_denial_helper() {\n"
                 + "".join(f"  {line}\n" for line in helper_text.splitlines())
                 + "          }\n",
+                1,
+            ),
+            "second role assignment": workflow.replace(
+                'role_name="$1"',
+                'role_name="$1"\n            role_name=postgres',
+                1,
+            ),
+            "compound role assignment": workflow.replace(
+                'role_name="$1"',
+                'role_name="$1"; role_name=postgres',
+                1,
+            ),
+            "defaulted role assignment": workflow.replace(
+                'role_name="$1"',
+                'role_name="${1:-postgres}"',
+                1,
+            ),
+            "role reassignment before probe": workflow.replace(
+                "            set +e\n            docker exec platform-postgres-ci \\",
+                "            set +e\n"
+                "            role_name=platform_supervisor\n"
+                "            docker exec platform-postgres-ci \\",
                 1,
             ),
         }
