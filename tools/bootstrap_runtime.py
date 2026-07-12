@@ -24,6 +24,14 @@ SECRET_SPECS = {
     "jwt_secret_key": 48,
     "ws_token": 32,
 }
+PLATFORM_SECRET_SPECS = {
+    "postgres_admin_password": 32,
+    "platform_control_db_password": 32,
+    "platform_supervisor_db_password": 32,
+    "api_password": 32,
+    "jwt_secret_key": 48,
+}
+PLATFORM_SECRET_ROOT = Path("ft_userdata/secrets/platform")
 RESEARCH_PATH_MIGRATIONS = (
     (
         "data_source",
@@ -388,17 +396,47 @@ def _verify_writable_directories(
     return resolved_root
 
 
-def write_new_secret(path: Path, entropy_bytes: int) -> None:
+def write_new_secret(
+    path: Path,
+    entropy_bytes: int,
+    used_values: set[str] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
+        value = secrets.token_urlsafe(entropy_bytes)
+        while used_values is not None and value in used_values:
+            value = secrets.token_urlsafe(entropy_bytes)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(secrets.token_urlsafe(entropy_bytes))
+            handle.write(value)
             handle.write("\n")
         _harden_secret_permissions(path)
+        if used_values is not None:
+            used_values.add(value)
     except BaseException:
         path.unlink(missing_ok=True)
         raise
+
+
+def _existing_secret_value(path: Path) -> str:
+    return path.read_text(encoding="utf-8").rstrip("\r\n")
+
+
+def _init_secret_file(
+    path: Path,
+    entropy_bytes: int,
+    used_values: set[str],
+) -> None:
+    if not path.exists():
+        write_new_secret(path, entropy_bytes, used_values)
+        return
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("invalid runtime secret file")
+    _harden_secret_permissions(path)
+    value = _existing_secret_value(path)
+    if value in used_values:
+        raise ValueError("runtime secrets must be unique")
+    used_values.add(value)
 
 
 def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
@@ -414,6 +452,7 @@ def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
     _harden_runtime_control_file(environment_path, runtime_uid)
     _merge_compose_identity(override_path, manifest, identity)
     _harden_runtime_control_file(override_path, runtime_uid)
+    used_secret_values: set[str] = set()
     for service in manifest["services"]:
         template = root / service["config_template"]
         config = root / service["config_path"]
@@ -430,12 +469,15 @@ def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
         secret_root = root / "ft_userdata" / "secrets" / service["name"]
         for filename, entropy_bytes in SECRET_SPECS.items():
             path = secret_root / filename
-            if not path.exists():
-                write_new_secret(path, entropy_bytes)
-            elif path.is_file():
-                _harden_secret_permissions(path)
-            else:
-                raise ValueError(f"invalid runtime secret file for {service['name']}")
+            _init_secret_file(path, entropy_bytes, used_secret_values)
+
+    platform_root = root / PLATFORM_SECRET_ROOT
+    for filename, entropy_bytes in PLATFORM_SECRET_SPECS.items():
+        _init_secret_file(
+            platform_root / filename,
+            entropy_bytes,
+            used_secret_values,
+        )
 
 
 def sanitize_api_configs(root: Path, manifest: dict[str, Any]) -> None:
@@ -514,7 +556,12 @@ def rotate_secrets(
             _harden_secret_permissions(destination)
 
 
-def verify_runtime(root: Path, manifest: dict[str, Any]) -> dict[str, int]:
+def verify_runtime(
+    root: Path,
+    manifest: dict[str, Any],
+    *,
+    verify_platform_secrets: bool = True,
+) -> dict[str, int]:
     expected_identity = _expected_runtime_identity()
     environment_path = root / ".env"
     _verify_runtime_control_file(
@@ -562,8 +609,34 @@ def verify_runtime(root: Path, manifest: dict[str, Any]) -> dict[str, int]:
                 raise ValueError(f"missing runtime secret file for {service['name']}")
             _verify_secret_permissions(path, runtime_uid)
             value = path.read_text(encoding="utf-8").rstrip("\r\n")
-            if "\n" in value or "\r" in value or len(value) < 32 or value == SENTINEL:
+            if (
+                "\n" in value
+                or "\r" in value
+                or "\x00" in value
+                or len(value) < 32
+                or value == SENTINEL
+            ):
                 raise ValueError(f"runtime secret policy failed for {service['name']}")
+            all_values.append(value)
+
+    if verify_platform_secrets:
+        platform_root = root / PLATFORM_SECRET_ROOT
+        for filename in PLATFORM_SECRET_SPECS:
+            path = platform_root / filename
+            if not path.is_file() or path.is_symlink():
+                raise ValueError("missing platform runtime secret file")
+            _verify_secret_permissions(path, runtime_uid)
+            content = path.read_text(encoding="utf-8")
+            value = content.rstrip("\r\n")
+            if (
+                "\x00" in content
+                or "\n" in value
+                or "\r" in value
+                or content not in {value, value + "\n", value + "\r\n"}
+                or len(value) < 32
+                or value == SENTINEL
+            ):
+                raise ValueError("platform runtime secret policy failed")
             all_values.append(value)
     if len(all_values) != len(set(all_values)):
         raise ValueError("runtime secrets must be unique")

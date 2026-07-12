@@ -18,6 +18,23 @@ secrets:
     file: ./ft_userdata/secrets/freqtrade-research/jwt_secret_key
   freqtrade_research_ws_token:
     file: ./ft_userdata/secrets/freqtrade-research/ws_token
+  platform_postgres_admin_password:
+    file: ./ft_userdata/secrets/platform/postgres_admin_password
+  platform_control_db_password:
+    file: ./ft_userdata/secrets/platform/platform_control_db_password
+  platform_supervisor_db_password:
+    file: ./ft_userdata/secrets/platform/platform_supervisor_db_password
+  platform_control_api_password:
+    file: ./ft_userdata/secrets/platform/api_password
+  platform_control_jwt_secret:
+    file: ./ft_userdata/secrets/platform/jwt_secret_key
+
+networks:
+  platform-db:
+    internal: true
+
+volumes:
+  platform-postgres-data:
 
 x-freqtrade-common: &freqtrade-common
   build:
@@ -34,6 +51,88 @@ x-freqtrade-common: &freqtrade-common
     - host.docker.internal:host-gateway
 
 services:
+  platform-postgres:
+    profiles: ["platform"]
+    image: postgres:17.10-alpine
+    container_name: freqtrade-cn-platform-postgres
+    restart: unless-stopped
+    networks:
+      - platform-db
+    expose:
+      - 5432
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+    secrets:
+      - source: platform_postgres_admin_password
+        target: postgres_admin_password
+      - source: platform_control_db_password
+        target: platform_control_db_password
+      - source: platform_supervisor_db_password
+        target: platform_supervisor_db_password
+    volumes:
+      - type: volume
+        source: platform-postgres-data
+        target: /var/lib/postgresql/data
+      - type: bind
+        source: ./docker/postgres/init-platform-roles.sh
+        target: /docker-entrypoint-initdb.d/init-platform-roles.sh
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  platform-control:
+    profiles: ["platform"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: freqtrade-cn:local
+    container_name: freqtrade-cn-platform-control
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "freqtrade.platform_control"]
+    user: "1000:1000"
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - platform-db
+    depends_on:
+      platform-postgres:
+        condition: service_healthy
+    secrets:
+      - source: platform_control_api_password
+        target: api_password
+      - source: platform_control_jwt_secret
+        target: jwt_secret_key
+      - source: platform_control_db_password
+        target: database_password
+    environment:
+      PLATFORM_CONTROL_BIND_MODE: container_loopback_publish
+      PLATFORM_CONTROL_LISTEN_HOST: 0.0.0.0
+      PLATFORM_CONTROL_USERNAME: platform_operator
+      PLATFORM_CONTROL_API_PASSWORD_FILE: /run/secrets/api_password
+      PLATFORM_CONTROL_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      PLATFORM_DATABASE_HOST: platform-postgres
+      PLATFORM_DATABASE_PORT: "5432"
+      PLATFORM_DATABASE_NAME: platform
+      PLATFORM_DATABASE_USERNAME: platform_control
+      PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/database_password
+    ports:
+      - target: 8090
+        published: "8090"
+        host_ip: 127.0.0.1
+        protocol: tcp
+
   freqtrade:
     <<: *freqtrade-common
     profiles: ["trading"]

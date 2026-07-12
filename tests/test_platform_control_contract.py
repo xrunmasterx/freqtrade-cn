@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import copy
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from tools import compose_runtime, runtime_contract
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class PlatformControlContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.compose = compose_runtime.render_platform_compose(root=REPO_ROOT)
+
+    def errors(self, compose: dict[str, object] | None = None) -> list[str]:
+        return runtime_contract.validate_platform_compose(
+            copy.deepcopy(compose if compose is not None else self.compose),
+            repo_root=REPO_ROOT,
+        )
+
+    def test_platform_compose_has_exact_isolated_inventory(self) -> None:
+        self.assertEqual(set(self.compose["services"]), {"platform-postgres", "platform-control"})
+        self.assertEqual(
+            self.compose["networks"],
+            {
+                "platform-db": {
+                    "name": "freqtrade-cn_platform-db",
+                    "ipam": {},
+                    "internal": True,
+                }
+            },
+        )
+        self.assertEqual(
+            self.compose["volumes"],
+            {"platform-postgres-data": {"name": "freqtrade-cn_platform-postgres-data"}},
+        )
+        self.assertEqual(
+            set(self.compose["secrets"]),
+            {
+                "platform_postgres_admin_password",
+                "platform_control_db_password",
+                "platform_supervisor_db_password",
+                "platform_control_api_password",
+                "platform_control_jwt_secret",
+            },
+        )
+        self.assertEqual(self.errors(), [])
+
+    def test_platform_control_is_only_fixed_loopback_application_port(self) -> None:
+        service = self.compose["services"]["platform-control"]
+        self.assertEqual(
+            service["ports"],
+            [{
+                "target": 8090,
+                "published": "8090",
+                "host_ip": "127.0.0.1",
+                "protocol": "tcp",
+                "mode": "ingress",
+            }],
+        )
+        self.assertEqual(
+            service["environment"],
+            {
+                "PLATFORM_CONTROL_API_PASSWORD_FILE": "/run/secrets/api_password",
+                "PLATFORM_CONTROL_BIND_MODE": "container_loopback_publish",
+                "PLATFORM_CONTROL_JWT_SECRET_FILE": "/run/secrets/jwt_secret_key",
+                "PLATFORM_CONTROL_LISTEN_HOST": "0.0.0.0",
+                "PLATFORM_CONTROL_USERNAME": "platform_operator",
+                "PLATFORM_DATABASE_HOST": "platform-postgres",
+                "PLATFORM_DATABASE_NAME": "platform",
+                "PLATFORM_DATABASE_PASSWORD_FILE": "/run/secrets/database_password",
+                "PLATFORM_DATABASE_PORT": "5432",
+                "PLATFORM_DATABASE_USERNAME": "platform_control",
+            },
+        )
+
+    def test_platform_control_has_no_docker_or_runtime_state_mount(self) -> None:
+        service = self.compose["services"]["platform-control"]
+        rendered = json.dumps(service, sort_keys=True)
+        self.assertNotIn("docker.sock", rendered)
+        self.assertNotIn("ft_userdata/runtime", rendered)
+        self.assertNotIn(str(REPO_ROOT), rendered)
+        self.assertEqual(service.get("volumes", []), [])
+        self.assertEqual(service["user"], "1000:1000")
+        self.assertTrue(service["read_only"])
+        self.assertTrue(service["init"])
+        self.assertEqual(service["cap_drop"], ["ALL"])
+        self.assertEqual(service["security_opt"], ["no-new-privileges:true"])
+        self.assertNotIn("extra_hosts", service)
+
+    def test_postgres_is_internal_and_uses_only_named_database_storage(self) -> None:
+        service = self.compose["services"]["platform-postgres"]
+        self.assertEqual(service["image"], "postgres:17.10-alpine")
+        self.assertEqual(service.get("ports", []), [])
+        self.assertEqual(service["expose"], ["5432"])
+        self.assertEqual(service["networks"], {"platform-db": None})
+        self.assertEqual(service["volumes"][0], {
+                "type": "volume",
+                "source": "platform-postgres-data",
+                "target": "/var/lib/postgresql/data",
+            })
+        self.assertEqual(service["volumes"][1]["target"], "/docker-entrypoint-initdb.d/init-platform-roles.sh")
+        self.assertTrue(service["volumes"][1]["read_only"])
+        self.assertEqual(
+            service["environment"],
+            {
+                "POSTGRES_DB": "platform",
+                "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_admin_password",
+                "POSTGRES_USER": "postgres",
+            },
+        )
+
+    def test_mutations_fail_closed(self) -> None:
+        cases: list[tuple[str, object]] = []
+
+        wildcard = copy.deepcopy(self.compose)
+        wildcard["services"]["platform-control"]["ports"][0]["host_ip"] = "0.0.0.0"
+        cases.append(("host loopback", wildcard))
+
+        loopback_bind = copy.deepcopy(self.compose)
+        loopback_bind["services"]["platform-control"]["environment"][
+            "PLATFORM_CONTROL_LISTEN_HOST"
+        ] = "127.0.0.1"
+        cases.append(("container bind", loopback_bind))
+
+        admin_secret = copy.deepcopy(self.compose)
+        admin_secret["services"]["platform-control"]["secrets"].append(
+            {"source": "platform_postgres_admin_password", "target": "admin"}
+        )
+        cases.append(("secret allocation", admin_secret))
+
+        supervisor_secret = copy.deepcopy(self.compose)
+        supervisor_secret["services"]["platform-control"]["secrets"].append(
+            {"source": "platform_supervisor_db_password", "target": "supervisor"}
+        )
+        cases.append(("secret allocation", supervisor_secret))
+
+        direct_password = copy.deepcopy(self.compose)
+        direct_password["services"]["platform-control"]["environment"][
+            "PLATFORM_CONTROL_PASSWORD"
+        ] = "private-value"
+        cases.append(("direct secret environment", direct_password))
+
+        direct_dsn = copy.deepcopy(self.compose)
+        direct_dsn["services"]["platform-control"]["environment"][
+            "PLATFORM_DATABASE_DSN"
+        ] = "postgresql://private-value"
+        cases.append(("direct secret environment", direct_dsn))
+
+        docker_mount = copy.deepcopy(self.compose)
+        docker_mount["services"]["platform-control"]["volumes"] = [
+            {"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}
+        ]
+        cases.append(("volumes", docker_mount))
+
+        state_mount = copy.deepcopy(self.compose)
+        state_mount["services"]["platform-control"]["volumes"] = [
+            {"type": "bind", "source": str(REPO_ROOT / "ft_userdata/runtime"), "target": "/state"}
+        ]
+        cases.append(("volumes", state_mount))
+
+        root_mount = copy.deepcopy(self.compose)
+        root_mount["services"]["platform-control"]["volumes"] = [
+            {"type": "bind", "source": str(REPO_ROOT), "target": "/repo"}
+        ]
+        cases.append(("volumes", root_mount))
+
+        extra_service = copy.deepcopy(self.compose)
+        extra_service["services"]["rogue"] = {}
+        cases.append(("services", extra_service))
+
+        extra_secret = copy.deepcopy(self.compose)
+        extra_secret["secrets"]["rogue"] = {"file": "private-value"}
+        cases.append(("secrets", extra_secret))
+
+        extra_resource = copy.deepcopy(self.compose)
+        extra_resource["networks"]["rogue"] = {}
+        cases.append(("networks", extra_resource))
+
+        extra_volume = copy.deepcopy(self.compose)
+        extra_volume["volumes"]["rogue"] = {}
+        cases.append(("volumes", extra_volume))
+
+        for expected, compose in cases:
+            with self.subTest(expected=expected):
+                errors = self.errors(compose)
+                self.assertTrue(errors, expected)
+                self.assertNotIn("private-value", "\n".join(errors))
+
+    def test_role_script_is_idempotent_and_narrow(self) -> None:
+        script = (REPO_ROOT / "docker/postgres/init-platform-roles.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("pg_read_file", script)
+        self.assertIn("format(", script)
+        self.assertIn("REVOKE CREATE ON DATABASE platform FROM PUBLIC", script)
+        self.assertIn("REVOKE CREATE ON SCHEMA public FROM PUBLIC", script)
+        self.assertIn("UPDATE (status, result_code, completed_at)", script)
+        self.assertNotIn("ALTER DEFAULT PRIVILEGES", script.upper())
+        self.assertNotIn("GRANT ALL", script.upper())
+        self.assertNotIn("GRANT DELETE", script.upper())
+        self.assertNotIn("GRANT TRUNCATE", script.upper())
+        self.assertNotIn("PASSWORD=", script.upper())
+
+    def test_role_script_validator_rejects_broadened_grants(self) -> None:
+        script = (REPO_ROOT / "docker/postgres/init-platform-roles.sh").read_text(
+            encoding="utf-8"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "docker/postgres/init-platform-roles.sh"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                script + "\nGRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO platform_control;\n",
+                encoding="utf-8",
+            )
+            errors = runtime_contract._validate_platform_role_script(root)
+        self.assertIn("platform role initializer broadens database authority", errors)
+
+
+if __name__ == "__main__":
+    unittest.main()

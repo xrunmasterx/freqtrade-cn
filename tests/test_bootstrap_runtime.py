@@ -938,6 +938,65 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         self.assertEqual(before, self.read_all_secret_values())
 
+    def test_init_creates_exact_platform_secrets_unique_from_legacy(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        platform_root = self.root / "ft_userdata/secrets/platform"
+        self.assertEqual(
+            {path.name for path in platform_root.iterdir()},
+            set(bootstrap_runtime.PLATFORM_SECRET_SPECS),
+        )
+        platform_values = [
+            (platform_root / filename).read_text(encoding="utf-8").strip()
+            for filename in bootstrap_runtime.PLATFORM_SECRET_SPECS
+        ]
+        legacy_values = [
+            value
+            for values in self.read_all_secret_values().values()
+            for value in values
+        ]
+        self.assertEqual(len(platform_values), len(set(platform_values)))
+        self.assertFalse(set(platform_values) & set(legacy_values))
+
+    def test_init_hardens_but_never_overwrites_existing_platform_secret(self) -> None:
+        path = self.root / "ft_userdata/secrets/platform/api_password"
+        path.parent.mkdir(parents=True)
+        value = "existing-platform-secret-value-that-is-long-enough"
+        path.write_text(value + "\n", encoding="utf-8")
+
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        self.assertEqual(path.read_text(encoding="utf-8"), value + "\n")
+        self.mock_windows_acl.assert_any_call("harden", path)
+
+    def test_verify_rejects_platform_secret_reused_by_legacy_without_leaking(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        secret = "duplicate-platform-secret-value-that-must-not-leak"
+        (self.root / "ft_userdata/secrets/platform/api_password").write_text(
+            secret + "\n", encoding="utf-8"
+        )
+        (self.root / "ft_userdata/secrets/freqtrade/api_password").write_text(
+            secret + "\n", encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(ValueError, "runtime secrets must be unique") as raised:
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+        self.assertNotIn(secret, str(raised.exception))
+
+    def test_verify_rejects_platform_secret_with_multiple_terminal_lines(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        path = self.root / "ft_userdata/secrets/platform/api_password"
+        value = path.read_text(encoding="utf-8").strip()
+        path.write_text(value + "\n\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "platform runtime secret policy failed"):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+    def test_rotate_does_not_expose_platform_as_a_legacy_service(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        with self.assertRaisesRegex(ValueError, "unknown runtime service"):
+            bootstrap_runtime.rotate_secrets(self.root, self.manifest, {"platform"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,26 @@ EXPECTED_EXTENSION = {
     "restart": "unless-stopped",
     "security_opt": ["no-new-privileges:true"],
 }
+PLATFORM_SERVICES = {"platform-postgres", "platform-control"}
+PLATFORM_SECRET_FILES = {
+    "platform_postgres_admin_password": "postgres_admin_password",
+    "platform_control_db_password": "platform_control_db_password",
+    "platform_supervisor_db_password": "platform_supervisor_db_password",
+    "platform_control_api_password": "api_password",
+    "platform_control_jwt_secret": "jwt_secret_key",
+}
+PLATFORM_CONTROL_ENVIRONMENT = {
+    "PLATFORM_CONTROL_API_PASSWORD_FILE": "/run/secrets/api_password",
+    "PLATFORM_CONTROL_BIND_MODE": "container_loopback_publish",
+    "PLATFORM_CONTROL_JWT_SECRET_FILE": "/run/secrets/jwt_secret_key",
+    "PLATFORM_CONTROL_LISTEN_HOST": "0.0.0.0",
+    "PLATFORM_CONTROL_USERNAME": "platform_operator",
+    "PLATFORM_DATABASE_HOST": "platform-postgres",
+    "PLATFORM_DATABASE_NAME": "platform",
+    "PLATFORM_DATABASE_PASSWORD_FILE": "/run/secrets/database_password",
+    "PLATFORM_DATABASE_PORT": "5432",
+    "PLATFORM_DATABASE_USERNAME": "platform_control",
+}
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
     "freqtrade-futures": "freqtrade-cn-futures",
@@ -768,9 +788,263 @@ def validate_compose(
     return errors
 
 
+def _platform_path_matches(value: object, expected: Path) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        return Path(value).resolve() == expected.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _validate_platform_role_script(repo_root: Path) -> list[str]:
+    path = repo_root / "docker/postgres/init-platform-roles.sh"
+    try:
+        script = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ["platform role initializer could not be loaded"]
+    upper = script.upper()
+    required = (
+        "PG_READ_FILE('/RUN/SECRETS/PLATFORM_CONTROL_DB_PASSWORD')",
+        "PG_READ_FILE('/RUN/SECRETS/PLATFORM_SUPERVISOR_DB_PASSWORD')",
+        "FORMAT(",
+        "%L",
+        "REVOKE CREATE ON DATABASE PLATFORM FROM PUBLIC",
+        "REVOKE CREATE ON SCHEMA PUBLIC FROM PUBLIC",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA PUBLIC",
+        "UPDATE (STATUS, RESULT_CODE, COMPLETED_AT)",
+        "TO_REGCLASS",
+    )
+    errors: list[str] = []
+    if any(fragment not in upper for fragment in required):
+        errors.append("platform role initializer differs from least-privilege contract")
+    forbidden_patterns = (
+        r"ALTER\s+DEFAULT\s+PRIVILEGES",
+        r"GRANT\s+ALL(?:\s+PRIVILEGES)?",
+        r"GRANT\s+(?:DELETE|TRUNCATE|CREATE|TEMPORARY|TEMP)\b",
+        r"\b(?:SUPERUSER|CREATEDB|CREATEROLE|REPLICATION|BYPASSRLS)\b",
+        r"(?:CAT|PRINTF|ECHO).*?/RUN/SECRETS/",
+        r"PASSWORD\s*=",
+    )
+    if any(re.search(pattern, upper) for pattern in forbidden_patterns):
+        errors.append("platform role initializer broadens database authority")
+    revoke_position = upper.find("REVOKE ALL PRIVILEGES ON DATABASE PLATFORM")
+    grant_position = upper.find("GRANT CONNECT ON DATABASE PLATFORM")
+    if revoke_position < 0 or grant_position < 0 or revoke_position > grant_position:
+        errors.append("platform role initializer must revoke before granting")
+    expected_tables = {
+        "platform_catalog_revisions",
+        "runtime_instances",
+        "runtime_attempts",
+        "runtime_lifecycle_jobs",
+        "runtime_endpoints",
+        "runtime_access_requests",
+        "runtime_audit_events",
+    }
+    if not all(f"('{name}')" in script for name in expected_tables):
+        errors.append("platform role initializer table inventory differs")
+    return errors
+
+
+def validate_platform_compose(
+    compose: object,
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> list[str]:
+    if type(compose) is not dict:
+        return ["rendered platform Compose must be an object"]
+    errors: list[str] = []
+    allowed_top_level = {
+        "name",
+        "networks",
+        "secrets",
+        "services",
+        "volumes",
+        "x-freqtrade-common",
+    }
+    if set(compose) != allowed_top_level:
+        errors.append("platform Compose top-level fields differ")
+
+    services = compose.get("services")
+    if type(services) is not dict or set(services) != PLATFORM_SERVICES:
+        errors.append("platform Compose services differ")
+        return [*errors, *_validate_platform_role_script(repo_root)]
+
+    networks = compose.get("networks")
+    expected_network = {
+        "name": "freqtrade-cn_platform-db",
+        "ipam": {},
+        "internal": True,
+    }
+    if type(networks) is not dict or networks != {"platform-db": expected_network}:
+        errors.append("platform Compose networks differ")
+
+    volumes = compose.get("volumes")
+    expected_volume = {"name": "freqtrade-cn_platform-postgres-data"}
+    if type(volumes) is not dict or volumes != {"platform-postgres-data": expected_volume}:
+        errors.append("platform Compose volumes differ")
+
+    compose_secrets = compose.get("secrets")
+    if type(compose_secrets) is not dict or set(compose_secrets) != set(
+        PLATFORM_SECRET_FILES
+    ):
+        errors.append("platform Compose secrets differ")
+    else:
+        for source, filename in PLATFORM_SECRET_FILES.items():
+            definition = compose_secrets[source]
+            expected_name = f"freqtrade-cn_{source}"
+            if (
+                type(definition) is not dict
+                or set(definition) != {"name", "file"}
+                or definition.get("name") != expected_name
+                or not _platform_path_matches(
+                    definition.get("file"),
+                    repo_root / "ft_userdata/secrets/platform" / filename,
+                )
+            ):
+                errors.append("platform Compose secret definition differs")
+
+    postgres = services["platform-postgres"]
+    expected_postgres_fields = {
+        "profiles",
+        "command",
+        "container_name",
+        "entrypoint",
+        "environment",
+        "expose",
+        "healthcheck",
+        "image",
+        "networks",
+        "restart",
+        "secrets",
+        "volumes",
+    }
+    if type(postgres) is not dict or set(postgres) != expected_postgres_fields:
+        errors.append("platform-postgres fields differ")
+    else:
+        expected_postgres_values = {
+            "profiles": ["platform"],
+            "command": None,
+            "container_name": "freqtrade-cn-platform-postgres",
+            "entrypoint": None,
+            "environment": {
+                "POSTGRES_DB": "platform",
+                "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_admin_password",
+                "POSTGRES_USER": "postgres",
+            },
+            "expose": ["5432"],
+            "healthcheck": {
+                "test": ["CMD-SHELL", "pg_isready -U postgres -d platform"],
+                "timeout": "5s",
+                "interval": "10s",
+                "retries": 5,
+                "start_period": "10s",
+            },
+            "image": "postgres:17.10-alpine",
+            "networks": {"platform-db": None},
+            "restart": "unless-stopped",
+            "secrets": [
+                {
+                    "source": "platform_postgres_admin_password",
+                    "target": "postgres_admin_password",
+                },
+                {
+                    "source": "platform_control_db_password",
+                    "target": "platform_control_db_password",
+                },
+                {
+                    "source": "platform_supervisor_db_password",
+                    "target": "platform_supervisor_db_password",
+                },
+            ],
+        }
+        for field, expected in expected_postgres_values.items():
+            if postgres.get(field) != expected:
+                errors.append(f"platform-postgres {field} differs")
+        postgres_volumes = postgres.get("volumes")
+        expected_data_volume = {
+            "type": "volume",
+            "source": "platform-postgres-data",
+            "target": "/var/lib/postgresql/data",
+        }
+        if type(postgres_volumes) is not list or len(postgres_volumes) != 2:
+            errors.append("platform-postgres volumes differ")
+        else:
+            init_mount = postgres_volumes[1]
+            if postgres_volumes[0] != expected_data_volume or (
+                type(init_mount) is not dict
+                or set(init_mount) != {"type", "source", "target", "read_only", "bind"}
+                or init_mount.get("type") != "bind"
+                or init_mount.get("target")
+                != "/docker-entrypoint-initdb.d/init-platform-roles.sh"
+                or init_mount.get("read_only") is not True
+                or init_mount.get("bind") != {"create_host_path": False}
+                or not _platform_path_matches(
+                    init_mount.get("source"),
+                    repo_root / "docker/postgres/init-platform-roles.sh",
+                )
+            ):
+                errors.append("platform-postgres volumes differ")
+
+    control = services["platform-control"]
+    expected_control = {
+        "profiles": ["platform"],
+        "build": {
+            "context": str(repo_root.resolve()),
+            "dockerfile": "Dockerfile",
+        },
+        "cap_drop": ["ALL"],
+        "command": None,
+        "container_name": "freqtrade-cn-platform-control",
+        "depends_on": {
+            "platform-postgres": {"condition": "service_healthy", "required": True}
+        },
+        "entrypoint": ["python", "-m", "freqtrade.platform_control"],
+        "environment": PLATFORM_CONTROL_ENVIRONMENT,
+        "image": "freqtrade-cn:local",
+        "init": True,
+        "networks": {"platform-db": None},
+        "ports": [
+            {
+                "mode": "ingress",
+                "host_ip": "127.0.0.1",
+                "target": 8090,
+                "published": "8090",
+                "protocol": "tcp",
+            }
+        ],
+        "read_only": True,
+        "restart": "unless-stopped",
+        "secrets": [
+            {"source": "platform_control_api_password", "target": "api_password"},
+            {"source": "platform_control_jwt_secret", "target": "jwt_secret_key"},
+            {"source": "platform_control_db_password", "target": "database_password"},
+        ],
+        "security_opt": ["no-new-privileges:true"],
+        "user": "1000:1000",
+    }
+    if type(control) is not dict or control != expected_control:
+        errors.append("platform-control fields differ")
+        if type(control) is dict:
+            environment = control.get("environment")
+            if type(environment) is dict and environment != PLATFORM_CONTROL_ENVIRONMENT:
+                errors.append("platform-control direct secret environment is forbidden")
+            if control.get("ports") != expected_control["ports"]:
+                errors.append("platform-control host loopback publication differs")
+            if control.get("volumes") not in (None, []):
+                errors.append("platform-control volumes are forbidden")
+            if control.get("secrets") != expected_control["secrets"]:
+                errors.append("platform-control secret allocation differs")
+
+    errors.extend(_validate_platform_role_script(repo_root))
+    return errors
+
+
 def _load_compose_file(path: Path) -> dict[str, Any] | None:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        content = path.read_bytes()
+        encoding = "utf-16" if content.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+        data = json.loads(content.decode(encoding))
     except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
         return None
     return data if type(data) is dict else None
@@ -802,11 +1076,57 @@ def _render_compose() -> dict[str, Any] | None:
     return data if type(data) is dict else None
 
 
+def _render_platform_compose() -> dict[str, Any] | None:
+    command = [
+        sys.executable,
+        str((REPO_ROOT / "tools/compose_runtime.py").resolve()),
+        "--profile",
+        "platform",
+        "config",
+        "--format",
+        "json",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        data = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, RecursionError):
+        return None
+    return data if type(data) is dict else None
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate the root runtime contract")
     parser.add_argument("--compose-json", type=Path)
     parser.add_argument("--check-configs-only", action="store_true")
+    parser.add_argument("--platform", action="store_true")
     args = parser.parse_args(arguments)
+
+    if args.platform:
+        if args.check_configs_only:
+            print("error: unsupported platform validation arguments", file=sys.stderr)
+            return 1
+        if args.compose_json is not None:
+            compose = _load_compose_file(args.compose_json)
+            compose_error = "Compose JSON could not be loaded"
+        else:
+            compose = _render_platform_compose()
+            compose_error = "rendered platform Compose could not be loaded"
+        if compose is None:
+            print(f"error: {compose_error}", file=sys.stderr)
+            return 1
+        errors = validate_platform_compose(compose)
+        if errors:
+            for error in errors:
+                print(f"error: {error}", file=sys.stderr)
+            return 1
+        print("platform runtime contract: OK")
+        return 0
 
     errors = validate_tracked_configs(REPO_ROOT)
     if args.check_configs_only:

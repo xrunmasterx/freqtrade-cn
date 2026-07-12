@@ -868,7 +868,13 @@ class ComposeRuntimeTests(unittest.TestCase):
         override.parent.mkdir(parents=True)
         override.write_text("verified artifact", encoding="utf-8")
 
-        def verify(root: Path, manifest: object) -> dict[str, int]:
+        def verify(
+            root: Path,
+            manifest: object,
+            *,
+            verify_platform_secrets: bool = True,
+        ) -> dict[str, int]:
+            self.assertFalse(verify_platform_secrets)
             override.write_text('{"services":{"freqtrade":{"user":"0:0"}}}', encoding="utf-8")
             return IDENTITY
 
@@ -973,6 +979,79 @@ class ComposeRuntimeTests(unittest.TestCase):
         message = "".join(call.args[0] for call in stderr.write.call_args_list)
         self.assertEqual(message, "compose runtime: verification failed\n")
         self.assertNotIn(secret, message)
+
+    def test_platform_parser_allows_only_exact_config_commands(self) -> None:
+        accepted = (
+            ["--profile", "platform", "config"],
+            ["--profile", "platform", "config", "--quiet"],
+            ["--profile", "platform", "config", "--format", "json"],
+            [
+                "--profile",
+                "platform",
+                "config",
+                "--quiet",
+                "--format",
+                "json",
+            ],
+            [
+                "--profile",
+                "platform",
+                "config",
+                "--format",
+                "json",
+                "--quiet",
+            ],
+        )
+        for arguments in accepted:
+            with self.subTest(arguments=arguments):
+                self.assertEqual(compose_runtime.parse_platform_arguments(arguments), arguments)
+
+        forbidden = (
+            ["--profile", "platform", "up", "platform-control"],
+            ["--profile", "platform", "config", "platform-control"],
+            ["--profile", "platform", "config", "--format", "yaml"],
+            ["--profile", "platform", "--profile", "trading", "config"],
+            ["--profile", "trading", "--profile", "platform", "config"],
+            ["--profile", "platform", "config", "--quiet", "--quiet"],
+            ["config"],
+        )
+        for arguments in forbidden:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(compose_runtime.UnsupportedArguments):
+                    compose_runtime.parse_platform_arguments(arguments)
+
+    def test_platform_config_bypasses_legacy_bootstrap_and_manifest(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, '{"services":{}}', "")
+        with (
+            mock.patch.object(
+                compose_runtime, "_run_platform_compose", return_value=completed
+            ) as run_platform,
+            mock.patch.object(compose_runtime, "verify_runtime") as verify_runtime,
+            mock.patch.object(compose_runtime, "load_runtime_manifest") as load_manifest,
+        ):
+            result = compose_runtime.run_compose(
+                ["--profile", "platform", "config", "--format", "json"],
+                root=self.root,
+                capture_output=True,
+            )
+        self.assertIs(result, completed)
+        run_platform.assert_called_once()
+        verify_runtime.assert_not_called()
+        load_manifest.assert_not_called()
+
+    def test_render_platform_compose_parses_strict_json_object(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, '{"services":{}}', "")
+        with mock.patch.object(compose_runtime, "run_compose", return_value=completed):
+            self.assertEqual(compose_runtime.render_platform_compose(root=self.root), {"services": {}})
+
+        for output in ("[]", "null", "{broken"):
+            with self.subTest(output=output), mock.patch.object(
+                compose_runtime,
+                "run_compose",
+                return_value=subprocess.CompletedProcess([], 0, output, ""),
+            ):
+                with self.assertRaises(RuntimeError):
+                    compose_runtime.render_platform_compose(root=self.root)
 
 
 if __name__ == "__main__":

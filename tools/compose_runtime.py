@@ -42,6 +42,7 @@ else:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_PROFILES = {"trading", "research"}
+PLATFORM_PROFILE = "platform"
 ALLOWED_ACTIONS = {"config", "up", "down", "stop", "ps", "logs"}
 FORMAL_SERVICES = {"freqtrade", "freqtrade-futures", "freqtrade-research"}
 EMERGENCY_ACTIONS = {"down", "stop", "ps", "logs"}
@@ -67,6 +68,28 @@ LaunchService = Callable[[str, Path], subprocess.CompletedProcess[str]]
 
 class UnsupportedArguments(ValueError):
     pass
+
+
+def parse_platform_arguments(arguments: Sequence[str]) -> list[str]:
+    tokens = list(arguments)
+    if tokens[:3] != ["--profile", PLATFORM_PROFILE, "config"]:
+        raise UnsupportedArguments
+    seen: set[str] = set()
+    index = 3
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--quiet" and token not in seen:
+            seen.add(token)
+            index += 1
+            continue
+        if token == "--format" and token not in seen:
+            if index + 1 >= len(tokens) or tokens[index + 1] != "json":
+                raise UnsupportedArguments
+            seen.add(token)
+            index += 2
+            continue
+        raise UnsupportedArguments
+    return tokens
 
 
 def _ci_mount_probe(service: str) -> list[str]:
@@ -249,7 +272,11 @@ def _run_verified_compose(
     *,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    identity = verify_runtime(resolved_root, manifest)
+    identity = verify_runtime(
+        resolved_root,
+        manifest,
+        verify_platform_secrets=False,
+    )
     override = json.dumps(build_compose_identity(manifest, identity)) + "\n"
     command = [
         "docker", "compose", "--project-name", "freqtrade-cn",
@@ -300,6 +327,35 @@ def _run_emergency_compose(
     )
 
 
+def _run_platform_compose(
+    safe_arguments: Sequence[str],
+    resolved_root: Path,
+    *,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
+    }
+    return subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--project-name",
+            "freqtrade-cn",
+            "-f",
+            str(resolved_root / "docker-compose.yml"),
+            *safe_arguments,
+        ],
+        cwd=resolved_root,
+        env=environment,
+        text=True,
+        capture_output=capture_output,
+        check=False,
+    )
+
+
 def _launch_override(
     manifest: dict[str, Any], identity: dict[str, int], service: str, image_id: str
 ) -> str:
@@ -321,7 +377,7 @@ def _launch_inspected_image(
     image_id: str,
     commit_identity: CommitIdentity,
 ) -> subprocess.CompletedProcess[str]:
-    identity = verify_runtime(root, manifest)
+    identity = verify_runtime(root, manifest, verify_platform_secrets=False)
     override = _launch_override(manifest, identity, service, image_id)
     render_command = [
         "docker", "compose", "--project-name", "freqtrade-cn",
@@ -394,6 +450,13 @@ def run_compose(
     launch_service: LaunchService = launch_reviewed_service,
 ) -> subprocess.CompletedProcess[str]:
     resolved_root = root.resolve()
+    if PLATFORM_PROFILE in arguments:
+        safe_platform_arguments = parse_platform_arguments(arguments)
+        return _run_platform_compose(
+            safe_platform_arguments,
+            resolved_root,
+            capture_output=capture_output,
+        )
     safe_arguments = parse_compose_arguments(arguments, FORMAL_SERVICES)
     action_index = 0
     while safe_arguments[action_index] == "--profile":
@@ -426,6 +489,23 @@ def render_compose(*, root: Path = REPO_ROOT) -> dict[str, Any]:
     if completed.returncode != 0:
         raise RuntimeError("compose runtime command failed")
     return json.loads(completed.stdout)
+
+
+def render_platform_compose(*, root: Path = REPO_ROOT) -> dict[str, Any]:
+    completed = run_compose(
+        ["--profile", PLATFORM_PROFILE, "config", "--format", "json"],
+        root=root,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("platform compose render failed")
+    try:
+        document = json.loads(completed.stdout)
+    except (json.JSONDecodeError, RecursionError):
+        raise RuntimeError("platform compose render failed") from None
+    if type(document) is not dict:
+        raise RuntimeError("platform compose render failed")
+    return document
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

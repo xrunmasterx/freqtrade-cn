@@ -1326,6 +1326,53 @@ class RuntimeContractCliTests(unittest.TestCase):
         self.assertIn("direct secret environment is forbidden", stderr)
         self.assertNotIn("private-cli-value", stderr)
 
+    def test_platform_cli_is_separate_and_does_not_load_legacy_manifest(self) -> None:
+        compose = {"services": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "platform.json"
+            path.write_text(json.dumps(compose), encoding="utf-8")
+            with (
+                mock.patch.object(runtime_contract, "validate_tracked_configs") as tracked,
+                mock.patch.object(runtime_contract, "load_runtime_manifest") as manifest,
+                mock.patch.object(
+                    runtime_contract, "validate_platform_compose", return_value=[]
+                ) as validate,
+            ):
+                result, stdout, stderr = self.invoke(
+                    ["--platform", "--compose-json", str(path)]
+                )
+        self.assertEqual((result, stdout, stderr), (0, "platform runtime contract: OK\n", ""))
+        validate.assert_called_once()
+        tracked.assert_not_called()
+        manifest.assert_not_called()
+
+    def test_platform_cli_rejects_malformed_json_without_traceback_or_secret(self) -> None:
+        secret = "private-malformed-json-value"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "platform.json"
+            path.write_text("{" + secret, encoding="utf-8")
+            result, stdout, stderr = self.invoke(
+                ["--platform", "--compose-json", str(path)]
+            )
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "error: Compose JSON could not be loaded\n")
+        self.assertNotIn(secret, stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_compose_json_accepts_powershell_utf16_redirection(self) -> None:
+        compose = {"services": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "platform.json"
+            path.write_text(json.dumps(compose), encoding="utf-16")
+            with mock.patch.object(
+                runtime_contract, "validate_platform_compose", return_value=[]
+            ):
+                result, stdout, stderr = self.invoke(
+                    ["--platform", "--compose-json", str(path)]
+                )
+        self.assertEqual((result, stdout, stderr), (0, "platform runtime contract: OK\n", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
