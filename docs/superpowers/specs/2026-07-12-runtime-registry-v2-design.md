@@ -1143,12 +1143,21 @@ path. It rejects unknown flags and raw Docker/Compose inputs.
 
 ### 17.2 platform-control API v2
 
-The fixed `platform-control` service binds `127.0.0.1:8090`. Its authenticated
-control-plane API is read-only and exposes registry views for instances, attempts,
-jobs, template revisions, RuntimeSpec revisions, migration records, endpoints,
-health, market-data candles, and stable failure codes. The separate Runtime
-Access namespace may forward only the closed application-route policy described
-in section 13.4.
+The fixed `platform-control` service is exposed on the host only at
+`127.0.0.1:8090`. Process binding and host publication are separate trust
+boundaries: native/default execution uses `host_loopback` mode and binds only
+`127.0.0.1` or `::1`; the reviewed Compose deployment uses the explicit
+`container_loopback_publish` mode, binds exactly `0.0.0.0:8090` inside its
+isolated container network namespace, and publishes that port only through the
+host mapping `127.0.0.1:8090`. Wildcard binding is invalid outside that explicit
+container mode, and container mode is invalid unless the host publication is
+the reviewed loopback mapping.
+
+Its authenticated control-plane API is read-only and exposes registry views for
+instances, attempts, jobs, template revisions, RuntimeSpec revisions, migration
+records, endpoints, health, market-data candles, and stable failure codes. The
+separate Runtime Access namespace may forward only the closed application-route
+policy described in section 13.4.
 
 It adds no POST, PUT, PATCH, or DELETE lifecycle route. Existing Basic/JWT
 credentials therefore do not gain container-control authority. A later RBAC-

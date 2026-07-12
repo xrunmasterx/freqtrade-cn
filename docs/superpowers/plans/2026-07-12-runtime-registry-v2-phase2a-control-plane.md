@@ -816,7 +816,10 @@ PostgreSQL containers/anonymous volumes after verification.
 
 **Interfaces:**
 - Produces `create_platform_app(settings, repository) -> FastAPI`.
-- Binds only configured loopback; production defaults exactly `127.0.0.1:8090`.
+- Native/default execution uses `host_loopback` mode and binds only configured
+  loopback; production defaults exactly `127.0.0.1:8090`. The reviewed Compose
+  deployment uses explicit `container_loopback_publish` mode with an internal
+  `0.0.0.0:8090` bind and exact host publication `127.0.0.1:8090`.
 - Exposes `/api/v2/ping`, `/api/v2/catalog`, `/api/v2/runtime-instances`, `/api/v2/runtime-instances/{instance_id}` and GET-only child views.
 - Mounts no lifecycle POST/PUT/PATCH/DELETE route and no Runtime Access forwarding in 2A.
 - Produces read-only `PlatformControlQueryRepository` with `ready()`,
@@ -865,18 +868,26 @@ Expected: missing `platform_control` package.
 
 - [ ] **Step 3: Implement settings and auth**
 
-`PlatformControlSettings` contains listen host/port, username, API password file, JWT secret file, and `PlatformDatabaseSettings`. It rejects non-loopback listen addresses in Phase 2. Secret files use constant-time comparison and the existing HS256 access/refresh token payload contract so FreqUI can authenticate without Bot credentials.
+`PlatformControlSettings` contains bind mode, listen host/port, username, API
+password file, JWT secret file, and `PlatformDatabaseSettings`. Secret files use
+constant-time comparison and the existing HS256 access/refresh token payload
+contract so FreqUI can authenticate without Bot credentials.
 
-Use a frozen, extra-forbidding settings model. `listen_host` accepts only the
-literal IPs `127.0.0.1` and `::1`, defaulting to `127.0.0.1`; it rejects names
-such as `localhost` and every non-loopback/wildcard address. Port defaults to
-8090 and is bounded to 1..65535. Username follows the platform Identifier
-contract. API/JWT secret paths must be absolute and distinct from one another
-and the database password path.
+Use a frozen, extra-forbidding settings model. `bind_mode` is closed to
+`host_loopback` and `container_loopback_publish`, defaulting to `host_loopback`.
+In `host_loopback` mode, `listen_host` accepts only literal `127.0.0.1` or `::1`,
+defaulting to `127.0.0.1`; it rejects names such as `localhost` and every
+non-loopback/wildcard address. In `container_loopback_publish` mode,
+`listen_host` must be exactly `0.0.0.0`; this mode is reserved for the reviewed
+Compose service whose host port is published only at `127.0.0.1:8090`. Port
+defaults to 8090 and is bounded to 1..65535. Username follows the platform
+Identifier contract. API/JWT secret paths must be absolute and distinct from
+one another and the database password path.
 
 `PlatformControlSettings.from_env()` reads only these fixed names:
 
 ```text
+PLATFORM_CONTROL_BIND_MODE           optional, default host_loopback
 PLATFORM_CONTROL_LISTEN_HOST          optional, default 127.0.0.1
 PLATFORM_CONTROL_LISTEN_PORT          optional, default 8090
 PLATFORM_CONTROL_USERNAME             required
@@ -995,15 +1006,22 @@ Docker, Bot-state, or service-start side effect.
 **Files:**
 - Create: `docker/postgres/init-platform-roles.sh`
 - Modify: `docker-compose.yml`
-- Modify: `Dockerfile`
 - Modify: `tools/bootstrap_runtime.py`
+- Modify: `tools/compose_runtime.py`
 - Modify: `tools/runtime_contract.py`
 - Test: `tests/test_platform_control_contract.py`
 - Test: `tests/test_bootstrap_runtime.py`
+- Test: `tests/test_compose_runtime.py`
+- Test: `tests/test_runtime_contract.py`
 
 **Interfaces:**
-- Fixed services: `platform-postgres` internal only and `platform-control` loopback 8090.
-- Fixed secrets: admin DB password, platform-control DB password, platform API password, platform JWT secret.
+- Fixed services: `platform-postgres` internal only and `platform-control` whose
+  container process binds `0.0.0.0:8090` in explicit
+  `container_loopback_publish` mode while the host publishes only
+  `127.0.0.1:8090`.
+- Fixed secret files: PostgreSQL admin password, platform-control DB password,
+  platform-supervisor DB password, platform API password, and platform JWT
+  secret. Values never appear in ordinary environment variables or DSNs.
 - No platform-control Docker socket, repository root, Bot state, trading secret, or general secret-root mount.
 
 - [ ] **Step 1: Write failing root contract tests**
@@ -1044,6 +1062,9 @@ Add `platform-postgres` with `expose: [5432]`, no `ports`, fixed health check, f
 
 ```yaml
 entrypoint: ["python", "-m", "freqtrade.platform_control"]
+environment:
+  PLATFORM_CONTROL_BIND_MODE: container_loopback_publish
+  PLATFORM_CONTROL_LISTEN_HOST: 0.0.0.0
 ports:
   - target: 8090
     published: "8090"
@@ -1051,13 +1072,25 @@ ports:
     protocol: tcp
 ```
 
-It mounts only its exact password/JWT/DB secret files. Add no Docker socket and no runtime state mount. Secret values are never copied into ordinary environment variables; `PlatformControlSettings` is the single owner that reads and validates exact files for regular-file/permission/single-line/NUL/sentinel/distinct-value rules.
+The wildcard address is container-internal only; the exact host publication is
+the external trust boundary. The service mounts only its exact password/JWT/DB
+secret files. Add no Docker socket and no runtime state mount. Secret values are
+never copied into ordinary environment variables; `PlatformControlSettings` is
+the single owner that reads and validates exact files for
+regular-file/permission/single-line/NUL/sentinel/distinct-value rules.
 
 `init-platform-roles.sh` creates fixed `platform_control` and `platform_supervisor` roles using mounted secret files, grants schema usage, grants platform-control SELECT plus `runtime_access_requests` terminal-field update and audit INSERT only, and grants Supervisor/Operator the reviewed Registry application permissions. The script uses `psql` variables, never shell-interpolated SQL passwords.
 
 - [ ] **Step 4: Extend bootstrap and contract validation**
 
-Add exact platform secret specifications to `bootstrap_runtime.py` without adding a directory scan. Extend `runtime_contract.py` with fixed platform service validation separate from `ops/runtime-services.json`; the old manifest remains migration input for exactly three current processes.
+Add the exact five platform secret specifications under
+`ft_userdata/secrets/platform/` to `bootstrap_runtime.py` without adding a
+directory scan. Extend `runtime_contract.py` with fixed platform service
+validation separate from `ops/runtime-services.json`; the old manifest remains
+migration input for exactly three current processes. Extend
+`compose_runtime.py` only enough to permit `--profile platform config`; do not
+add platform services to the reviewed legacy launch path or weaken its image
+provenance gates.
 
 - [ ] **Step 5: Run GREEN and commit root task**
 
@@ -1065,7 +1098,7 @@ Add exact platform secret specifications to `bootstrap_runtime.py` without addin
 python -S -m unittest tests.test_platform_control_contract tests.test_bootstrap_runtime tests.test_runtime_contract -v
 python tools/compose_runtime.py --profile platform config --format json > $env:TEMP\platform-compose.json
 python tools/runtime_contract.py --compose-json $env:TEMP\platform-compose.json
-git add Dockerfile docker-compose.yml docker/postgres/init-platform-roles.sh tools/bootstrap_runtime.py tools/runtime_contract.py tests/test_platform_control_contract.py tests/test_bootstrap_runtime.py tests/test_runtime_contract.py
+git add docker-compose.yml docker/postgres/init-platform-roles.sh tools/bootstrap_runtime.py tools/compose_runtime.py tools/runtime_contract.py tests/test_platform_control_contract.py tests/test_bootstrap_runtime.py tests/test_compose_runtime.py tests/test_runtime_contract.py
 git commit -m "feat(platform): add isolated control-plane services"
 ```
 
