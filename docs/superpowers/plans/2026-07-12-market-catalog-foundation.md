@@ -426,9 +426,11 @@ Expected: import failure for the capability and default-catalog interfaces.
 Create `freqtrade/freqtrade/markets/capability_policy.py`:
 
 ```python
+from collections.abc import Mapping
 from enum import StrEnum
+from types import MappingProxyType
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from freqtrade.markets.catalog import CatalogModel, ProductType
 from freqtrade.markets.instrument import MarketType
@@ -474,7 +476,15 @@ class CapabilityDecision(CatalogModel):
 class ProductCapabilityPolicy(CatalogModel):
     market_id: MarketType
     product_id: ProductType
-    decisions: dict[CapabilityName, CapabilityDecision] = Field(default_factory=dict)
+    decisions: Mapping[CapabilityName, CapabilityDecision] = Field(default_factory=dict)
+
+    @field_validator("decisions", mode="after")
+    @classmethod
+    def freeze_decisions(
+        cls,
+        decisions: Mapping[CapabilityName, CapabilityDecision],
+    ) -> Mapping[CapabilityName, CapabilityDecision]:
+        return MappingProxyType(dict(decisions))
 
     def decision(self, capability: CapabilityName) -> CapabilityDecision:
         return self.decisions.get(
@@ -727,6 +737,11 @@ def default_catalog_snapshot() -> CatalogSnapshot:
         product_policies=_policies(),
     )
 ```
+
+The cached snapshot must be deeply immutable at the capability boundary. Add a
+mutation regression proving that assigning through `policy.decisions[...]`
+raises `TypeError`; `frozen=True` alone is insufficient because it does not
+freeze the contents of a plain `dict`.
 
 Add these exports to `freqtrade/freqtrade/markets/__init__.py`:
 
