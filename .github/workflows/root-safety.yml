@@ -69,13 +69,27 @@ jobs:
             tests/test_directory_operations.py \
             tests/strategy/test_interface.py::test_get_signal_old_dataframe \
             tests/strategy/test_interface.py::test_ignore_expired_candle \
+            tests/markets/test_catalog.py \
+            tests/platform/test_catalog_repository.py \
+            tests/rpc/test_api_catalog.py \
+            tests/research/test_profiles.py \
             -q -p no:cacheprovider
           ruff check \
             freqtrade/freqtradebot.py \
             freqtrade/configuration/directory_operations.py \
             freqtrade/commands/build_config_commands.py \
             tests/freqtradebot/test_freqtradebot.py \
-            tests/test_directory_operations.py
+            tests/test_directory_operations.py \
+            freqtrade/markets/catalog.py \
+            freqtrade/markets/default_catalog.py \
+            freqtrade/markets/capability_policy.py \
+            freqtrade/platform \
+            freqtrade/rpc/api_server/api_catalog.py \
+            freqtrade/research/profiles.py \
+            tests/markets/test_catalog.py \
+            tests/platform/test_catalog_repository.py \
+            tests/rpc/test_api_catalog.py \
+            tests/research/test_profiles.py
 
       - name: Run runtime-dependent root selector
         env:

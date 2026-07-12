@@ -35,6 +35,12 @@ RUNTIME_READY_ENV_LINE = '          ROOT_RUNTIME_TEST_READY: "1"'
 RUNTIME_NOT_READY_ENV_LINE = '          ROOT_RUNTIME_TEST_READY: "0"'
 FRONTEND_INSTALL_STEP = "Install FreqUI dependencies"
 BACKEND_REGRESSION_STEP = "Run backend P0 regressions"
+MARKET_CATALOG_BACKEND_SELECTORS = (
+    "tests/markets/test_catalog.py",
+    "tests/platform/test_catalog_repository.py",
+    "tests/rpc/test_api_catalog.py",
+    "tests/research/test_profiles.py",
+)
 RUNTIME_ROOT_STEP = "Run runtime-dependent root selector"
 RUNTIME_ROOT_COMMAND = (
     "python -m unittest "
@@ -197,6 +203,31 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertTrue(
             step_has_exact_line(install_step, f"          {BACKEND_INSTALL_COMMAND}")
         )
+
+    def test_backend_regressions_execute_market_catalog_selectors(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = named_workflow_step(workflow, BACKEND_REGRESSION_STEP)
+        pytest_command, separator, _ = step.partition("          ruff check \\\n")
+
+        self.assertTrue(separator)
+
+        for selector in MARKET_CATALOG_BACKEND_SELECTORS:
+            with self.subTest(selector=selector):
+                self.assertIn(f"            {selector} \\\n", pytest_command)
+
+    def test_rejects_market_catalog_selector_only_present_in_comment(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        selector = MARKET_CATALOG_BACKEND_SELECTORS[0]
+        mutated = workflow.replace(
+            f"            {selector} \\\n",
+            f"            # {selector} \\\n",
+            1,
+        )
+        step = named_workflow_step(mutated, BACKEND_REGRESSION_STEP)
+        pytest_command, separator, _ = step.partition("          ruff check \\\n")
+
+        self.assertTrue(separator)
+        self.assertNotIn(f"            {selector} \\\n", pytest_command)
 
     def test_rejects_backend_dependency_command_only_present_in_comment(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
