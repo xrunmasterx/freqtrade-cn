@@ -1216,7 +1216,14 @@ Expected: root unit/Compose contract tests pass; commit contains root files only
 - Update: root `freqtrade` gitlink after backend reviews pass.
 
 **Interfaces:**
-- CI upgrades an empty PostgreSQL database to Alembic head, runs PostgreSQL repository tests, starts platform-control without Docker/state mounts, and asserts lifecycle OpenAPI is GET-only.
+- CI upgrades an empty PostgreSQL database to Alembic head, runs PostgreSQL
+  repository tests, starts platform-control in a hardened test-only container
+  without Docker/root/state mounts, and asserts the reviewed read-only HTTP
+  surface. This is acceptance infrastructure, not a production launch path.
+- Phase 2A keeps platform `compose_runtime` config-only. The runbook must not
+  instruct operators to bypass it with raw `docker compose up`; production
+  start/stop remains fail-closed until the reviewed Supervisor/dedicated
+  infrastructure launcher lands.
 
 - [ ] **Step 1: Write failing workflow-structure tests**
 
@@ -1230,7 +1237,9 @@ Verify platform-control least privilege
 Run Phase 2A backend regressions
 ```
 
-Mutation tests prove selectors in comments or unrelated steps do not satisfy the gate.
+Also require an `if: always()` cleanup step named `Clean platform control plane`.
+Mutation tests prove selectors, secret-file handling, hardening flags, cleanup,
+or denial probes in comments/unrelated steps do not satisfy the gate.
 
 - [ ] **Step 2: Run RED**
 
@@ -1242,7 +1251,33 @@ Expected: missing named steps/selectors.
 
 - [ ] **Step 3: Add CI and runbook**
 
-The workflow starts a pinned PostgreSQL service, loads secrets from ephemeral CI files, and executes:
+After the reviewed integrated image is built, the workflow:
+
+- uses the exact five secrets produced by the existing ephemeral bootstrap;
+- creates one fixed CI-only Docker network and starts
+  `postgres:17.10-alpine` with loopback-only host port 55432, tmpfs database
+  storage, exact three secret-file mounts, and the reviewed role initializer;
+- writes a 0600 libpq passfile and exposes only its path plus a password-free
+  `platform_test_ci` URL to backend tests;
+- upgrades production-shaped database `platform` to Alembic head by constructing
+  the admin SQLAlchemy URL in Python memory from the exact password file, creates
+  isolated `platform_test_ci`, then reruns the role initializer after migration;
+- runs PostgreSQL migration/repository selectors against `platform_test_ci`;
+- contaminates fixed roles inside the ephemeral `platform` database with
+  dangerous attributes, inbound/outbound memberships, and a delegated
+  non-admin-grantor column privilege; reruns reconciliation; and proves through
+  catalogs plus actual SQL that only the exact grants remain;
+- proves platform-control SELECT, request/audit INSERT and terminal-column UPDATE
+  succeed while lifecycle-column UPDATE fails with permission denied;
+- starts the reviewed application image as `platform-control` with read-only
+  root, UID/GID 1000, dropped capabilities, no-new-privileges, only the CI
+  internal network, exact three secret-file mounts, and loopback host 8090;
+  then probes public readiness, token authentication, protected Catalog/Registry
+  reads, closed schema/docs, and absence of lifecycle/Runtime Access routes;
+- always removes both containers, the CI network, passfiles, and transient probe
+  files. No named or anonymous Docker volume is created.
+
+The workflow executes:
 
 ```powershell
 alembic -c alembic-platform.ini upgrade head
@@ -1250,9 +1285,16 @@ python -m pytest tests/platform/test_platform_migrations.py tests/platform/test_
 ruff check freqtrade/platform freqtrade/platform_control tests/platform tests/platform_control
 ```
 
-The least-privilege test connects as `platform_control`, proves SELECT and gateway audit/request writes succeed, and proves UPDATE of `runtime_instances.desired_state` fails with permission denied.
+The least-privilege step must never put a password or password-bearing DSN in
+workflow YAML, process arguments, ordinary environment, logs, or artifacts.
+Secrets are read only from mounted/bootstrap files; libpq receives a passfile
+path. Failure output is checked for stable permission denial without echoing a
+secret.
 
-Document bootstrap, migration, start, health, logs, backup, rollback, and the fact that Phase 2A performs no Docker lifecycle mutation.
+Document bootstrap, migration, CI-only start acceptance, health, logs, backup,
+rollback, secret rotation deferral, and the fact that Phase 2A application APIs
+perform no Docker lifecycle mutation. Explicitly document that production
+platform start/stop is not yet exposed and raw Compose bypass is unsupported.
 
 - [ ] **Step 4: Verify Phase 2A and commit root integration**
 
