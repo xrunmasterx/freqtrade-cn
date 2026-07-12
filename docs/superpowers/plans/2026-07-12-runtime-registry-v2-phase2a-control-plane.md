@@ -1135,7 +1135,9 @@ Before regrant, every rerun resets both fixed roles to `NOSUPERUSER`,
 `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`, and `NOINHERIT`;
 removes every inbound/outbound role membership; and revokes table-, sequence-,
 schema-, database-, and residual column-level privileges with downstream grant
-cleanup before applying the exact allowlist. Do not use broad
+cleanup before applying the exact allowlist. Membership and residual-column
+revocation enumerate and quote each original grantor and use `GRANTED BY ...
+CASCADE`, so delegated grants cannot survive a rerun. Do not use broad
 `ALTER DEFAULT PRIVILEGES` for future tables.
 
 - [ ] **Step 4: Extend bootstrap and contract validation**
@@ -1173,11 +1175,16 @@ supervisor secret on platform-control, a wildcard host publication, a loopback
 container bind in container mode, Docker/root/state mounts, direct passwords or
 DSNs, extra services/secrets/networks/volumes, and any role-script byte drift.
 The reviewed role script is a closed artifact whose SHA-256 is pinned by the
-validator; semantic checks additionally require exact hardening/revocation
+validator. Only LF and CRLF line endings are equivalent: validation converts
+CRLF to LF and rejects every remaining CR, NUL, BOM, invalid UTF-8, or other
+byte drift. Semantic checks additionally require exact hardening/revocation
 clauses. Mutation tests must reject narrow extra column grants, a valid grant
 retargeted to `PUBLIC` or another role, changed SELECT/INSERT/UPDATE inventory,
 required text moved into comments, duplicate grants, and missing role-attribute,
 membership, or residual-column cleanup.
+Residual-column mutation tests must also reject missing/incorrect original
+grantor joins or `GRANTED BY`, and artifact tests must accept LF/CRLF while
+rejecting lone-CR and mixed shell-invalid line endings.
 
 Extend `compose_runtime.py` only enough to permit the exact read-only command
 `--profile platform config [--quiet] [--format json]`. It must reject platform
