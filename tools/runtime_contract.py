@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import posixpath
@@ -114,6 +115,9 @@ PLATFORM_CONTROL_ENVIRONMENT = {
     "PLATFORM_DATABASE_PORT": "5432",
     "PLATFORM_DATABASE_USERNAME": "platform_control",
 }
+PLATFORM_ROLE_SCRIPT_SHA256 = (
+    "baa604f6bfcf494e33cd2c1b8486ea6e0deea33120edf77175e4fdc6384d71c5"
+)
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
     "freqtrade-futures": "freqtrade-cn-futures",
@@ -797,52 +801,189 @@ def _platform_path_matches(value: object, expected: Path) -> bool:
         return False
 
 
+def _normalize_platform_role_script(content: bytes) -> str | None:
+    try:
+        script = content.decode("utf-8")
+    except UnicodeError:
+        return None
+    return script.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _active_platform_role_script(script: str) -> str:
+    without_blocks = re.sub(r"/\*.*?\*/", "", script, flags=re.DOTALL)
+    active_lines: list[str] = []
+    for line in without_blocks.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("--"):
+            continue
+        active_lines.append(line.split("--", 1)[0])
+    return " ".join(" ".join(active_lines).upper().split())
+
+
+def _role_table_inventory(active: str, alias: str) -> list[str] | None:
+    match = re.search(
+        rf"FROM \(VALUES ((?:(?!FROM \(VALUES).)*?)\) AS {alias}\(TABLE_NAME\)",
+        active,
+    )
+    if match is None:
+        return None
+    return re.findall(r"\('([^']+)'\)", match.group(1))
+
+
 def _validate_platform_role_script(repo_root: Path) -> list[str]:
     path = repo_root / "docker/postgres/init-platform-roles.sh"
     try:
-        script = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+        script = _normalize_platform_role_script(path.read_bytes())
+    except OSError:
         return ["platform role initializer could not be loaded"]
-    upper = script.upper()
-    required = (
+    if script is None:
+        return ["platform role initializer could not be loaded"]
+    active = _active_platform_role_script(script)
+    compact = re.sub(r"\(\s+", "(", active)
+    compact = re.sub(r"\s+\)", ")", compact)
+    joined_strings = re.sub(r"'\s+'", "", compact)
+    errors: list[str] = []
+
+    digest = hashlib.sha256(script.encode("utf-8")).hexdigest()
+    if digest != PLATFORM_ROLE_SCRIPT_SHA256:
+        errors.append("platform role initializer digest differs")
+
+    secret_fragments = (
+        "WHEN RIGHT(SECRET_VALUE, 2) = E'\\R\\N' THEN LEFT(SECRET_VALUE, -2)",
+        "WHEN RIGHT(SECRET_VALUE, 1) = E'\\N' THEN LEFT(SECRET_VALUE, -1)",
+    )
+    secret_paths = (
         "PG_READ_FILE('/RUN/SECRETS/PLATFORM_CONTROL_DB_PASSWORD')",
         "PG_READ_FILE('/RUN/SECRETS/PLATFORM_SUPERVISOR_DB_PASSWORD')",
-        "FORMAT(",
-        "%L",
-        "REVOKE CREATE ON DATABASE PLATFORM FROM PUBLIC",
-        "REVOKE CREATE ON SCHEMA PUBLIC FROM PUBLIC",
-        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA PUBLIC",
-        "UPDATE (STATUS, RESULT_CODE, COMPLETED_AT)",
-        "TO_REGCLASS",
     )
-    errors: list[str] = []
-    if any(fragment not in upper for fragment in required):
-        errors.append("platform role initializer differs from least-privilege contract")
+    if (
+        re.search(r"\b(?:BTRIM|TRIM)\s*\(", active)
+        or any(active.count(fragment) != 2 for fragment in secret_fragments)
+        or any(active.count(path_fragment) != 1 for path_fragment in secret_paths)
+    ):
+        errors.append("platform role initializer secret normalization differs")
+
+    role_hardening = (
+        "ALTER ROLE PLATFORM_CONTROL WITH LOGIN NOSUPERUSER NOCREATEDB "
+        "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
+        "ALTER ROLE PLATFORM_SUPERVISOR WITH LOGIN NOSUPERUSER NOCREATEDB "
+        "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
+    )
+    if (
+        any(active.count(fragment) != 1 for fragment in role_hardening)
+        or active.count("CREATE ROLE PLATFORM_CONTROL") != 1
+        or active.count("CREATE ROLE PLATFORM_SUPERVISOR") != 1
+    ):
+        errors.append("platform role initializer role hardening differs")
+
+    membership_fragments = (
+        "FORMAT('REVOKE %I FROM PLATFORM_CONTROL GRANTED BY %I CASCADE', "
+        "GRANTED_ROLE.ROLNAME, GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE PLATFORM_CONTROL FROM %I GRANTED BY %I CASCADE', "
+        "MEMBER_ROLE.ROLNAME, GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE %I FROM PLATFORM_SUPERVISOR GRANTED BY %I CASCADE', "
+        "GRANTED_ROLE.ROLNAME, GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE PLATFORM_SUPERVISOR FROM %I GRANTED BY %I CASCADE', "
+        "MEMBER_ROLE.ROLNAME, GRANTOR_ROLE.ROLNAME)",
+        "MEMBER_ROLE.ROLNAME = 'PLATFORM_CONTROL'",
+        "GRANTED_ROLE.ROLNAME = 'PLATFORM_CONTROL'",
+        "MEMBER_ROLE.ROLNAME = 'PLATFORM_SUPERVISOR'",
+        "GRANTED_ROLE.ROLNAME = 'PLATFORM_SUPERVISOR'",
+    )
+    if (
+        any(compact.count(fragment) != 1 for fragment in membership_fragments)
+        or active.count("FROM PG_AUTH_MEMBERS AS MEMBERSHIP") != 4
+        or active.count(
+            "JOIN PG_ROLES AS GRANTED_ROLE ON GRANTED_ROLE.OID = MEMBERSHIP.ROLEID"
+        )
+        != 4
+        or active.count(
+            "JOIN PG_ROLES AS MEMBER_ROLE ON MEMBER_ROLE.OID = MEMBERSHIP.MEMBER"
+        )
+        != 4
+        or active.count(
+            "JOIN PG_ROLES AS GRANTOR_ROLE ON GRANTOR_ROLE.OID = MEMBERSHIP.GRANTOR"
+        )
+        != 4
+    ):
+        errors.append("platform role initializer membership cleanup differs")
+
+    revocations = (
+        "REVOKE CREATE ON DATABASE PLATFORM FROM PUBLIC;",
+        "REVOKE CREATE ON SCHEMA PUBLIC FROM PUBLIC;",
+        "REVOKE ALL PRIVILEGES ON DATABASE PLATFORM FROM PLATFORM_CONTROL, "
+        "PLATFORM_SUPERVISOR CASCADE;",
+        "REVOKE ALL PRIVILEGES ON SCHEMA PUBLIC FROM PLATFORM_CONTROL, "
+        "PLATFORM_SUPERVISOR CASCADE;",
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA PUBLIC FROM PLATFORM_CONTROL, "
+        "PLATFORM_SUPERVISOR CASCADE;",
+        "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA PUBLIC FROM PLATFORM_CONTROL, "
+        "PLATFORM_SUPERVISOR CASCADE;",
+    )
+    if any(active.count(fragment) != 1 for fragment in revocations):
+        errors.append("platform role initializer revocation inventory differs")
+
+    column_fragments = (
+        "FORMAT('REVOKE %S (%I) ON TABLE %I.%I FROM %I CASCADE', PRIVILEGE_TYPE, "
+        "COLUMN_NAME, TABLE_SCHEMA, TABLE_NAME, GRANTEE)",
+        "FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES",
+        "GRANTEE IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
+        "PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
+        "ORDER BY GRANTEE, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, PRIVILEGE_TYPE",
+    )
+    if any(compact.count(fragment) != 1 for fragment in column_fragments):
+        errors.append("platform role initializer residual column cleanup differs")
+
+    expected_catalog = [
+        "PLATFORM_CATALOG_REVISIONS",
+        "RUNTIME_INSTANCES",
+        "RUNTIME_ATTEMPTS",
+        "RUNTIME_LIFECYCLE_JOBS",
+        "RUNTIME_ENDPOINTS",
+        "RUNTIME_ACCESS_REQUESTS",
+        "RUNTIME_AUDIT_EVENTS",
+    ]
+    expected_control_writes = ["RUNTIME_ACCESS_REQUESTS", "RUNTIME_AUDIT_EVENTS"]
+    expected_supervisor_writes = expected_catalog[1:]
+    grant_fragments = (
+        "GRANT CONNECT ON DATABASE PLATFORM TO PLATFORM_CONTROL, PLATFORM_SUPERVISOR;",
+        "GRANT USAGE ON SCHEMA PUBLIC TO PLATFORM_CONTROL, PLATFORM_SUPERVISOR;",
+        "GRANT SELECT ON TABLE PUBLIC.%I TO PLATFORM_CONTROL, PLATFORM_SUPERVISOR",
+        "GRANT INSERT ON TABLE PUBLIC.%I TO PLATFORM_CONTROL",
+        "GRANT UPDATE (STATUS, RESULT_CODE, COMPLETED_AT) ON TABLE "
+        "PUBLIC.RUNTIME_ACCESS_REQUESTS TO PLATFORM_CONTROL",
+        "GRANT INSERT, UPDATE ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+    )
+    if (
+        any(joined_strings.count(fragment) != 1 for fragment in grant_fragments)
+        or len(re.findall(r"\bGRANT\b", active)) != len(grant_fragments)
+        or _role_table_inventory(compact, "CATALOG") != expected_catalog
+        or _role_table_inventory(compact, "CONTROL_WRITES") != expected_control_writes
+        or _role_table_inventory(compact, "SUPERVISOR_WRITES")
+        != expected_supervisor_writes
+    ):
+        errors.append("platform role initializer grant inventory differs")
+
     forbidden_patterns = (
         r"ALTER\s+DEFAULT\s+PRIVILEGES",
         r"GRANT\s+ALL(?:\s+PRIVILEGES)?",
         r"GRANT\s+(?:DELETE|TRUNCATE|CREATE|TEMPORARY|TEMP)\b",
         r"\b(?:SUPERUSER|CREATEDB|CREATEROLE|REPLICATION|BYPASSRLS)\b",
-        r"(?:CAT|PRINTF|ECHO).*?/RUN/SECRETS/",
+        r"\b(?:CAT|PRINTF|ECHO)\b.*?/RUN/SECRETS/",
         r"PASSWORD\s*=",
     )
-    if any(re.search(pattern, upper) for pattern in forbidden_patterns):
+    if any(re.search(pattern, active) for pattern in forbidden_patterns):
         errors.append("platform role initializer broadens database authority")
-    revoke_position = upper.find("REVOKE ALL PRIVILEGES ON DATABASE PLATFORM")
-    grant_position = upper.find("GRANT CONNECT ON DATABASE PLATFORM")
-    if revoke_position < 0 or grant_position < 0 or revoke_position > grant_position:
+
+    membership_position = active.find("FROM PG_AUTH_MEMBERS AS MEMBERSHIP")
+    revoke_position = active.find("REVOKE ALL PRIVILEGES ON DATABASE PLATFORM")
+    column_position = active.find("FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES")
+    grant_position = active.find("GRANT CONNECT ON DATABASE PLATFORM")
+    if (
+        min(membership_position, revoke_position, column_position, grant_position) < 0
+        or not membership_position < revoke_position < column_position < grant_position
+    ):
         errors.append("platform role initializer must revoke before granting")
-    expected_tables = {
-        "platform_catalog_revisions",
-        "runtime_instances",
-        "runtime_attempts",
-        "runtime_lifecycle_jobs",
-        "runtime_endpoints",
-        "runtime_access_requests",
-        "runtime_audit_events",
-    }
-    if not all(f"('{name}')" in script for name in expected_tables):
-        errors.append("platform role initializer table inventory differs")
     return errors
 
 

@@ -23,6 +23,19 @@ class PlatformControlContractTests(unittest.TestCase):
             repo_root=REPO_ROOT,
         )
 
+    def role_script(self) -> str:
+        return (REPO_ROOT / "docker/postgres/init-platform-roles.sh").read_text(
+            encoding="utf-8"
+        )
+
+    def role_script_errors(self, script: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "docker/postgres/init-platform-roles.sh"
+            path.parent.mkdir(parents=True)
+            path.write_text(script, encoding="utf-8", newline="")
+            return runtime_contract._validate_platform_role_script(root)
+
     def test_platform_compose_has_exact_isolated_inventory(self) -> None:
         self.assertEqual(set(self.compose["services"]), {"platform-postgres", "platform-control"})
         self.assertEqual(
@@ -208,19 +221,147 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertNotIn("PASSWORD=", script.upper())
 
     def test_role_script_validator_rejects_broadened_grants(self) -> None:
-        script = (REPO_ROOT / "docker/postgres/init-platform-roles.sh").read_text(
-            encoding="utf-8"
+        errors = self.role_script_errors(
+            self.role_script()
+            + "\nGRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO platform_control;\n"
         )
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = root / "docker/postgres/init-platform-roles.sh"
-            path.parent.mkdir(parents=True)
-            path.write_text(
-                script + "\nGRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO platform_control;\n",
-                encoding="utf-8",
-            )
-            errors = runtime_contract._validate_platform_role_script(root)
         self.assertIn("platform role initializer broadens database authority", errors)
+
+    def test_role_password_normalization_removes_only_one_terminal_newline(self) -> None:
+        script = self.role_script().lower()
+        self.assertNotRegex(script, r"\b(?:btrim|trim)\s*\(")
+        self.assertEqual(script.count("right(secret_value, 2) = e'\\r\\n'"), 2)
+        self.assertEqual(script.count("left(secret_value, -2)"), 2)
+        self.assertEqual(script.count("right(secret_value, 1) = e'\\n'"), 2)
+        self.assertEqual(script.count("left(secret_value, -1)"), 2)
+
+    def test_role_script_resets_exact_attributes_and_both_membership_directions(self) -> None:
+        script = " ".join(self.role_script().upper().split())
+        attributes = (
+            "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
+            "NOREPLICATION NOBYPASSRLS PASSWORD %L"
+        )
+        self.assertEqual(script.count(attributes), 2)
+        for role in ("PLATFORM_CONTROL", "PLATFORM_SUPERVISOR"):
+            self.assertIn(f"MEMBER_ROLE.ROLNAME = '{role}'", script)
+            self.assertIn(f"GRANTED_ROLE.ROLNAME = '{role}'", script)
+        self.assertGreaterEqual(script.count("PG_AUTH_MEMBERS"), 4)
+        self.assertEqual(
+            script.count(
+                "JOIN PG_ROLES AS GRANTOR_ROLE ON GRANTOR_ROLE.OID = MEMBERSHIP.GRANTOR"
+            ),
+            4,
+        )
+        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 4)
+        self.assertGreaterEqual(script.count(" CASCADE"), 5)
+
+    def test_role_script_clears_residual_column_privileges_before_regrant(self) -> None:
+        script = " ".join(self.role_script().upper().split())
+        self.assertIn("FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES", script)
+        self.assertIn(
+            "PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
+            script,
+        )
+        self.assertIn(
+            "GRANTEE IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
+            script,
+        )
+        cleanup = script.index("FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES")
+        first_grant = script.index("GRANT CONNECT ON DATABASE PLATFORM")
+        self.assertLess(cleanup, first_grant)
+
+    def test_role_validator_rejects_closed_artifact_byte_drift(self) -> None:
+        errors = self.role_script_errors(self.role_script() + "\n# harmless byte drift\n")
+        self.assertIn("platform role initializer digest differs", errors)
+
+    def test_role_validator_normalizes_crlf_before_hashing(self) -> None:
+        crlf_script = self.role_script().replace("\n", "\r\n")
+        self.assertEqual(self.role_script_errors(crlf_script), [])
+
+    def test_role_validator_rejects_grant_inventory_and_recipient_mutations(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "narrow extra update": script
+            + "\nGRANT UPDATE (desired_state) ON TABLE public.runtime_instances "
+            "TO platform_control;\n",
+            "retarget control update": script.replace(
+                "ON TABLE public.runtime_access_requests TO platform_control'",
+                "ON TABLE public.runtime_access_requests TO PUBLIC'",
+            ),
+            "retarget select": script.replace(
+                "TO platform_control, platform_supervisor',\n    table_name",
+                "TO platform_control',\n    table_name",
+                1,
+            ),
+            "supervisor extra table": script
+            + "\nGRANT INSERT ON TABLE public.platform_catalog_revisions "
+            "TO platform_supervisor;\n",
+            "required grant only in comment": script.replace(
+                "GRANT CONNECT ON DATABASE platform TO platform_control, platform_supervisor;",
+                "-- GRANT CONNECT ON DATABASE platform TO platform_control, platform_supervisor;",
+            ),
+            "duplicate narrow grant": script
+            + "\nGRANT UPDATE (status, result_code, completed_at) "
+            "ON TABLE public.runtime_access_requests TO platform_control;\n",
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, script)
+                errors = self.role_script_errors(mutated)
+                self.assertIn("platform role initializer grant inventory differs", errors)
+
+    def test_role_validator_rejects_missing_reconciliation_clauses(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "control hardening": (
+                "platform role initializer role hardening differs",
+                script.replace(
+                    "ALTER ROLE platform_control WITH LOGIN NOSUPERUSER NOCREATEDB "
+                    "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
+                    "ALTER ROLE platform_control WITH LOGIN PASSWORD %L",
+                ),
+            ),
+            "supervisor hardening": (
+                "platform role initializer role hardening differs",
+                script.replace(
+                    "ALTER ROLE platform_supervisor WITH LOGIN NOSUPERUSER NOCREATEDB "
+                    "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
+                    "ALTER ROLE platform_supervisor WITH LOGIN PASSWORD %L",
+                ),
+            ),
+            "inbound membership": (
+                "platform role initializer membership cleanup differs",
+                script.replace("member_role.rolname = 'platform_control'", "FALSE", 1),
+            ),
+            "outbound membership": (
+                "platform role initializer membership cleanup differs",
+                script.replace("granted_role.rolname = 'platform_control'", "FALSE", 1),
+            ),
+            "supervisor inbound membership": (
+                "platform role initializer membership cleanup differs",
+                script.replace("member_role.rolname = 'platform_supervisor'", "FALSE", 1),
+            ),
+            "supervisor outbound membership": (
+                "platform role initializer membership cleanup differs",
+                script.replace("granted_role.rolname = 'platform_supervisor'", "FALSE", 1),
+            ),
+            "column cleanup": (
+                "platform role initializer residual column cleanup differs",
+                script.replace("FROM information_schema.column_privileges", "FROM (SELECT NULL)"),
+            ),
+            "sequence revoke": (
+                "platform role initializer revocation inventory differs",
+                script.replace(
+                    "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public "
+                    "FROM platform_control, platform_supervisor CASCADE;",
+                    "",
+                ),
+            ),
+        }
+        for name, (expected, mutated) in mutations.items():
+            with self.subTest(name=name):
+                errors = self.role_script_errors(mutated)
+                self.assertIn(expected, errors)
 
 
 if __name__ == "__main__":
