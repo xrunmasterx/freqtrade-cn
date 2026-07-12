@@ -435,6 +435,13 @@ on the attempt record and is exposed only through later purpose-specific,
 non-secret contracts. The summary view never carries secret values, secret
 paths, host paths, or an arbitrary JSON payload.
 
+Persisted `health_result` is structured JSON evidence. When non-null it must
+contain a `result_code` value matching the platform Identifier contract. The
+Phase 2A attempt summary exposes only that validated `result_code` as its
+`health_result` string; it never forwards the evidence object. Missing, non-
+string, or invalid result codes fail the repository read with stable
+`invalid_health_result` rather than leaking a raw Pydantic or database error.
+
 The Phase 2A `RuntimeInstanceView` contains exactly `instance_id`,
 `instance_kind`, typed `owner_ref`, `management_mode`,
 `runtime_spec_revision_id`, closed `environment` (`paper` or `live`),

@@ -693,6 +693,12 @@ late completion reconciliation; completion failure-code invariants; two real
 PostgreSQL claimers skipping locked rows; and zero SQLite claims of PostgreSQL
 locking semantics.
 
+Add a read regression for a persisted non-null attempt health evidence object.
+`RuntimeAttemptView.health_result` is the validated Identifier stored at
+`health_result["result_code"]`, not the JSON object. Missing, non-string, or
+invalid result codes raise stable `RuntimeDataError("invalid_health_result")`;
+the complete evidence object remains private persistence data.
+
 Move the hardened Task 3 test-PostgreSQL URL validation/reset helpers into
 `tests/platform/postgres_test_support.py` and expose the `postgres_url` fixture
 from `tests/platform/conftest.py`. Refactor the migration test to import those
