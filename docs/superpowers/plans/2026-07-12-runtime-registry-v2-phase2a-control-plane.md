@@ -1075,29 +1075,110 @@ ports:
 The wildcard address is container-internal only; the exact host publication is
 the external trust boundary. The service mounts only its exact password/JWT/DB
 secret files. Add no Docker socket and no runtime state mount. Secret values are
-never copied into ordinary environment variables; `PlatformControlSettings` is
-the single owner that reads and validates exact files for
-regular-file/permission/single-line/NUL/sentinel/distinct-value rules.
+never copied into ordinary environment variables. Host bootstrap owns exact
+inventory, permissions, single-line/NUL/sentinel, and cross-service uniqueness;
+`PlatformControlSettings` owns the API/JWT/database file-identity and API/JWT
+content checks inside the service.
 
-`init-platform-roles.sh` creates fixed `platform_control` and `platform_supervisor` roles using mounted secret files, grants schema usage, grants platform-control SELECT plus `runtime_access_requests` terminal-field update and audit INSERT only, and grants Supervisor/Operator the reviewed Registry application permissions. The script uses `psql` variables, never shell-interpolated SQL passwords.
+The exact Compose deployment contract is:
+
+- PostgreSQL image is pinned to `postgres:17.10-alpine`, matching the Phase 2A
+  migration acceptance major/minor. It has profile `platform`, joins only the
+  internal `platform-db` network, exposes container port 5432 without a host
+  publication, and stores data only in named volume `platform-postgres-data` at
+  `/var/lib/postgresql/data`.
+- PostgreSQL receives exactly the admin, platform-control-role, and
+  platform-supervisor-role password files. `POSTGRES_PASSWORD_FILE` is a fixed
+  file path; no password or DSN value is present in environment. Its fixed
+  health check is `pg_isready` against database `platform` and user `postgres`.
+- `platform-control` uses the already reviewed repository runtime image/build,
+  profile `platform`, only `platform-db`, and waits for PostgreSQL health. It is
+  explicitly non-root (`1000:1000`), `read_only`, `init: true`, drops all
+  capabilities, enables `no-new-privileges`, has no `extra_hosts`, and has no
+  volumes. It receives exactly API password, JWT secret, and platform-control DB
+  password files. A fixed tmpfs is allowed only if a focused runtime test proves
+  Python needs it.
+- The exact top-level platform inventory is one internal network, one named data
+  volume, and five secrets. Platform-control must not receive the admin or
+  supervisor password, trading/exchange secrets, Docker socket, root repository,
+  runtime state, Bot configuration/state, strategy, research data, or a general
+  secret-root mount.
+
+`init-platform-roles.sh` is idempotent and safe to rerun after Alembic creates
+tables. It creates fixed LOGIN roles `platform_control` and
+`platform_supervisor`, obtains their passwords from the two exact role-password
+files,
+and uses `pg_read_file` plus `format(..., %L)`/`\gexec` or an equivalently safe
+psql-variable mechanism. Passwords must never be shell-interpolated into SQL,
+placed on process arguments, printed, or included in ordinary environment.
+
+The script revokes PUBLIC database/schema creation privileges and grants only:
+
+- `platform_control`: CONNECT on database `platform`, USAGE on schema `public`,
+  SELECT on the seven Phase 2A Catalog/Registry tables, INSERT on
+  `runtime_access_requests` and `runtime_audit_events`, and column-limited UPDATE
+  of only `status`, `result_code`, and `completed_at` on
+  `runtime_access_requests`;
+- `platform_supervisor`: CONNECT/USAGE, SELECT on all seven tables, and
+  INSERT/UPDATE on the six Registry tables (`runtime_instances`,
+  `runtime_attempts`, `runtime_lifecycle_jobs`, `runtime_endpoints`,
+  `runtime_access_requests`, and `runtime_audit_events`);
+- neither role receives DELETE, TRUNCATE, DDL, role-management, database-owner,
+  broad default-table, or platform-control lifecycle authority.
+
+The script conditionally grants table privileges only when migrated tables
+exist; Task 7 reruns it after Alembic upgrade and verifies effective privileges.
+Do not use broad `ALTER DEFAULT PRIVILEGES` for future tables.
 
 - [ ] **Step 4: Extend bootstrap and contract validation**
 
 Add the exact five platform secret specifications under
 `ft_userdata/secrets/platform/` to `bootstrap_runtime.py` without adding a
-directory scan. Extend `runtime_contract.py` with fixed platform service
-validation separate from `ops/runtime-services.json`; the old manifest remains
-migration input for exactly three current processes. Extend
-`compose_runtime.py` only enough to permit `--profile platform config`; do not
-add platform services to the reviewed legacy launch path or weaken its image
-provenance gates.
+directory scan:
+
+```text
+postgres_admin_password
+platform_control_db_password
+platform_supervisor_db_password
+api_password
+jwt_secret_key
+```
+
+`init_runtime()` creates missing files atomically with host permission 0600,
+hardens existing regular files without overwriting their values, and keeps all
+five values unique from each other and from all legacy service secrets.
+`verify_runtime()` validates the exact five paths, regular-file/permission,
+single-line/NUL/sentinel/minimum-length, and global uniqueness rules. Platform
+secret rotation is intentionally unsupported in Phase 2A because database-role
+password rotation requires a coordinated transaction; do not add `platform` to
+legacy `rotate-secrets`.
+
+Extend `runtime_contract.py` with `validate_platform_compose()` and a closed
+`--platform` CLI selector separate from `validate_compose()` and
+`ops/runtime-services.json`; the old validator/manifest remain migration input
+for exactly three current processes. The platform validator enforces exact two
+services, exact five top-level secrets, exact internal network/named volume,
+the container-bind/host-loopback pair, fixed `_FILE` paths, no direct secret or
+DSN environment values, exact secret allocation, and every least-privilege
+mount/process rule above. Mutation tests must prove it rejects an admin or
+supervisor secret on platform-control, a wildcard host publication, a loopback
+container bind in container mode, Docker/root/state mounts, direct passwords or
+DSNs, extra services/secrets/networks/volumes, and broadened privilege script
+statements.
+
+Extend `compose_runtime.py` only enough to permit the exact read-only command
+`--profile platform config [--quiet] [--format json]`. It must reject platform
+`up`, mixed platform/legacy profiles, arbitrary services/flags, and must not add
+platform services to the reviewed legacy launch/emergency path or weaken its
+image provenance gates. Add a separate `render_platform_compose()` helper;
+preserve legacy `render_compose()` behavior and exact-three validation.
 
 - [ ] **Step 5: Run GREEN and commit root task**
 
 ```powershell
-python -S -m unittest tests.test_platform_control_contract tests.test_bootstrap_runtime tests.test_runtime_contract -v
+python -S -m unittest tests.test_platform_control_contract tests.test_bootstrap_runtime tests.test_compose_runtime tests.test_runtime_contract -v
 python tools/compose_runtime.py --profile platform config --format json > $env:TEMP\platform-compose.json
-python tools/runtime_contract.py --compose-json $env:TEMP\platform-compose.json
+python tools/runtime_contract.py --platform --compose-json $env:TEMP\platform-compose.json
 git add docker-compose.yml docker/postgres/init-platform-roles.sh tools/bootstrap_runtime.py tools/compose_runtime.py tools/runtime_contract.py tests/test_platform_control_contract.py tests/test_bootstrap_runtime.py tests/test_compose_runtime.py tests/test_runtime_contract.py
 git commit -m "feat(platform): add isolated control-plane services"
 ```
