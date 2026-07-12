@@ -454,7 +454,10 @@ class CapabilityName(StrEnum):
 
 class CapabilityDecision(CatalogModel):
     allowed: bool
-    reason_code: str | None = None
+    reason_code: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
 
     @model_validator(mode="after")
     def validate_reason(self) -> "CapabilityDecision":
@@ -508,6 +511,8 @@ Define:
 ```python
 from functools import cache
 
+from pydantic import Field, model_validator
+
 from freqtrade.markets.capability_policy import (
     CapabilityDecision,
     CapabilityName,
@@ -526,9 +531,28 @@ from freqtrade.markets.instrument import MarketType
 
 
 class CatalogSnapshot(CatalogModel):
-    revision_id: str
+    revision_id: str = Field(min_length=1, max_length=128)
     catalog: MarketCatalog
     product_policies: tuple[ProductCapabilityPolicy, ...]
+
+    @model_validator(mode="after")
+    def validate_product_policies(self) -> "CatalogSnapshot":
+        catalog_product_keys = {
+            (product.market_id, product.product_id)
+            for product in self.catalog.products
+        }
+        policy_keys = [
+            (policy.market_id, policy.product_id)
+            for policy in self.product_policies
+        ]
+        if len(policy_keys) != len(set(policy_keys)):
+            raise ValueError("duplicate product capability policy")
+        policy_key_set = set(policy_keys)
+        if policy_key_set - catalog_product_keys:
+            raise ValueError("policy references unknown product")
+        if catalog_product_keys - policy_key_set:
+            raise ValueError("product is missing capability policy")
+        return self
 
     def capability(
         self,
@@ -742,6 +766,14 @@ The cached snapshot must be deeply immutable at the capability boundary. Add a
 mutation regression proving that assigning through `policy.decisions[...]`
 raises `TypeError`; `frozen=True` alone is insufficient because it does not
 freeze the contents of a plain `dict`.
+
+The public snapshot contract must also reject duplicate, dangling, and missing
+product capability policies so every catalog product has exactly one
+unambiguous policy. Add direct constructor regressions and SQL-payload recovery
+regressions for all three invalid forms. Add revision boundary tests proving an
+empty or 129-character ID is rejected and a 128-character ID is accepted. A
+denied capability reason code must match stable lower snake-case syntax; blank,
+whitespace-only, and otherwise unstable codes are invalid.
 
 Add these exports to `freqtrade/freqtrade/markets/__init__.py`:
 
