@@ -318,6 +318,8 @@ jobs:
 
       - name: Verify platform-control least privilege
         shell: bash
+        env:
+          REVIEWED_IMAGE_ID: ${{ steps.reviewed-image.outputs.image_id }}
         run: |
           set -euo pipefail
           platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
@@ -898,7 +900,7 @@ jobs:
             --mount type=bind,src="${platform_ci_dir}/jwt_secret_key",dst=/run/secrets/jwt_secret_key,readonly \
             --mount type=bind,src="${platform_ci_dir}/platform_control_db_password",dst=/run/secrets/database_password,readonly \
             --entrypoint python \
-            "${{ steps.reviewed-image.outputs.image_id }}" \
+            "${REVIEWED_IMAGE_ID}" \
             -m freqtrade.platform_control
 
           docker network connect freqtrade-platform-ci platform-control-ci

@@ -698,6 +698,18 @@ docker() {
 
 
 class RootSafetyWorkflowTests(unittest.TestCase):
+    def test_github_expression_run_blocks_stay_below_service_limit(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        literal_run_blocks = re.findall(
+            r"(?ms)^        run: \|\r?\n(.*?)(?=^      - |\Z)",
+            workflow,
+        )
+
+        self.assertTrue(literal_run_blocks)
+        for run_block in literal_run_blocks:
+            if "${{" in run_block:
+                self.assertLessEqual(len(run_block), 21_000)
+
     @unittest.skipIf(
         os.environ.get("ROOT_STDLIB_CHILD") == "1",
         "avoid recursively spawning the isolated import check",
@@ -1344,6 +1356,8 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "--init",
             "--cap-drop ALL",
             "--security-opt no-new-privileges:true",
+            "REVIEWED_IMAGE_ID: ${{ steps.reviewed-image.outputs.image_id }}",
+            '"${REVIEWED_IMAGE_ID}"',
             "docker network connect freqtrade-platform-ci platform-control-ci",
             "--publish 127.0.0.1:8090:8090",
             "--netrc-file",
