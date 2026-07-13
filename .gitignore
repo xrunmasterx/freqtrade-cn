@@ -1,5 +1,15 @@
 .env
-ft_userdata/user_data/config.json
+
+# Operational configuration is local-only.
+ft_userdata/user_data/config*.json
+!ft_userdata/user_data/config*.example.json
+
+# Runtime credentials and mutable state.
+ft_userdata/secrets/
+ft_userdata/runtime/
+ft_userdata/backups/
+
+# Generated data.
 ft_userdata/user_data/logs/
 ft_userdata/user_data/data/
 ft_userdata/user_data/backtest_results/
@@ -14,3 +24,5 @@ ft_userdata/user_data/strategies/__pycache__/
 screenshots/
 *verify.png
 .superpowers/**/state/
+.superpowers/sdd/
+.worktrees/

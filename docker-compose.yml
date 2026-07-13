@@ -1,41 +1,315 @@
 ---
+secrets:
+  freqtrade_api_password:
+    file: ./ft_userdata/secrets/freqtrade/api_password
+  freqtrade_jwt_secret:
+    file: ./ft_userdata/secrets/freqtrade/jwt_secret_key
+  freqtrade_ws_token:
+    file: ./ft_userdata/secrets/freqtrade/ws_token
+  freqtrade_futures_api_password:
+    file: ./ft_userdata/secrets/freqtrade-futures/api_password
+  freqtrade_futures_jwt_secret:
+    file: ./ft_userdata/secrets/freqtrade-futures/jwt_secret_key
+  freqtrade_futures_ws_token:
+    file: ./ft_userdata/secrets/freqtrade-futures/ws_token
+  freqtrade_research_api_password:
+    file: ./ft_userdata/secrets/freqtrade-research/api_password
+  freqtrade_research_jwt_secret:
+    file: ./ft_userdata/secrets/freqtrade-research/jwt_secret_key
+  freqtrade_research_ws_token:
+    file: ./ft_userdata/secrets/freqtrade-research/ws_token
+  platform_postgres_admin_password:
+    file: ./ft_userdata/secrets/platform/postgres_admin_password
+  platform_control_db_password:
+    file: ./ft_userdata/secrets/platform/platform_control_db_password
+  platform_supervisor_db_password:
+    file: ./ft_userdata/secrets/platform/platform_supervisor_db_password
+  platform_control_api_password:
+    file: ./ft_userdata/secrets/platform/api_password
+  platform_control_jwt_secret:
+    file: ./ft_userdata/secrets/platform/jwt_secret_key
+
+networks:
+  platform-db:
+    internal: true
+  platform-ingress:
+
+volumes:
+  platform-postgres-data:
+
+x-freqtrade-common: &freqtrade-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: freqtrade-cn:local
+  restart: unless-stopped
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
 services:
-  freqtrade:
+  platform-postgres:
+    profiles: ["platform"]
+    image: postgres:17.10-alpine
+    container_name: freqtrade-cn-platform-postgres
+    restart: unless-stopped
+    networks:
+      - platform-db
+    expose:
+      - 5432
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+    secrets:
+      - source: platform_postgres_admin_password
+        target: postgres_admin_password
+      - source: platform_control_db_password
+        target: platform_control_db_password
+      - source: platform_supervisor_db_password
+        target: platform_supervisor_db_password
+    volumes:
+      - type: volume
+        source: platform-postgres-data
+        target: /var/lib/postgresql/data
+      - type: bind
+        source: ./docker/postgres/init-platform-roles.sh
+        target: /docker-entrypoint-initdb.d/init-platform-roles.sh
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  platform-control:
+    profiles: ["platform"]
     build:
       context: .
       dockerfile: Dockerfile
     image: freqtrade-cn:local
-    container_name: freqtrade-cn
+    container_name: freqtrade-cn-platform-control
     restart: unless-stopped
-    volumes:
-      - "./ft_userdata/user_data:/freqtrade/user_data"
+    entrypoint: ["python", "-m", "freqtrade.platform_control"]
+    user: "1000:1000"
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - platform-db
+      - platform-ingress
+    depends_on:
+      platform-postgres:
+        condition: service_healthy
+    secrets:
+      - source: platform_control_api_password
+        target: api_password
+      - source: platform_control_jwt_secret
+        target: jwt_secret_key
+      - source: platform_control_db_password
+        target: database_password
+    environment:
+      PLATFORM_CONTROL_BIND_MODE: container_loopback_publish
+      PLATFORM_CONTROL_LISTEN_HOST: 0.0.0.0
+      PLATFORM_CONTROL_USERNAME: platform_operator
+      PLATFORM_CONTROL_API_PASSWORD_FILE: /run/secrets/api_password
+      PLATFORM_CONTROL_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      PLATFORM_DATABASE_HOST: platform-postgres
+      PLATFORM_DATABASE_PORT: "5432"
+      PLATFORM_DATABASE_NAME: platform
+      PLATFORM_DATABASE_USERNAME: platform_control
+      PLATFORM_DATABASE_PASSWORD_FILE: /run/secrets/database_password
     ports:
-      - "127.0.0.1:${FT_UI_PORT:-8081}:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - target: 8090
+        published: "8090"
+        host_ip: 127.0.0.1
+        protocol: tcp
+
+  freqtrade:
+    <<: *freqtrade-common
+    profiles: ["trading"]
+    container_name: freqtrade-cn
+    volumes:
+      - type: bind
+        source: ./ft_userdata/user_data/config.json
+        target: /freqtrade/config/runtime.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ops/config/trading-safety.json
+        target: /freqtrade/config/trading-safety.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/strategies
+        target: /freqtrade/user_data/strategies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade
+        target: /freqtrade/state
+        bind:
+          create_host_path: false
+    secrets:
+      - source: freqtrade_api_password
+        target: api_password
+      - source: freqtrade_jwt_secret
+        target: jwt_secret_key
+      - source: freqtrade_ws_token
+        target: ws_token
+    environment:
+      FT_API_PASSWORD_FILE: /run/secrets/api_password
+      FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      FT_WS_TOKEN_FILE: /run/secrets/ws_token
+      HOME: /freqtrade/state/home
+    ports:
+      - target: 8080
+        published: "${FT_UI_PORT:-8081}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     command: >
       trade
-      --logfile /freqtrade/user_data/logs/freqtrade.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
-      --config /freqtrade/user_data/config.json
+      --logfile /freqtrade/state/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/state/trades.sqlite
+      --config /freqtrade/config/runtime.json
+      --config /freqtrade/config/trading-safety.json
+      --user-data-dir /freqtrade/state
+      --strategy-path /freqtrade/user_data/strategies
       --strategy SampleStrategy
 
   freqtrade-futures:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: freqtrade-cn:local
+    <<: *freqtrade-common
+    profiles: ["trading"]
     container_name: freqtrade-cn-futures
-    restart: unless-stopped
     volumes:
-      - "./ft_userdata/user_data:/freqtrade/user_data"
+      - type: bind
+        source: ./ft_userdata/user_data/config.volatility.futures.json
+        target: /freqtrade/config/runtime.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ops/config/trading-safety.json
+        target: /freqtrade/config/trading-safety.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/strategies
+        target: /freqtrade/user_data/strategies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade-futures
+        target: /freqtrade/state
+        bind:
+          create_host_path: false
+    secrets:
+      - source: freqtrade_futures_api_password
+        target: api_password
+      - source: freqtrade_futures_jwt_secret
+        target: jwt_secret_key
+      - source: freqtrade_futures_ws_token
+        target: ws_token
+    environment:
+      FT_API_PASSWORD_FILE: /run/secrets/api_password
+      FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      FT_WS_TOKEN_FILE: /run/secrets/ws_token
+      HOME: /freqtrade/state/home
     ports:
-      - "127.0.0.1:${FT_FUTURES_UI_PORT:-8082}:8080"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - target: 8080
+        published: "${FT_FUTURES_UI_PORT:-8082}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     command: >
       trade
-      --logfile /freqtrade/user_data/logs/freqtrade-futures.log
-      --db-url sqlite:////freqtrade/user_data/tradesv3-futures.sqlite
-      --config /freqtrade/user_data/config.volatility.futures.json
+      --logfile /freqtrade/state/logs/freqtrade-futures.log
+      --db-url sqlite:////freqtrade/state/trades.sqlite
+      --config /freqtrade/config/runtime.json
+      --config /freqtrade/config/trading-safety.json
+      --user-data-dir /freqtrade/state
+      --strategy-path /freqtrade/user_data/strategies
       --strategy VolatilitySystem
+
+  freqtrade-research:
+    <<: *freqtrade-common
+    profiles: ["research"]
+    container_name: freqtrade-cn-research
+    volumes:
+      - type: bind
+        source: ./ft_userdata/user_data/config.research.json
+        target: /freqtrade/config/runtime.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/strategies
+        target: /freqtrade/user_data/strategies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/research_data
+        target: /freqtrade/user_data/research_data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/runtime/freqtrade-research
+        target: /freqtrade/state
+        bind:
+          create_host_path: false
+    secrets:
+      - source: freqtrade_research_api_password
+        target: api_password
+      - source: freqtrade_research_jwt_secret
+        target: jwt_secret_key
+      - source: freqtrade_research_ws_token
+        target: ws_token
+    environment:
+      FT_API_PASSWORD_FILE: /run/secrets/api_password
+      FT_JWT_SECRET_FILE: /run/secrets/jwt_secret_key
+      FT_WS_TOKEN_FILE: /run/secrets/ws_token
+      HOME: /freqtrade/state/home
+    ports:
+      - target: 8080
+        published: "${FT_RESEARCH_UI_PORT:-8083}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    command: >
+      webserver
+      --logfile /freqtrade/state/logs/freqtrade-research.log
+      --config /freqtrade/config/runtime.json
+      --user-data-dir /freqtrade/state

@@ -1,0 +1,1161 @@
+name: Root Safety
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feature/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: root-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - uses: docker/setup-compose-action@4eb059ff7f16592f9c84d5ca339c53cb7c5064e2 # v2.3.0
+        with:
+          version: v5.1.4
+
+      - name: Run standard-library root unit tests
+        env:
+          ROOT_RUNTIME_TEST_READY: "0"
+        run: python -S -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Enforce tracked config policy
+        run: python tools/runtime_contract.py --check-configs-only
+
+      - name: Bootstrap ephemeral runtime
+        run: |
+          python tools/bootstrap_runtime.py init
+          python tools/bootstrap_runtime.py sanitize-api-configs
+          python tools/bootstrap_runtime.py verify
+
+      - name: Enforce full runtime contract
+        run: python tools/runtime_contract.py
+
+      - name: Run bootstrapped runtime root tests
+        env:
+          ROOT_RUNTIME_TEST_READY: "1"
+        run: python -S -m unittest tests.test_trading_config_safety.TradingConfigSafetyTests -v
+
+      - name: Install backend development dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python -e "./freqtrade[develop,hyperopt]"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
+
+      - name: Run backend P0 regressions
+        working-directory: freqtrade
+        run: |
+          python -m pytest \
+            tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders_keeps_recent_missing_orders \
+            tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders \
+            tests/freqtradebot/test_freqtradebot.py::test_startup_update_open_orders_keeps_missing_orders_at_five_day_boundary \
+            tests/test_directory_operations.py \
+            tests/strategy/test_interface.py::test_get_signal_old_dataframe \
+            tests/strategy/test_interface.py::test_ignore_expired_candle \
+            tests/markets/test_catalog.py \
+            tests/platform/test_catalog_repository.py \
+            tests/rpc/test_api_catalog.py \
+            tests/research/test_profiles.py \
+            -q -p no:cacheprovider
+          ruff check \
+            freqtrade/freqtradebot.py \
+            freqtrade/configuration/directory_operations.py \
+            freqtrade/commands/build_config_commands.py \
+            tests/freqtradebot/test_freqtradebot.py \
+            tests/test_directory_operations.py \
+            freqtrade/markets/catalog.py \
+            freqtrade/markets/default_catalog.py \
+            freqtrade/markets/capability_policy.py \
+            freqtrade/platform \
+            freqtrade/rpc/api_server/api_catalog.py \
+            freqtrade/research/profiles.py \
+            tests/markets/test_catalog.py \
+            tests/platform/test_catalog_repository.py \
+            tests/rpc/test_api_catalog.py \
+            tests/research/test_profiles.py
+
+      - name: Run runtime-dependent root selector
+        env:
+          ROOT_RUNTIME_TEST_READY: "1"
+        run: python -m unittest tests.test_trading_config_safety.TradingConfigSafetyTests.test_actual_research_profile_paths_resolve_below_read_only_input -v
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: frequi/pnpm-lock.yaml
+
+      - name: Install FreqUI dependencies
+        working-directory: frequi
+        run: pnpm install --frozen-lockfile
+
+      - name: Run FreqUI P0 regressions
+        working-directory: frequi
+        run: |
+          pnpm exec vitest run \
+            tests/unit/ftbotwrapperTradeRouting.spec.ts \
+            tests/unit/tradeActionTarget.spec.ts \
+            tests/unit/appI18n.spec.ts \
+            tests/component/ConfirmDialogBox.spec.ts \
+            tests/component/ForceTradeForms.spec.ts \
+            tests/component/TradeListTradeActions.spec.ts \
+            tests/component/BotControls.spec.ts
+          pnpm typecheck
+          pnpm exec eslint --quiet \
+            src/types/types.ts \
+            src/stores/ftbotwrapper.ts \
+            src/components/ftbot/ForceEntryForm.vue \
+            src/components/ftbot/ForceExitForm.vue \
+            src/components/ftbot/TradeList.vue \
+            src/components/ftbot/BotControls.vue \
+            src/components/general/ConfirmDialogBox.vue \
+            src/utils/tradeActionTarget.ts \
+            tests/unit/ftbotwrapperTradeRouting.spec.ts \
+            tests/unit/tradeActionTarget.spec.ts \
+            tests/component/ForceTradeForms.spec.ts \
+            tests/component/TradeListTradeActions.spec.ts \
+            tests/component/ConfirmDialogBox.spec.ts \
+            tests/component/BotControls.spec.ts
+
+      - name: Render and enforce Compose
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose_rendered="${RUNNER_TEMP}/compose.rendered.json"
+          python tools/compose_runtime.py --profile trading --profile research config --format json > "${compose_rendered}"
+          python tools/runtime_contract.py --compose-json "${compose_rendered}"
+          python tools/compose_runtime.py --profile trading --profile research config --quiet
+
+      - name: Build integrated image
+        id: reviewed-image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(python tools/image_provenance.py build --print-image-id)"
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+          docker tag "${image_id}" freqtrade-cn:local
+
+      - name: Start platform PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+          install -d -m 0700 "${platform_ci_dir}"
+          docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.before"
+
+          for secret_name in \
+            postgres_admin_password \
+            platform_control_db_password \
+            platform_supervisor_db_password \
+            api_password \
+            jwt_secret_key
+          do
+            install -m 0444 \
+              "ft_userdata/secrets/platform/${secret_name}" \
+              "${platform_ci_dir}/${secret_name}"
+          done
+
+          python - "${platform_ci_dir}/postgres_admin_password" "${platform_ci_dir}/pgpass" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          password = Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\r\n")
+          if not password or any(character in password for character in "\r\n\x00"):
+              raise SystemExit("invalid CI PostgreSQL secret")
+          passfile = Path(sys.argv[2])
+          passfile.write_text(
+              f"127.0.0.1:55432:*:postgres:{password}\n",
+              encoding="utf-8",
+          )
+          os.chmod(passfile, 0o600)
+          PY
+
+          echo "PGPASSFILE=${platform_ci_dir}/pgpass" >> "${GITHUB_ENV}"
+          echo "PLATFORM_TEST_POSTGRES_URL=postgresql+psycopg://postgres@127.0.0.1:55432/platform_test_ci" >> "${GITHUB_ENV}"
+
+          docker network create --internal freqtrade-platform-ci
+          docker network create freqtrade-platform-ingress-ci
+          docker run --detach \
+            --name platform-postgres-ci \
+            --publish 127.0.0.1:55432:5432 \
+            --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=512m \
+            --env POSTGRES_DB=platform \
+            --env POSTGRES_USER=postgres \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/postgres_admin_password \
+            --mount type=bind,src="${platform_ci_dir}/postgres_admin_password",dst=/run/secrets/postgres_admin_password,readonly \
+            --mount type=bind,src="${platform_ci_dir}/platform_control_db_password",dst=/run/secrets/platform_control_db_password,readonly \
+            --mount type=bind,src="${platform_ci_dir}/platform_supervisor_db_password",dst=/run/secrets/platform_supervisor_db_password,readonly \
+            --mount type=bind,src="${GITHUB_WORKSPACE}/docker/postgres/init-platform-roles.sh",dst=/docker-entrypoint-initdb.d/init-platform-roles.sh,readonly \
+            postgres:17.10-alpine
+          docker network connect freqtrade-platform-ci platform-postgres-ci
+
+          ready=0
+          for attempt in $(seq 1 60); do
+            if docker exec platform-postgres-ci pg_isready --username postgres --dbname platform >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "${ready}" -eq 1
+          docker exec platform-postgres-ci \
+            psql --username postgres --dbname postgres --set ON_ERROR_STOP=on \
+            --command 'CREATE DATABASE platform_test_ci'
+
+      - name: Upgrade platform schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from datetime import UTC, datetime
+          from pathlib import Path
+
+          from alembic import command
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          from sqlalchemy import create_engine, text
+
+          from freqtrade.markets import default_catalog_snapshot
+          from freqtrade.platform.catalog_repository import SqlCatalogRepository
+          from freqtrade.platform.database import PlatformDatabaseSettings
+
+          settings = PlatformDatabaseSettings(
+              host="127.0.0.1",
+              port=55432,
+              database="platform",
+              username="postgres",
+              password_file=Path(os.environ["RUNNER_TEMP"])
+              / "platform-control-ci"
+              / "postgres_admin_password",
+          )
+          config = Config("freqtrade/alembic-platform.ini")
+          config.set_main_option(
+              "sqlalchemy.url",
+              settings.sqlalchemy_url().render_as_string(hide_password=False).replace("%", "%%"),
+          )
+          command.upgrade(config, "head")
+          expected_head = ScriptDirectory.from_config(config).get_current_head()
+          engine = create_engine(settings.sqlalchemy_url())
+          try:
+              with engine.connect() as connection:
+                  actual_head = connection.scalar(text("SELECT version_num FROM alembic_version"))
+              if actual_head != expected_head:
+                  raise SystemExit("platform Alembic head differs")
+              SqlCatalogRepository(engine).publish(
+                  default_catalog_snapshot(),
+                  created_at=datetime.now(UTC),
+              )
+          finally:
+              engine.dispose()
+          PY
+          docker exec platform-postgres-ci sh /docker-entrypoint-initdb.d/init-platform-roles.sh
+
+      - name: Run platform PostgreSQL integration tests
+        shell: bash
+        working-directory: freqtrade
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            tests/platform/test_platform_migrations.py \
+            tests/platform/test_runtime_repository.py \
+            -q -p no:cacheprovider \
+            --junitxml="${RUNNER_TEMP}/platform-control-ci/postgres-tests.xml"
+          python - "${RUNNER_TEMP}/platform-control-ci/postgres-tests.xml" <<'PY'
+          import sys
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          root = ElementTree.parse(Path(sys.argv[1])).getroot()
+          skipped = sum(int(node.attrib.get("skipped", "0")) for node in root.iter("testsuite"))
+          if skipped:
+              raise SystemExit("platform PostgreSQL selectors skipped tests")
+          PY
+
+      - name: Run Phase 2A backend regressions
+        shell: bash
+        working-directory: freqtrade
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            tests/markets/test_catalog.py \
+            tests/platform/test_database.py \
+            tests/platform/test_catalog_repository.py \
+            tests/platform/test_runtime_domain.py \
+            tests/platform/test_runtime_service.py \
+            tests/platform_control \
+            tests/rpc/test_api_catalog.py \
+            -q -p no:cacheprovider
+          ruff check \
+            freqtrade/markets \
+            freqtrade/platform \
+            freqtrade/platform_control \
+            tests/markets \
+            tests/platform \
+            tests/platform_control
+
+      - name: Verify platform-control least privilege
+        shell: bash
+        env:
+          REVIEWED_IMAGE_ID: ${{ steps.reviewed-image.outputs.image_id }}
+        run: |
+          set -euo pipefail
+          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+          docker network disconnect bridge platform-postgres-ci
+          database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
+          printf 'platform PostgreSQL networks after isolation: %s\n' "${database_networks}"
+          test "${database_networks}" = "freqtrade-platform-ci"
+          docker exec --interactive platform-postgres-ci \
+            psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          CREATE ROLE platform_ci_control_inbound NOLOGIN;
+          CREATE ROLE platform_ci_control_outbound NOLOGIN;
+          CREATE ROLE platform_ci_supervisor_inbound NOLOGIN;
+          CREATE ROLE platform_ci_supervisor_outbound NOLOGIN;
+          CREATE ROLE platform_ci_owner NOLOGIN;
+          CREATE ROLE platform_ci_delegate NOLOGIN;
+          CREATE ROLE platform_ci_downstream NOLOGIN;
+          CREATE TABLE public.platform_ci_acl_table (id integer);
+          CREATE SEQUENCE public.platform_ci_acl_sequence;
+          CREATE SCHEMA platform_ci_private AUTHORIZATION platform_ci_owner;
+          GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT DELETE ON TABLE public.platform_ci_acl_table
+            TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT UPDATE ON SEQUENCE public.platform_ci_acl_sequence
+            TO platform_ci_delegate WITH GRANT OPTION;
+          SET ROLE platform_ci_owner;
+          CREATE TABLE platform_ci_private.probe (id integer);
+          CREATE SEQUENCE platform_ci_private.probe_sequence;
+          GRANT USAGE ON SCHEMA platform_ci_private
+            TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT SELECT ON TABLE platform_ci_private.probe
+            TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT USAGE ON SEQUENCE platform_ci_private.probe_sequence
+            TO platform_ci_delegate WITH GRANT OPTION;
+          RESET ROLE;
+          SET ROLE platform_ci_delegate;
+          GRANT CREATE ON DATABASE platform TO platform_control;
+          GRANT CREATE ON SCHEMA public TO platform_supervisor;
+          GRANT DELETE ON TABLE public.platform_ci_acl_table
+            TO platform_control WITH GRANT OPTION;
+          GRANT UPDATE ON SEQUENCE public.platform_ci_acl_sequence TO platform_supervisor;
+          GRANT USAGE ON SCHEMA platform_ci_private TO platform_control;
+          GRANT SELECT ON TABLE platform_ci_private.probe TO platform_supervisor;
+          GRANT USAGE ON SEQUENCE platform_ci_private.probe_sequence TO platform_control;
+          RESET ROLE;
+          SET ROLE platform_control;
+          GRANT DELETE ON TABLE public.platform_ci_acl_table TO platform_ci_downstream;
+          RESET ROLE;
+          GRANT UPDATE (desired_state) ON TABLE public.runtime_instances
+            TO platform_ci_delegate WITH GRANT OPTION;
+          SET ROLE platform_ci_delegate;
+          GRANT UPDATE (desired_state) ON TABLE public.runtime_instances
+            TO platform_control WITH GRANT OPTION;
+          RESET ROLE;
+          SET ROLE platform_control;
+          GRANT UPDATE (desired_state) ON TABLE public.runtime_instances
+            TO platform_ci_downstream;
+          RESET ROLE;
+          ALTER ROLE platform_control WITH SUPERUSER CREATEDB CREATEROLE INHERIT REPLICATION BYPASSRLS;
+          ALTER ROLE platform_supervisor WITH SUPERUSER CREATEDB CREATEROLE INHERIT REPLICATION BYPASSRLS;
+          GRANT platform_ci_control_inbound TO platform_control;
+          GRANT platform_control TO platform_ci_control_outbound;
+          GRANT platform_ci_supervisor_inbound TO platform_supervisor;
+          GRANT platform_supervisor TO platform_ci_supervisor_outbound;
+          SQL
+
+          acl_before="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT column_grantor_role.rolname, column_grantee_role.rolname,
+                     privilege.privilege_type, privilege.is_grantable
+              FROM pg_attribute AS attribute
+              CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+              JOIN pg_roles AS column_grantee_role
+                ON column_grantee_role.oid = privilege.grantee
+              JOIN pg_roles AS column_grantor_role
+                ON column_grantor_role.oid = privilege.grantor
+              WHERE attribute.attrelid = 'public.runtime_instances'::regclass
+                AND attribute.attname = 'desired_state'
+                AND column_grantee_role.rolname IN ('platform_control', 'platform_ci_downstream')
+              ORDER BY column_grantor_role.rolname")"
+          test "${acl_before}" = $'platform_ci_delegate|platform_control|UPDATE|t\nplatform_control|platform_ci_downstream|UPDATE|f'
+
+          object_acl_before="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM (
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+                WHERE database.datname = 'platform'
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+              ) AS object_acl
+              JOIN pg_roles AS grantor_role ON grantor_role.oid = object_acl.grantor
+              JOIN pg_roles AS grantee_role ON grantee_role.oid = object_acl.grantee
+              WHERE (grantor_role.rolname = 'platform_ci_delegate'
+                  AND grantee_role.rolname IN ('platform_control', 'platform_supervisor'))
+                 OR (grantor_role.rolname = 'platform_control'
+                  AND grantee_role.rolname = 'platform_ci_downstream')")"
+          test "${object_acl_before}" = "8"
+
+          docker exec platform-postgres-ci sh /docker-entrypoint-initdb.d/init-platform-roles.sh
+
+          role_state="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
+                     rolinherit, rolreplication, rolbypassrls
+              FROM pg_roles
+              WHERE rolname IN ('platform_control', 'platform_supervisor')
+              ORDER BY rolname")"
+          test "${role_state}" = $'platform_control|t|f|f|f|f|f|f\nplatform_supervisor|t|f|f|f|f|f|f'
+
+          membership_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_auth_members AS membership
+              JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid
+              JOIN pg_roles AS member_role ON member_role.oid = membership.member
+              WHERE granted_role.rolname IN ('platform_control', 'platform_supervisor')
+                 OR member_role.rolname IN ('platform_control', 'platform_supervisor')")"
+          test "${membership_count}" = "0"
+
+          acl_after="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_attribute AS attribute
+              CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+              JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE attribute.attrelid = 'public.runtime_instances'::regclass
+                AND attribute.attname = 'desired_state'
+                AND grantee.rolname IN ('platform_control', 'platform_ci_downstream')")"
+          test "${acl_after}" = "0"
+
+          effective_after="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT has_column_privilege('platform_control', 'public.runtime_instances', 'desired_state', 'UPDATE'),
+                     has_column_privilege('platform_ci_downstream', 'public.runtime_instances', 'desired_state', 'UPDATE')")"
+          test "${effective_after}" = "f|f"
+
+          object_acl_after="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM (
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+                WHERE database.datname = 'platform'
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+                UNION ALL
+                SELECT privilege.grantor, privilege.grantee
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                WHERE namespace.nspname IN ('public', 'platform_ci_private')
+              ) AS object_acl
+              JOIN pg_roles AS grantor_role ON grantor_role.oid = object_acl.grantor
+              JOIN pg_roles AS grantee_role ON grantee_role.oid = object_acl.grantee
+              WHERE (grantor_role.rolname = 'platform_ci_delegate'
+                  AND grantee_role.rolname IN ('platform_control', 'platform_supervisor'))
+                 OR (grantor_role.rolname = 'platform_control'
+                  AND grantee_role.rolname = 'platform_ci_downstream')")"
+          test "${object_acl_after}" = "0"
+
+          object_effective_after="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT has_database_privilege('platform_control', 'platform', 'CREATE'),
+                     has_schema_privilege('platform_supervisor', 'public', 'CREATE'),
+                     has_table_privilege('platform_control', 'public.platform_ci_acl_table', 'DELETE'),
+                     has_sequence_privilege('platform_supervisor', 'public.platform_ci_acl_sequence', 'UPDATE'),
+                     has_schema_privilege('platform_control', 'platform_ci_private', 'USAGE'),
+                     has_table_privilege('platform_supervisor', 'platform_ci_private.probe', 'SELECT'),
+                     has_sequence_privilege('platform_control', 'platform_ci_private.probe_sequence', 'USAGE'),
+                     has_table_privilege('platform_ci_downstream', 'public.platform_ci_acl_table', 'DELETE')")"
+          test "${object_effective_after}" = "f|f|f|f|f|f|f|f"
+
+          database_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT role_name,
+                     has_database_privilege(role_name, 'platform', 'CONNECT'),
+                     has_database_privilege(role_name, 'platform', 'CREATE'),
+                     has_database_privilege(role_name, 'platform', 'TEMPORARY')
+              FROM (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              ORDER BY role_name")"
+          test "${database_privileges}" = $'platform_control|t|f|f\nplatform_supervisor|t|f|f'
+
+          schema_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT role_name,
+                     has_schema_privilege(role_name, 'public', 'USAGE'),
+                     has_schema_privilege(role_name, 'public', 'CREATE')
+              FROM (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              ORDER BY role_name")"
+          test "${schema_privileges}" = $'platform_control|t|f\nplatform_supervisor|t|f'
+
+          undeclared_schema_privilege_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_namespace AS namespace
+              CROSS JOIN (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              WHERE namespace.nspname <> 'public'
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND (has_schema_privilege(role_name, namespace.oid, 'USAGE')
+                  OR has_schema_privilege(role_name, namespace.oid, 'CREATE'))")"
+          test "${undeclared_schema_privilege_count}" = "0"
+
+          table_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH expected(role_name, table_name, can_select, can_insert, can_update) AS (
+                VALUES
+                  ('platform_control', 'platform_catalog_revisions', true, false, false),
+                  ('platform_control', 'runtime_instances', true, false, false),
+                  ('platform_control', 'runtime_attempts', true, false, false),
+                  ('platform_control', 'runtime_lifecycle_jobs', true, false, false),
+                  ('platform_control', 'runtime_endpoints', true, false, false),
+                  ('platform_control', 'runtime_access_requests', true, true, false),
+                  ('platform_control', 'runtime_audit_events', true, true, false),
+                  ('platform_supervisor', 'platform_catalog_revisions', true, false, false),
+                  ('platform_supervisor', 'runtime_instances', true, true, true),
+                  ('platform_supervisor', 'runtime_attempts', true, true, true),
+                  ('platform_supervisor', 'runtime_lifecycle_jobs', true, true, true),
+                  ('platform_supervisor', 'runtime_endpoints', true, true, true),
+                  ('platform_supervisor', 'runtime_access_requests', true, true, true),
+                  ('platform_supervisor', 'runtime_audit_events', true, true, true)
+              )
+              SELECT count(*)
+              FROM expected
+              WHERE has_table_privilege(role_name, format('public.%I', table_name), 'SELECT') <> can_select
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'INSERT') <> can_insert
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'UPDATE') <> can_update
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'DELETE')
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'TRUNCATE')
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'REFERENCES')
+                 OR has_table_privilege(role_name, format('public.%I', table_name), 'TRIGGER')")"
+          test "${table_privileges}" = "0"
+
+          undeclared_table_privilege_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_class AS relation
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND NOT (
+                  namespace.nspname = 'public'
+                  AND relation.relname IN (
+                    'platform_catalog_revisions', 'runtime_instances', 'runtime_attempts',
+                    'runtime_lifecycle_jobs', 'runtime_endpoints',
+                    'runtime_access_requests', 'runtime_audit_events'
+                  )
+                )
+                AND (has_table_privilege(role_name, relation.oid, 'SELECT')
+                  OR has_table_privilege(role_name, relation.oid, 'INSERT')
+                  OR has_table_privilege(role_name, relation.oid, 'UPDATE')
+                  OR has_table_privilege(role_name, relation.oid, 'DELETE')
+                  OR has_table_privilege(role_name, relation.oid, 'TRUNCATE')
+                  OR has_table_privilege(role_name, relation.oid, 'REFERENCES')
+                  OR has_table_privilege(role_name, relation.oid, 'TRIGGER'))")"
+          test "${undeclared_table_privilege_count}" = "0"
+
+          column_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT string_agg(table_name || '.' || column_name, E'\\n' ORDER BY table_name, column_name)
+              FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND has_column_privilege(
+                  'platform_control', format('public.%I', table_name), column_name, 'UPDATE'
+                )")"
+          test "${column_privileges}" = $'runtime_access_requests.completed_at\nruntime_access_requests.result_code\nruntime_access_requests.status'
+
+          column_acl_inventory="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT grantee.rolname, namespace.nspname, relation.relname,
+                     attribute.attname, privilege.privilege_type, privilege.is_grantable
+              FROM pg_attribute AS attribute
+              JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+              JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+              ORDER BY grantee.rolname, namespace.nspname, relation.relname,
+                       attribute.attname, privilege.privilege_type")"
+          test "${column_acl_inventory}" = $'platform_control|public|runtime_access_requests|completed_at|UPDATE|f\nplatform_control|public|runtime_access_requests|result_code|UPDATE|f\nplatform_control|public|runtime_access_requests|status|UPDATE|f'
+
+          sequence_privilege_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_class AS relation
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN (VALUES ('platform_control'), ('platform_supervisor')) AS roles(role_name)
+              WHERE relation.relkind = 'S'
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND (has_sequence_privilege(role_name, relation.oid, 'USAGE')
+                  OR has_sequence_privilege(role_name, relation.oid, 'SELECT')
+                  OR has_sequence_privilege(role_name, relation.oid, 'UPDATE'))")"
+          test "${sequence_privilege_count}" = "0"
+
+          ownership_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*) FROM (
+                SELECT datname FROM pg_database
+                  WHERE pg_get_userbyid(datdba) IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT nspname FROM pg_namespace
+                  WHERE pg_get_userbyid(nspowner) IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT relname FROM pg_class
+                  WHERE pg_get_userbyid(relowner) IN ('platform_control', 'platform_supervisor')
+              ) AS owned_objects")"
+          test "${ownership_count}" = "0"
+
+          grantable_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT
+                (SELECT count(*) FROM information_schema.role_table_grants
+                  WHERE grantee IN ('platform_control', 'platform_supervisor')
+                    AND is_grantable = 'YES')
+                + (SELECT count(*) FROM information_schema.column_privileges
+                  WHERE grantee IN ('platform_control', 'platform_supervisor')
+                    AND is_grantable = 'YES')")"
+          test "${grantable_count}" = "0"
+
+          acl_inventory_difference_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH fixed_roles(role_name) AS (
+                VALUES ('platform_control'), ('platform_supervisor')
+              ), catalog_tables(table_name) AS (
+                VALUES ('platform_catalog_revisions'), ('runtime_instances'),
+                       ('runtime_attempts'), ('runtime_lifecycle_jobs'),
+                       ('runtime_endpoints'), ('runtime_access_requests'),
+                       ('runtime_audit_events')
+              ), control_writes(table_name) AS (
+                VALUES ('runtime_access_requests'), ('runtime_audit_events')
+              ), supervisor_writes(table_name) AS (
+                VALUES ('runtime_instances'), ('runtime_attempts'),
+                       ('runtime_lifecycle_jobs'), ('runtime_endpoints'),
+                       ('runtime_access_requests'), ('runtime_audit_events')
+              ), actual(
+                object_kind, object_name, column_name, role_name,
+                privilege_type, grantor_name, is_grantable
+              ) AS (
+                SELECT 'database', database.datname, '', grantee.rolname,
+                       privilege.privilege_type, grantor.rolname, privilege.is_grantable
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT 'schema', namespace.nspname, '', grantee.rolname,
+                       privilege.privilege_type, grantor.rolname, privilege.is_grantable
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT 'table', format('%I.%I', namespace.nspname, relation.relname), '',
+                       grantee.rolname, privilege.privilege_type,
+                       grantor.rolname, privilege.is_grantable
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+                UNION ALL
+                SELECT 'column', format('%I.%I', namespace.nspname, relation.relname),
+                       attribute.attname, grantee.rolname, privilege.privilege_type,
+                       grantor.rolname, privilege.is_grantable
+                FROM pg_attribute AS attribute
+                JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+                WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
+              ), expected AS (
+                SELECT 'database', 'platform', '', role_name, 'CONNECT', 'postgres', false
+                FROM fixed_roles
+                UNION ALL
+                SELECT 'schema', 'public', '', role_name, 'USAGE', 'pg_database_owner', false
+                FROM fixed_roles
+                UNION ALL
+                SELECT 'table', 'public.' || table_name, '', role_name,
+                       'SELECT', 'postgres', false
+                FROM fixed_roles CROSS JOIN catalog_tables
+                UNION ALL
+                SELECT 'table', 'public.' || table_name, '', 'platform_control',
+                       'INSERT', 'postgres', false
+                FROM control_writes
+                UNION ALL
+                SELECT 'table', 'public.' || table_name, '', 'platform_supervisor',
+                       privilege_type, 'postgres', false
+                FROM supervisor_writes CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS grants(privilege_type)
+                UNION ALL
+                SELECT 'column', 'public.runtime_access_requests', column_name,
+                       'platform_control', 'UPDATE', 'postgres', false
+                FROM (VALUES ('status'), ('result_code'), ('completed_at')) AS columns(column_name)
+              ), differences AS (
+                (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+                UNION ALL
+                (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+              )
+              SELECT count(*) FROM differences")"
+          test "${acl_inventory_difference_count}" = "0"
+
+          docker exec --interactive platform-postgres-ci \
+            psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          INSERT INTO runtime_instances (
+            instance_id, instance_kind, owner_kind, owner_id, owner_revision,
+            management_mode, runtime_spec_revision_id, environment,
+            state_allocation_id, desired_state, lifecycle_status, failure_latched,
+            optimistic_version, created_at, retired_at
+          ) VALUES (
+            'ci-instance', 'execution_worker', 'paper_probe', 'ci-owner', 'ci-owner-revision',
+            'supervisor', 'ci-runtime-spec', 'paper', 'ci-state-allocation',
+            'stopped', 'registered', false, 0, now(), NULL
+          );
+          INSERT INTO runtime_attempts (
+            attempt_id, instance_id, attempt_number, runtime_spec_revision_id,
+            adapter_template_revision_id, resolved_secret_versions, image_id,
+            root_commit, backend_commit, frontend_commit, strategies_commit,
+            project_identity, container_identity, status, health_result,
+            started_at, stopped_at, exit_code, failure_code
+          ) VALUES (
+            'ci-attempt', 'ci-instance', 1, 'ci-runtime-spec', 'ci-adapter-template',
+            '{}'::json, 'sha256:ci-image', repeat('1', 40), repeat('2', 40),
+            repeat('3', 40), repeat('4', 40), 'ci-project', 'ci-container',
+            'healthy', '{}'::json, now(), NULL, NULL, NULL
+          );
+          SQL
+
+          docker exec --interactive platform-postgres-ci \
+            psql --username platform_control --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          BEGIN;
+          SELECT instance_id FROM runtime_instances WHERE instance_id = 'ci-instance';
+          INSERT INTO runtime_access_requests (
+            request_id, instance_id, attempt_id, route_policy_revision, method,
+            idempotency_key, status, result_code, requested_at, completed_at
+          ) VALUES (
+            'ci-request', 'ci-instance', 'ci-attempt', 'ci-route-policy', 'GET',
+            'ci-idempotency', 'pending', NULL, now(), NULL
+          );
+          INSERT INTO runtime_audit_events (
+            audit_event_id, actor_type, request_id, idempotency_key, owner_kind,
+            owner_id, owner_revision, instance_id, runtime_spec_revision_id,
+            adapter_template_revision_id, action, previous_state, next_state,
+            result_code, occurred_at, provenance
+          ) VALUES (
+            'ci-audit', 'platform_control', 'ci-request', 'ci-idempotency',
+            'paper_probe', 'ci-owner', 'ci-owner-revision', 'ci-instance',
+            'ci-runtime-spec', 'ci-adapter-template', 'start', NULL,
+            '{"desired_state":"stopped"}'::json, 'accepted', now(), '{}'::json
+          );
+          UPDATE runtime_access_requests
+          SET status = 'completed', result_code = 'ok', completed_at = now()
+          WHERE request_id = 'ci-request';
+          ROLLBACK;
+          SQL
+
+          docker exec --interactive platform-postgres-ci \
+            psql --username platform_supervisor --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          BEGIN;
+          SELECT instance_id FROM runtime_instances WHERE instance_id = 'ci-instance';
+          UPDATE runtime_instances
+          SET lifecycle_status = lifecycle_status
+          WHERE instance_id = 'ci-instance';
+          INSERT INTO runtime_access_requests (
+            request_id, instance_id, attempt_id, route_policy_revision, method,
+            idempotency_key, status, result_code, requested_at, completed_at
+          ) VALUES (
+            'ci-supervisor-request', 'ci-instance', 'ci-attempt', 'ci-route-policy', 'GET',
+            'ci-supervisor-request-idempotency', 'pending', NULL, now(), NULL
+          );
+          INSERT INTO runtime_audit_events (
+            audit_event_id, actor_type, request_id, idempotency_key, owner_kind,
+            owner_id, owner_revision, instance_id, runtime_spec_revision_id,
+            adapter_template_revision_id, action, previous_state, next_state,
+            result_code, occurred_at, provenance
+          ) VALUES (
+            'ci-supervisor-audit', 'platform_supervisor', 'ci-supervisor-request', 'ci-supervisor-idempotency',
+            'paper_probe', 'ci-owner', 'ci-owner-revision', 'ci-instance',
+            'ci-runtime-spec', 'ci-adapter-template', 'start', NULL,
+            '{"lifecycle_status":"registered"}'::json, 'accepted', now(), '{}'::json
+          );
+          ROLLBACK;
+          SQL
+
+          expect_role_denied() {
+            role_name="$1"
+            probe_name="$2"
+            statement="$3"
+            set +e
+            docker exec platform-postgres-ci \
+              psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \
+              --command "BEGIN; ${statement}; ROLLBACK;" \
+              >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            denied_status=$?
+            set -e
+            test "${denied_status}" -ne 0
+            grep --extended-regexp --quiet "permission denied|must be owner of" \
+              "${platform_ci_dir}/denied-${role_name}-${probe_name}.log"
+          }
+          expect_role_denied platform_control temp "CREATE TEMP TABLE phase2a_control_temp_probe(id integer)"
+          expect_role_denied platform_control create "CREATE TABLE public.phase2a_control_ddl_probe(id integer)"
+          expect_role_denied platform_control alter "ALTER TABLE public.runtime_instances ADD COLUMN phase2a_control_probe integer"
+          expect_role_denied platform_control drop "DROP TABLE public.runtime_instances"
+          expect_role_denied platform_control delete "DELETE FROM runtime_instances WHERE instance_id = 'ci-instance'"
+          expect_role_denied platform_control truncate "TRUNCATE TABLE runtime_instances"
+          expect_role_denied platform_control update "UPDATE runtime_instances SET desired_state = 'running' WHERE instance_id = 'ci-instance'"
+          expect_role_denied platform_supervisor temp "CREATE TEMP TABLE phase2a_supervisor_temp_probe(id integer)"
+          expect_role_denied platform_supervisor create "CREATE TABLE public.phase2a_supervisor_ddl_probe(id integer)"
+          expect_role_denied platform_supervisor alter "ALTER TABLE public.platform_catalog_revisions ADD COLUMN phase2a_supervisor_probe integer"
+          expect_role_denied platform_supervisor drop "DROP TABLE public.platform_catalog_revisions"
+          expect_role_denied platform_supervisor delete "DELETE FROM runtime_instances WHERE instance_id = 'ci-instance'"
+          expect_role_denied platform_supervisor truncate "TRUNCATE TABLE runtime_instances"
+          expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions SET payload = payload"
+          expect_role_denied platform_control database-create "CREATE SCHEMA phase2a_control_database_probe"
+          expect_role_denied platform_control delegated-table "DELETE FROM public.platform_ci_acl_table"
+          expect_role_denied platform_supervisor delegated-sequence "SELECT setval('public.platform_ci_acl_sequence', 1)"
+          expect_role_denied platform_control private-schema "SELECT * FROM platform_ci_private.probe"
+          expect_role_denied platform_supervisor private-table "SELECT * FROM platform_ci_private.probe"
+
+          docker create \
+            --name platform-control-ci \
+            --network freqtrade-platform-ingress-ci \
+            --user 1000:1000 \
+            --read-only \
+            --init \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --publish 127.0.0.1:8090:8090 \
+            --env PLATFORM_CONTROL_BIND_MODE=container_loopback_publish \
+            --env PLATFORM_CONTROL_LISTEN_HOST=0.0.0.0 \
+            --env PLATFORM_CONTROL_USERNAME=platform_operator \
+            --env PLATFORM_CONTROL_API_PASSWORD_FILE=/run/secrets/api_password \
+            --env PLATFORM_CONTROL_JWT_SECRET_FILE=/run/secrets/jwt_secret_key \
+            --env PLATFORM_DATABASE_HOST=platform-postgres-ci \
+            --env PLATFORM_DATABASE_PORT=5432 \
+            --env PLATFORM_DATABASE_NAME=platform \
+            --env PLATFORM_DATABASE_USERNAME=platform_control \
+            --env PLATFORM_DATABASE_PASSWORD_FILE=/run/secrets/database_password \
+            --mount type=bind,src="${platform_ci_dir}/api_password",dst=/run/secrets/api_password,readonly \
+            --mount type=bind,src="${platform_ci_dir}/jwt_secret_key",dst=/run/secrets/jwt_secret_key,readonly \
+            --mount type=bind,src="${platform_ci_dir}/platform_control_db_password",dst=/run/secrets/database_password,readonly \
+            --entrypoint python \
+            "${REVIEWED_IMAGE_ID}" \
+            -m freqtrade.platform_control
+
+          docker network connect freqtrade-platform-ci platform-control-ci
+          control_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort | sed '/^$/d')"
+          test "${control_networks}" = $'freqtrade-platform-ci\nfreqtrade-platform-ingress-ci'
+          control_port_mapping="$(docker inspect --format '{{if eq (len .HostConfig.PortBindings) 1}}{{with (index .HostConfig.PortBindings "8090/tcp")}}{{if eq (len .) 1}}{{(index . 0).HostIp}}|{{(index . 0).HostPort}}{{end}}{{end}}{{end}}' platform-control-ci)"
+          test "${control_port_mapping}" = "127.0.0.1|8090"
+          docker start platform-control-ci
+          runtime_control_port_mapping="$(docker port platform-control-ci 8090/tcp)"
+          test "${runtime_control_port_mapping}" = "127.0.0.1:8090"
+
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error "http://127.0.0.1:8090/api/v2/ping" \
+              --output "${platform_ci_dir}/ping.json"; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "${ready}" -eq 1
+
+          python - "${platform_ci_dir}" <<'PY'
+          import os
+          import secrets
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          sentinel = secrets.token_urlsafe(32)
+          sentinel_file = root / "query-sentinel"
+          response_file = root / "query-rejection.json"
+          config_file = root / "query-rejection.curl"
+          sentinel_file.write_text(sentinel, encoding="utf-8")
+          config_file.write_text(
+              'url = "http://127.0.0.1:8090/api/v2/ping?private_key='
+              + sentinel
+              + '"\n'
+              + f'output = "{response_file}"\n'
+              + 'write-out = "%{http_code}"\n'
+              + "silent\nshow-error\n",
+              encoding="utf-8",
+          )
+          os.chmod(sentinel_file, 0o600)
+          os.chmod(config_file, 0o600)
+          PY
+          query_status="$(curl --config "${platform_ci_dir}/query-rejection.curl")"
+          test "${query_status}" = "400"
+          python - "${platform_ci_dir}/query-rejection.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if response != {"detail": "unexpected_query_parameters"}:
+              raise SystemExit("query rejection response differs")
+          PY
+          docker logs platform-control-ci > "${platform_ci_dir}/query-container.log" 2>&1
+          if grep --quiet --fixed-strings --file "${platform_ci_dir}/query-sentinel" \
+            "${platform_ci_dir}/query-container.log"; then
+            exit 1
+          fi
+
+          python - "${platform_ci_dir}/api_password" "${platform_ci_dir}/login.netrc" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          password = Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\r\n")
+          netrc = Path(sys.argv[2])
+          netrc.write_text(
+              f"machine 127.0.0.1 login platform_operator password {password}\n",
+              encoding="utf-8",
+          )
+          os.chmod(netrc, 0o600)
+          PY
+          curl --fail --silent --show-error \
+            --netrc-file "${platform_ci_dir}/login.netrc" \
+            --request POST "http://127.0.0.1:8090/api/v2/token/login" \
+            --output "${platform_ci_dir}/tokens.json"
+          python - "${platform_ci_dir}/tokens.json" "${platform_ci_dir}/authenticated.curl" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          token = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["access_token"]
+          config = Path(sys.argv[2])
+          config.write_text(
+              f'header = "Authorization: Bearer {token}"\n',
+              encoding="utf-8",
+          )
+          os.chmod(config, 0o600)
+          PY
+
+          curl --config "${platform_ci_dir}/authenticated.curl" --fail --silent --show-error \
+            "http://127.0.0.1:8090/api/v2/catalog" \
+            --output "${platform_ci_dir}/catalog.json"
+          curl --config "${platform_ci_dir}/authenticated.curl" --fail --silent --show-error \
+            "http://127.0.0.1:8090/api/v2/runtime-instances" \
+            --output "${platform_ci_dir}/instances.json"
+
+          expect_404() {
+            path="$1"
+            status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              "http://127.0.0.1:8090${path}")"
+            test "${status}" = "404"
+          }
+          expect_404 "/openapi.json"
+          expect_404 "/docs"
+          expect_404 "/redoc"
+          expect_404 "/api/v2/runtime-instances/ci-instance/start"
+          expect_404 "/api/v2/runtime-access/ci-instance"
+
+      - name: Clean platform control plane
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+          cleanup_status=0
+          docker rm -f platform-control-ci platform-postgres-ci >/dev/null 2>&1 || true
+          docker network rm freqtrade-platform-ci >/dev/null 2>&1 || true
+          docker network rm freqtrade-platform-ingress-ci >/dev/null 2>&1 || true
+          test -z "$(docker ps --all --quiet --filter name='^/platform-control-ci$' --filter name='^/platform-postgres-ci$')" || cleanup_status=1
+          docker network inspect freqtrade-platform-ci >/dev/null 2>&1 && cleanup_status=1 || true
+          docker network inspect freqtrade-platform-ingress-ci >/dev/null 2>&1 && cleanup_status=1 || true
+          if test -d "${platform_ci_dir}"; then
+            if test -f "${platform_ci_dir}/volumes.before"; then
+              docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.detected"
+              comm -13 "${platform_ci_dir}/volumes.before" \
+                "${platform_ci_dir}/volumes.detected" > "${platform_ci_dir}/volumes.created"
+              test ! -s "${platform_ci_dir}/volumes.created" || cleanup_status=1
+              while IFS= read -r volume_name; do
+                test -n "${volume_name}" || continue
+                if ! docker volume rm "${volume_name}" >/dev/null; then
+                  cleanup_status=1
+                fi
+              done < "${platform_ci_dir}/volumes.created"
+              docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.after"
+              cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after" || cleanup_status=1
+            fi
+            rm -rf "${platform_ci_dir}"
+            test ! -e "${platform_ci_dir}" || cleanup_status=1
+          fi
+          exit "${cleanup_status}"
+
+      - name: Initialize empty trading state fixtures
+        run: python tools/init_empty_state.py
+
+      - name: Verify unprivileged runtime image
+        run: |
+          docker run --rm --entrypoint python "${{ steps.reviewed-image.outputs.image_id }}" -c '
+          import os, shutil, subprocess
+          assert os.geteuid() == 1000
+          assert shutil.which("sudo") is None
+          assert "sudo" not in subprocess.check_output(["id", "-Gn"], text=True).split()
+          '
+          docker run --rm --entrypoint sh "${{ steps.reviewed-image.outputs.image_id }}" -c '
+          set -eu
+          touch /tmp/chown-probe
+          if chown 0:0 /tmp/chown-probe 2>/dev/null; then exit 1; fi
+          '
+
+      - name: Verify missing secrets fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          output="$(docker run --rm "${{ steps.reviewed-image.outputs.image_id }}" --version 2>&1)"
+          status=$?
+          set -e
+          test "${status}" -eq 78
+          test "${output}" = "fatal: FT_API_PASSWORD_FILE is required"
+
+      - name: Smoke secret entrypoint and service configs
+        run: |
+          python tools/compose_runtime.py ci-probe-version freqtrade
+          python tools/compose_runtime.py ci-probe-version freqtrade-futures
+          python tools/compose_runtime.py ci-probe-version freqtrade-research
+
+      - name: Verify state write and input read-only mounts
+        run: |
+          python tools/compose_runtime.py ci-probe-mounts freqtrade
+          python tools/compose_runtime.py ci-probe-mounts freqtrade-futures
+          python tools/compose_runtime.py ci-probe-mounts freqtrade-research
+
+      - name: Verify empty state through Freqtrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          spot_state="$(python tools/compose_runtime.py check-state freqtrade)"
+          test "${spot_state}" = "[]"
+          futures_state="$(python tools/compose_runtime.py check-state freqtrade-futures)"
+          test "${futures_state}" = "[]"
+
+      - name: Verify formal dynamic-UID startup
+        run: python tools/formal_startup.py verify-all --image freqtrade-cn:local
+
+      - name: Scan current committed trees for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          scan_root="${RUNNER_TEMP}/current-trees"
+          audit_root="${RUNNER_TEMP}/gitleaks-audit"
+          export scan_root
+          export checkout_root="${GITHUB_WORKSPACE}"
+          mkdir -p "${scan_root}" "${audit_root}"
+          git archive HEAD | tar -x -C "${scan_root}"
+          git submodule foreach --recursive '
+            relative_path="$(realpath --relative-to="${checkout_root}" "${PWD}")"
+            destination="${scan_root}/${relative_path}"
+            mkdir -p "${destination}"
+            git archive HEAD | tar -x -C "${destination}"
+          '
+          mv "${scan_root}/.gitleaksignore" "${audit_root}/expected-ignore"
+          : > "${audit_root}/empty-ignore"
+          set +e
+          docker run --rm \
+            -v "${scan_root}:/repo:ro" \
+            -v "${audit_root}:/audit" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0 \
+            dir . --redact --no-banner \
+            --gitleaks-ignore-path /audit/empty-ignore \
+            --report-format json --report-path /audit/findings.json
+          unfiltered_status=$?
+          set -e
+          test "${unfiltered_status}" -eq 1
+          python tools/gitleaks_fingerprint_audit.py \
+            "${audit_root}/findings.json" "${audit_root}/expected-ignore"
+          mv "${audit_root}/expected-ignore" "${scan_root}/.gitleaksignore"
+          set +e
+          docker run --rm \
+            -v "${scan_root}:/repo:ro" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0 \
+            dir . --redact --no-banner \
+            --gitleaks-ignore-path /repo/.gitleaksignore
+          filtered_status=$?
+          set -e
+          test "${filtered_status}" -eq 0
+          mutation_path="${scan_root}/.ci-gitleaks-mutation"
+          printf 'api_key = "%s"\n' "$(head -c 48 /dev/urandom | base64 | tr -d '\n')" > "${mutation_path}"
+          set +e
+          docker run --rm \
+            -v "${scan_root}:/repo:ro" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0 \
+            dir . --redact --no-banner \
+            --gitleaks-ignore-path /repo/.gitleaksignore
+          mutation_status=$?
+          set -e
+          rm -f "${mutation_path}"
+          test "${mutation_status}" -eq 1

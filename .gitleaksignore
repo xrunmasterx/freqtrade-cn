@@ -1,0 +1,21 @@
+docs/superpowers/plans/2026-07-12-market-catalog-foundation.md:generic-api-key:1059
+freqtrade/docs/configuration.md:generic-api-key:752
+freqtrade/docs/configuration.md:generic-api-key:753
+freqtrade/docs/rest-api.md:generic-api-key:252
+freqtrade/docs/rest-api.md:generic-api-key:256
+# Two reviewed JWT findings share this fingerprint; duplicate preserves Counter multiplicity.
+freqtrade/docs/rest-api.md:jwt:340
+freqtrade/docs/rest-api.md:jwt:340
+freqtrade/docs/rest-api.md:jwt:342
+freqtrade/docs/rest-api.md:jwt:352
+freqtrade/tests/exchange/test_hyperliquid.py:generic-api-key:419
+freqtrade/tests/exchange/test_hyperliquid.py:generic-api-key:856
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:402
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1100
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1105
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1116
+freqtrade/tests/research/test_data_source.py:generic-api-key:50
+freqtrade/tests/rpc/test_api_catalog.py:generic-api-key:15
+freqtrade/tests/rpc/test_api_research.py:generic-api-key:29
+freqtrade/tests/rpc/test_rpc_apiserver.py:generic-api-key:60
+freqtrade-strategies/user_data/strategies/futures/Readme.md:generic-api-key:154

@@ -1,0 +1,40 @@
+{
+  "run_id": "20260707T022957353346Z-akshare-a-share-ohlcv",
+  "market": "a_share",
+  "provider": "akshare",
+  "provider_version": "1.18.64",
+  "created_at": "2026-07-07T02:29:57.353346+00:00",
+  "instruments": [
+    "600519.SH",
+    "000001.SZ"
+  ],
+  "timeframes": [
+    "1d"
+  ],
+  "adjustment": "raw",
+  "timerange": {
+    "start": "20240101",
+    "end": "20240701"
+  },
+  "files": [
+    {
+      "path": "600519.SH-1d.csv",
+      "rows": 118,
+      "start": "2024-01-02",
+      "stop": "2024-07-01",
+      "status": "ok",
+      "warnings": [],
+      "error": null
+    },
+    {
+      "path": "000001.SZ-1d.csv",
+      "rows": 0,
+      "start": null,
+      "stop": null,
+      "status": "error",
+      "warnings": [],
+      "error": "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    }
+  ],
+  "warnings": []
+}

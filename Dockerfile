@@ -14,17 +14,17 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONFAULTHANDLER=1
+ENV PYTHONUSERBASE=/home/ftuser/.local
 ENV PATH=/home/ftuser/.local/bin:$PATH
 ENV FT_APP_ENV="docker"
 
 RUN mkdir /freqtrade \
   && apt-get update \
-  && apt-get -y install --no-install-recommends sudo libatlas3-base curl sqlite3 libgomp1 \
+  && apt-get -y install --no-install-recommends libatlas3-base curl sqlite3 libgomp1 \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/* \
-  && useradd -u 1000 -G sudo -U -m -s /bin/bash ftuser \
-  && chown ftuser:ftuser /freqtrade \
-  && echo "ftuser ALL=(ALL) NOPASSWD: /bin/chown" >> /etc/sudoers
+  && useradd -u 1000 -U -m -s /bin/bash ftuser \
+  && chown ftuser:ftuser /freqtrade
 
 WORKDIR /freqtrade
 
@@ -47,11 +47,20 @@ FROM base AS runtime-image
 COPY --from=python-deps --chown=ftuser:ftuser /home/ftuser/.local /home/ftuser/.local
 COPY --chown=ftuser:ftuser freqtrade/ /freqtrade/
 COPY --from=frequi-builder --chown=ftuser:ftuser /frequi/dist /freqtrade/freqtrade/rpc/api_server/ui/installed
+COPY --chown=root:root --chmod=0555 \
+  docker/freqtrade_entrypoint.py \
+  /usr/local/bin/freqtrade-entrypoint
 
 USER ftuser
 RUN printf '%s\n' 'local-frequi-f5a81466' > /freqtrade/freqtrade/rpc/api_server/ui/.uiversion \
   && pip install -e . --user --no-cache-dir \
   && mkdir -p /freqtrade/user_data/
 
-ENTRYPOINT ["freqtrade"]
+USER root
+RUN chmod 0755 /home/ftuser \
+  && chmod -R a+rX /home/ftuser/.local
+
+USER ftuser
+
+ENTRYPOINT ["python", "/usr/local/bin/freqtrade-entrypoint"]
 CMD ["trade"]
