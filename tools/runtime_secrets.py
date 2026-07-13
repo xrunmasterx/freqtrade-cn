@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from tools.bootstrap_runtime import _verify_secret_permissions
+from tools.bootstrap_runtime import _is_windows, _verify_secret_permissions
 
 
 DEFAULT_SECRET_ROOT = Path("ft_userdata/secrets/runtime")
@@ -19,6 +19,16 @@ _MINIMUM_CLASS_LENGTHS: Final = {
     "ws_token": 32,
 }
 _MAXIMUM_MATERIAL_LENGTH: Final = 4096
+_ADDITIONAL_LINE_BOUNDARIES: Final = (
+    "\v",
+    "\f",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+)
 
 _IDENTITY_ERROR: Final = "secret identity is invalid"
 _PATH_ERROR: Final = "secret path is not a regular file"
@@ -133,7 +143,10 @@ class LocalFileSecretProvider:
         self._requirements = requirements
         self._requirements_by_identity = requirements_by_identity
         self._runtime_uid = runtime_uid
-        self._secret_root = Path(secret_root)
+        try:
+            self._secret_root = Path(os.path.abspath(os.fspath(secret_root)))
+        except (OSError, TypeError, ValueError):
+            raise SecretMaterialError(_PATH_ERROR) from None
 
     def resolve(self, reference_id: str, version_id: str) -> SecretMaterialHandle:
         identity = (reference_id, version_id)
@@ -191,9 +204,10 @@ def _open_secret_material(
     before = _capture_path_state(secret_root, path)
     descriptor: int | None = None
     try:
-        descriptor = os.open(path, _read_only_flags())
+        descriptor = _open_secret_descriptor(path)
         opened_status = os.fstat(descriptor)
         _require_regular_single_link(opened_status)
+        _verify_open_descriptor_permissions(opened_status, runtime_uid)
         if not _same_file_snapshot(before[-1], opened_status):
             raise SecretMaterialError(_PATH_ERROR)
 
@@ -205,6 +219,7 @@ def _open_secret_material(
         value = _read_validated_value(descriptor, opened_status, requirement.secret_class)
         after = _capture_path_state(secret_root, path)
         after_opened_status = os.fstat(descriptor)
+        _verify_open_descriptor_permissions(after_opened_status, runtime_uid)
         if not all(
             _same_identity(previous, current)
             for previous, current in zip(before[:-1], after[:-1], strict=True)
@@ -277,6 +292,70 @@ def _read_only_flags() -> int:
     return flags
 
 
+def _open_secret_descriptor(path: Path) -> int:
+    if _is_windows():
+        return _open_windows_locked(path)
+    return os.open(path, _read_only_flags())
+
+
+def _open_windows_locked(path: Path) -> int:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(
+        str(path),
+        generic_read,
+        file_share_read,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    invalid_handle = wintypes.HANDLE(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    descriptor_flags = os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT
+    try:
+        return msvcrt.open_osfhandle(handle, descriptor_flags)
+    except (OSError, ValueError):
+        close_handle(handle)
+        raise OSError from None
+    except BaseException:
+        close_handle(handle)
+        raise
+
+
+def _verify_open_descriptor_permissions(status: os.stat_result, runtime_uid: int) -> None:
+    if _is_windows():
+        return
+    if stat.S_IMODE(status.st_mode) != 0o600 or status.st_uid != runtime_uid:
+        raise SecretMaterialError(_PERMISSIONS_ERROR)
+
+
 def _read_validated_value(
     descriptor: int,
     opened_status: os.stat_result,
@@ -311,6 +390,8 @@ def _read_validated_value(
         value = raw_value.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         raise SecretMaterialError(_CONTENT_ERROR) from None
+    if any(boundary in value for boundary in _ADDITIONAL_LINE_BOUNDARIES):
+        raise SecretMaterialError(_CONTENT_ERROR)
     minimum_length = _MINIMUM_CLASS_LENGTHS[secret_class]
     if not minimum_length <= len(value) <= _MAXIMUM_MATERIAL_LENGTH:
         raise SecretMaterialError(_CONTENT_ERROR)

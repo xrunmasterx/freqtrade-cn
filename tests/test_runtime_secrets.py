@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import shutil
 import stat
 import tempfile
 import unittest
@@ -92,6 +93,30 @@ class RuntimeSecretProviderTests(unittest.TestCase):
             values["st_file_attributes"] = status.st_file_attributes
         return SimpleNamespace(**values)
 
+    @staticmethod
+    def changed_permissions(
+        status: os.stat_result,
+        *,
+        mode: int,
+        uid: int,
+    ) -> SimpleNamespace:
+        values = {
+            name: getattr(status, name)
+            for name in (
+                "st_dev",
+                "st_ino",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        }
+        values["st_mode"] = stat.S_IFREG | mode
+        values["st_uid"] = uid
+        if hasattr(status, "st_file_attributes"):
+            values["st_file_attributes"] = status.st_file_attributes
+        return SimpleNamespace(**values)
+
     def test_returns_owned_descriptor_at_offset_zero_and_closes_context(self) -> None:
         secret_value = self.values[("api-password", "v1")]
 
@@ -124,14 +149,16 @@ class RuntimeSecretProviderTests(unittest.TestCase):
 
     def test_success_closes_every_peer_descriptor(self) -> None:
         opened: list[int] = []
-        real_open = os.open
+        real_open = runtime_secrets._open_secret_descriptor
 
-        def recording_open(path: os.PathLike[str] | str, flags: int) -> int:
-            descriptor = real_open(path, flags)
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
             opened.append(descriptor)
             return descriptor
 
-        with mock.patch.object(runtime_secrets.os, "open", side_effect=recording_open):
+        with mock.patch.object(
+            runtime_secrets, "_open_secret_descriptor", side_effect=recording_open
+        ):
             handle = self.provider.resolve("api-password", "v1")
 
         self.assertEqual(len(opened), 3)
@@ -150,6 +177,31 @@ class RuntimeSecretProviderTests(unittest.TestCase):
                 self.write_secret(requirement, self.values[requirement.identity], ending=ending)
                 with self.provider.resolve(*requirement.identity) as handle:
                     self.assertEqual(os.lseek(handle.descriptor, 0, os.SEEK_CUR), 0)
+
+    def test_rejects_python_and_unicode_line_boundaries(self) -> None:
+        requirement = self.requirements[0]
+        line_boundaries = (
+            "\v",
+            "\f",
+            "\x1c",
+            "\x1d",
+            "\x1e",
+            "\x85",
+            "\u2028",
+            "\u2029",
+        )
+
+        def resolve_and_close() -> None:
+            with self.provider.resolve(*requirement.identity):
+                pass
+
+        for boundary in line_boundaries:
+            with self.subTest(boundary=ascii(boundary)):
+                self.write_secret(requirement, "a" * 32 + boundary, ending=b"")
+                with self.assertRaisesRegex(
+                    SecretMaterialError, "^secret content is invalid$"
+                ):
+                    resolve_and_close()
 
     def test_rejects_invalid_constructor_requirements_before_filesystem_io(self) -> None:
         invalid_cases = (
@@ -200,6 +252,25 @@ class RuntimeSecretProviderTests(unittest.TestCase):
             ):
                 self.provider.resolve(*identity)
             lstat.assert_not_called()
+
+    def test_relative_root_is_frozen_when_provider_is_constructed(self) -> None:
+        original_cwd = Path.cwd()
+        location_a = Path(self.temporary_directory.name) / "location-a"
+        location_b = Path(self.temporary_directory.name) / "location-b"
+        location_a.mkdir()
+        location_b.mkdir()
+        shutil.copytree(self.root, location_a / "relative-secrets")
+        try:
+            os.chdir(location_a)
+            provider = self.make_provider(root=Path("relative-secrets"))
+            os.chdir(location_b)
+            with provider.resolve("api-password", "v1") as handle:
+                self.assertEqual(
+                    os.read(handle.descriptor, 4096),
+                    (self.values[("api-password", "v1")] + "\n").encode(),
+                )
+        finally:
+            os.chdir(original_cwd)
 
     def test_resolve_has_no_caller_controlled_path_or_policy_surface(self) -> None:
         parameters = tuple(inspect.signature(LocalFileSecretProvider.resolve).parameters)
@@ -306,10 +377,10 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         target = self.secret_path(self.requirements[0])
         real_fstat = os.fstat
         opened_target: list[int] = []
-        real_open = os.open
+        real_open = runtime_secrets._open_secret_descriptor
 
-        def open_file(path: os.PathLike[str] | str, flags: int) -> int:
-            descriptor = real_open(path, flags)
+        def open_file(path: Path) -> int:
+            descriptor = real_open(path)
             if Path(path) == target:
                 opened_target.append(descriptor)
             return descriptor
@@ -321,7 +392,9 @@ class RuntimeSecretProviderTests(unittest.TestCase):
             return status
 
         with (
-            mock.patch.object(runtime_secrets.os, "open", side_effect=open_file),
+            mock.patch.object(
+                runtime_secrets, "_open_secret_descriptor", side_effect=open_file
+            ),
             mock.patch.object(runtime_secrets.os, "fstat", side_effect=changed_fstat),
             self.assertRaisesRegex(
                 SecretMaterialError, "^secret path is not a regular file$"
@@ -403,6 +476,151 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), "secret permissions are invalid")
         self.assertIsNone(raised.exception.__cause__)
 
+    def test_posix_descriptor_permissions_reject_bad_opened_mode_or_owner(self) -> None:
+        target = self.secret_path(self.requirements[0])
+        real_open = os.open
+        real_lstat = os.lstat
+        real_fstat = os.fstat
+        cases = (
+            (0o644, self.runtime_uid),
+            (0o600, self.runtime_uid + 1),
+        )
+        for mode, uid in cases:
+            opened_target: set[int] = set()
+            opened_status = self.changed_permissions(
+                real_lstat(target),
+                mode=mode,
+                uid=uid,
+            )
+
+            def open_file(path: os.PathLike[str] | str, flags: int) -> int:
+                descriptor = real_open(path, flags)
+                if Path(path) == target:
+                    opened_target.add(descriptor)
+                return descriptor
+
+            def lstat_file(
+                path: os.PathLike[str] | str,
+            ) -> os.stat_result | SimpleNamespace:
+                if Path(path) == target:
+                    return opened_status
+                return real_lstat(path)
+
+            def fstat_file(descriptor: int) -> os.stat_result | SimpleNamespace:
+                if descriptor in opened_target:
+                    return opened_status
+                return real_fstat(descriptor)
+
+            with (
+                self.subTest(mode=oct(mode), uid=uid),
+                mock.patch.object(
+                    runtime_secrets,
+                    "_is_windows",
+                    return_value=False,
+                    create=True,
+                ),
+                mock.patch.object(runtime_secrets.os, "open", side_effect=open_file),
+                mock.patch.object(runtime_secrets.os, "lstat", side_effect=lstat_file),
+                mock.patch.object(runtime_secrets.os, "fstat", side_effect=fstat_file),
+                mock.patch.object(runtime_secrets, "_verify_secret_permissions"),
+                self.assertRaisesRegex(
+                    SecretMaterialError, "^secret permissions are invalid$"
+                ),
+            ):
+                with self.provider.resolve("api-password", "v1"):
+                    pass
+
+    @unittest.skipIf(os.name == "nt", "POSIX rename race test")
+    def test_posix_descriptor_permissions_reject_path_acl_aba(self) -> None:
+        requirement = self.requirements[0]
+        target = self.secret_path(requirement)
+        displaced = target.with_name("displaced")
+        replacement = target.with_name("replacement")
+        self.write_secret(requirement, self.values[requirement.identity])
+        os.chmod(target, 0o644)
+        replacement.write_text("z" * 32, encoding="utf-8")
+        os.chmod(replacement, 0o600)
+
+        def prove_replacement_permissions(path: Path, runtime_uid: int) -> None:
+            os.replace(path, displaced)
+            os.replace(replacement, path)
+            try:
+                bootstrap_runtime._verify_secret_permissions(path, runtime_uid)
+            finally:
+                os.replace(path, replacement)
+                os.replace(displaced, path)
+
+        with (
+            mock.patch.object(
+                runtime_secrets,
+                "_verify_secret_permissions",
+                side_effect=prove_replacement_permissions,
+            ),
+            self.assertRaisesRegex(
+                SecretMaterialError, "^secret permissions are invalid$"
+            ),
+        ):
+            with self.provider.resolve(*requirement.identity):
+                pass
+
+    @unittest.skipUnless(os.name == "nt", "Windows share-lock test")
+    def test_windows_descriptor_blocks_replacement_during_acl_proof(self) -> None:
+        target = self.secret_path(self.requirements[0])
+        displaced = target.with_name("displaced")
+        attempted_paths: list[Path] = []
+
+        def prove_acl_while_locked(path: Path, runtime_uid: int) -> None:
+            del runtime_uid
+            attempted_paths.append(path)
+            with self.assertRaises(OSError):
+                os.replace(path, path.with_name("displaced"))
+
+        with (
+            mock.patch.object(
+                runtime_secrets,
+                "_open_windows_locked",
+                wraps=runtime_secrets._open_windows_locked,
+            ) as locked_open,
+            mock.patch.object(
+                runtime_secrets,
+                "_verify_secret_permissions",
+                side_effect=prove_acl_while_locked,
+            ),
+            self.provider.resolve("api-password", "v1") as handle,
+        ):
+            self.assertEqual(len(attempted_paths), 3)
+            self.assertEqual(locked_open.call_count, 3)
+            with self.assertRaises(OSError):
+                os.replace(target, displaced)
+            descriptor = handle.descriptor
+            os.fstat(descriptor)
+
+        os.replace(target, displaced)
+        os.replace(displaced, target)
+
+    @unittest.skipUnless(os.name == "nt", "Windows HANDLE ownership test")
+    def test_windows_descriptor_conversion_failure_closes_handle_and_redacts(self) -> None:
+        import msvcrt
+
+        target = self.secret_path(self.requirements[0])
+        displaced = target.with_name("displaced")
+        secret_value = self.values[self.requirements[0].identity]
+        with (
+            mock.patch.object(
+                msvcrt,
+                "open_osfhandle",
+                side_effect=ValueError(f"conversion failed: {target}: {secret_value}"),
+            ),
+            self.assertRaisesRegex(
+                SecretMaterialError, "^secret path is not a regular file$"
+            ) as raised,
+        ):
+            self.provider.resolve("api-password", "v1")
+        self.assertNotIn(str(target), repr(raised.exception))
+        self.assertNotIn(secret_value, repr(raised.exception))
+        os.replace(target, displaced)
+        os.replace(displaced, target)
+
     def test_rejects_invalid_content_with_stable_redacted_error(self) -> None:
         requirement = self.requirements[0]
         secret_value = "value-that-must-never-appear-in-errors"
@@ -443,15 +661,17 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         self.write_secret(self.requirements[0], repeated, ending=b"\n")
         self.write_secret(self.requirements[1], repeated, ending=b"\r\n")
         opened: list[int] = []
-        real_open = os.open
+        real_open = runtime_secrets._open_secret_descriptor
 
-        def recording_open(path: os.PathLike[str] | str, flags: int) -> int:
-            descriptor = real_open(path, flags)
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
             opened.append(descriptor)
             return descriptor
 
         with (
-            mock.patch.object(runtime_secrets.os, "open", side_effect=recording_open),
+            mock.patch.object(
+                runtime_secrets, "_open_secret_descriptor", side_effect=recording_open
+            ),
             self.assertRaisesRegex(
                 SecretMaterialError, "^required secret values must be distinct$"
             ) as raised,
@@ -466,15 +686,17 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         requirement = self.requirements[0]
         self.write_secret(requirement, b"invalid\x00material", ending=b"")
         opened: list[int] = []
-        real_open = os.open
+        real_open = runtime_secrets._open_secret_descriptor
 
-        def recording_open(path: os.PathLike[str] | str, flags: int) -> int:
-            descriptor = real_open(path, flags)
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
             opened.append(descriptor)
             return descriptor
 
         with (
-            mock.patch.object(runtime_secrets.os, "open", side_effect=recording_open),
+            mock.patch.object(
+                runtime_secrets, "_open_secret_descriptor", side_effect=recording_open
+            ),
             self.assertRaisesRegex(SecretMaterialError, "^secret content is invalid$"),
         ):
             self.provider.resolve(*requirement.identity)

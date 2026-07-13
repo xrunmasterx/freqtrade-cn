@@ -31,10 +31,13 @@ value for the attempt must be distinct.
 The provider rejects symlinks, Windows reparse points, hardlinks, non-regular
 files, replacement races, POSIX ownership/mode other than the approved runtime
 UID and `0600`, and Windows files that fail the protected owner-only ACL proof.
-It returns an already-open, non-inheritable descriptor at offset zero. The
-consumer owns that descriptor and must close the handle, preferably with its
-context-manager boundary. Peer and failed descriptors are closed by the
-provider.
+POSIX permission checks are bound to the opened descriptor with `fstat` before
+and after the path-based compatibility proof. On Windows the provider opens the
+file without delete sharing, so rename or replacement remains blocked while the
+existing ACL helper checks the same name and until the descriptor closes. It
+returns an already-open, non-inheritable descriptor at offset zero. The consumer
+owns that descriptor and must close the handle, preferably with its
+context-manager boundary. Peer and failed descriptors are closed by the provider.
 
 Secret material is not read from environment variables or PostgreSQL and must
 never be logged, printed, hashed, persisted, enumerated, or exposed through
