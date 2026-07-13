@@ -967,7 +967,10 @@ class BootstrapRuntimeTests(unittest.TestCase):
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 
         self.assertEqual(path.read_text(encoding="utf-8"), value + "\n")
-        self.mock_windows_acl.assert_any_call("harden", path)
+        if os.name == "nt":
+            self.mock_windows_acl.assert_any_call("harden", path)
+        else:
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_verify_rejects_platform_secret_reused_by_legacy_without_leaking(self) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)

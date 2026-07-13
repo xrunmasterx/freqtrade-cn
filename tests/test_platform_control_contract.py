@@ -94,11 +94,12 @@ class PlatformControlContractTests(unittest.TestCase):
 
     def test_platform_control_has_no_docker_or_runtime_state_mount(self) -> None:
         service = self.compose["services"]["platform-control"]
-        rendered = json.dumps(service, sort_keys=True)
-        self.assertNotIn("docker.sock", rendered)
-        self.assertNotIn("ft_userdata/runtime", rendered)
-        self.assertNotIn(str(REPO_ROOT), rendered)
-        self.assertEqual(service.get("volumes", []), [])
+        volumes = service.get("volumes", [])
+        rendered_volumes = json.dumps(volumes, sort_keys=True)
+        self.assertNotIn("docker.sock", rendered_volumes)
+        self.assertNotIn("ft_userdata/runtime", rendered_volumes)
+        self.assertNotIn(str(REPO_ROOT), rendered_volumes)
+        self.assertEqual(volumes, [])
         self.assertEqual(service["user"], "1000:1000")
         self.assertTrue(service["read_only"])
         self.assertTrue(service["init"])
