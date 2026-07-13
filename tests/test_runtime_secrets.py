@@ -89,6 +89,8 @@ class RuntimeSecretProviderTests(unittest.TestCase):
             )
         }
         values["st_ino"] += 1
+        if hasattr(status, "st_uid"):
+            values["st_uid"] = status.st_uid
         if hasattr(status, "st_file_attributes"):
             values["st_file_attributes"] = status.st_file_attributes
         return SimpleNamespace(**values)
@@ -537,31 +539,55 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         displaced = target.with_name("displaced")
         replacement = target.with_name("replacement")
         self.write_secret(requirement, self.values[requirement.identity])
-        os.chmod(target, 0o644)
         replacement.write_text("z" * 32, encoding="utf-8")
         os.chmod(replacement, 0o600)
+        proof_calls = 0
 
         def prove_replacement_permissions(path: Path, runtime_uid: int) -> None:
-            os.replace(path, displaced)
-            os.replace(replacement, path)
+            nonlocal proof_calls
+            proof_calls += 1
+            original_displaced = False
+            replacement_installed = False
             try:
+                os.replace(path, displaced)
+                original_displaced = True
+                os.replace(replacement, path)
+                replacement_installed = True
                 bootstrap_runtime._verify_secret_permissions(path, runtime_uid)
+                os.chmod(displaced, 0o644)
             finally:
-                os.replace(path, replacement)
-                os.replace(displaced, path)
+                if replacement_installed:
+                    os.replace(path, replacement)
+                if original_displaced:
+                    os.replace(displaced, path)
 
-        with (
-            mock.patch.object(
-                runtime_secrets,
-                "_verify_secret_permissions",
-                side_effect=prove_replacement_permissions,
-            ),
-            self.assertRaisesRegex(
-                SecretMaterialError, "^secret permissions are invalid$"
-            ),
-        ):
-            with self.provider.resolve(*requirement.identity):
-                pass
+        try:
+            with (
+                mock.patch.object(
+                    runtime_secrets,
+                    "_verify_secret_permissions",
+                    side_effect=prove_replacement_permissions,
+                ),
+                self.assertRaisesRegex(
+                    SecretMaterialError, "^secret permissions are invalid$"
+                ),
+            ):
+                with self.provider.resolve(*requirement.identity):
+                    pass
+        finally:
+            if displaced.exists():
+                if target.exists():
+                    os.replace(target, replacement)
+                os.replace(displaced, target)
+            for path in (target, replacement):
+                if path.exists():
+                    os.chmod(path, 0o600)
+        self.assertEqual(proof_calls, 1)
+        self.assertTrue(target.is_file())
+        self.assertTrue(replacement.is_file())
+        self.assertFalse(displaced.exists())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(replacement.stat().st_mode), 0o600)
 
     @unittest.skipUnless(os.name == "nt", "Windows share-lock test")
     def test_windows_descriptor_blocks_replacement_during_acl_proof(self) -> None:
