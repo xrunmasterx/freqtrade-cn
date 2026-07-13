@@ -1133,28 +1133,19 @@ jobs:
           unfiltered_status=$?
           set -e
           test "${unfiltered_status}" -eq 1
-          python - "${audit_root}/findings.json" "${audit_root}/expected-ignore" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          findings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          actual = {finding["Fingerprint"] for finding in findings}
-          expected = {
-              line.strip()
-              for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
-              if line.strip() and not line.lstrip().startswith("#")
-          }
-          if actual != expected:
-              raise SystemExit("gitleaks fingerprint audit mismatch")
-          PY
+          python tools/gitleaks_fingerprint_audit.py \
+            "${audit_root}/findings.json" "${audit_root}/expected-ignore"
           mv "${audit_root}/expected-ignore" "${scan_root}/.gitleaksignore"
+          set +e
           docker run --rm \
             -v "${scan_root}:/repo:ro" \
             --workdir /repo \
             ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0 \
             dir . --redact --no-banner \
             --gitleaks-ignore-path /repo/.gitleaksignore
+          filtered_status=$?
+          set -e
+          test "${filtered_status}" -eq 0
           mutation_path="${scan_root}/.ci-gitleaks-mutation"
           printf 'api_key = "%s"\n' "$(head -c 48 /dev/urandom | base64 | tr -d '\n')" > "${mutation_path}"
           set +e

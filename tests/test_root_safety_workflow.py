@@ -60,6 +60,79 @@ PLATFORM_CI_STEPS = (
     "Verify platform-control least privilege",
     "Clean platform control plane",
 )
+SECRET_SCAN_STEP = "Scan current committed trees for secrets"
+GITLEAKS_IMAGE = (
+    "ghcr.io/gitleaks/gitleaks:v8.27.2@sha256:"
+    "ebfeb6fd4f2c37fa371d3731ebfa662fdf80f93cd37d3b4771bb82263edff8d0"
+)
+REVIEWED_SECRET_SCAN_SCRIPT = "\n".join(
+    (
+        "set -euo pipefail",
+        'scan_root="${RUNNER_TEMP}/current-trees"',
+        'audit_root="${RUNNER_TEMP}/gitleaks-audit"',
+        "export scan_root",
+        'export checkout_root="${GITHUB_WORKSPACE}"',
+        'mkdir -p "${scan_root}" "${audit_root}"',
+        'git archive HEAD | tar -x -C "${scan_root}"',
+        "git submodule foreach --recursive '",
+        '  relative_path="$(realpath --relative-to="${checkout_root}" "${PWD}")"',
+        '  destination="${scan_root}/${relative_path}"',
+        '  mkdir -p "${destination}"',
+        '  git archive HEAD | tar -x -C "${destination}"',
+        "'",
+        'mv "${scan_root}/.gitleaksignore" "${audit_root}/expected-ignore"',
+        ': > "${audit_root}/empty-ignore"',
+        "set +e",
+        "docker run --rm \\",
+        '  -v "${scan_root}:/repo:ro" \\',
+        '  -v "${audit_root}:/audit" \\',
+        "  --workdir /repo \\",
+        f"  {GITLEAKS_IMAGE} \\",
+        "  dir . --redact --no-banner \\",
+        "  --gitleaks-ignore-path /audit/empty-ignore \\",
+        "  --report-format json --report-path /audit/findings.json",
+        "unfiltered_status=$?",
+        "set -e",
+        'test "${unfiltered_status}" -eq 1',
+        "python tools/gitleaks_fingerprint_audit.py \\",
+        '  "${audit_root}/findings.json" "${audit_root}/expected-ignore"',
+        'mv "${audit_root}/expected-ignore" "${scan_root}/.gitleaksignore"',
+        "set +e",
+        "docker run --rm \\",
+        '  -v "${scan_root}:/repo:ro" \\',
+        "  --workdir /repo \\",
+        f"  {GITLEAKS_IMAGE} \\",
+        "  dir . --redact --no-banner \\",
+        "  --gitleaks-ignore-path /repo/.gitleaksignore",
+        "filtered_status=$?",
+        "set -e",
+        'test "${filtered_status}" -eq 0',
+        'mutation_path="${scan_root}/.ci-gitleaks-mutation"',
+        'printf \'api_key = "%s"\\n\' '
+        '"$(head -c 48 /dev/urandom | base64 | tr -d \'\\n\')" '
+        '> "${mutation_path}"',
+        "set +e",
+        "docker run --rm \\",
+        '  -v "${scan_root}:/repo:ro" \\',
+        "  --workdir /repo \\",
+        f"  {GITLEAKS_IMAGE} \\",
+        "  dir . --redact --no-banner \\",
+        "  --gitleaks-ignore-path /repo/.gitleaksignore",
+        "mutation_status=$?",
+        "set -e",
+        'rm -f "${mutation_path}"',
+        'test "${mutation_status}" -eq 1',
+        "",
+    )
+)
+REVIEWED_SECRET_SCAN_STEP = (
+    f"      - name: {SECRET_SCAN_STEP}\n"
+    "        shell: bash\n"
+    "        run: |\n"
+    + "".join(
+        f"          {line}\n" for line in REVIEWED_SECRET_SCAN_SCRIPT.splitlines()
+    )
+)
 
 
 def named_workflow_step(workflow: str, step_name: str) -> str:
@@ -409,6 +482,21 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test ! -e "${platform_ci_dir}"',
         'exit "${cleanup_status}"',
     ),
+    SECRET_SCAN_STEP: (
+        'git archive HEAD | tar -x -C "${scan_root}"',
+        "git submodule foreach --recursive",
+        'mv "${scan_root}/.gitleaksignore" "${audit_root}/expected-ignore"',
+        GITLEAKS_IMAGE,
+        "dir . --redact --no-banner",
+        "unfiltered_status=$?",
+        'test "${unfiltered_status}" -eq 1',
+        "python tools/gitleaks_fingerprint_audit.py",
+        "filtered_status=$?",
+        'test "${filtered_status}" -eq 0',
+        "mutation_path=",
+        "mutation_status=$?",
+        'test "${mutation_status}" -eq 1',
+    ),
 }
 
 
@@ -435,7 +523,7 @@ def executable_statement_position(statements: list[str], fragment: str) -> int:
 def validate_root_safety_workflow(workflow: str) -> list[str]:
     errors: list[str] = []
     scripts: dict[str, str] = {}
-    for step_name in PLATFORM_CI_STEPS:
+    for step_name in (*PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
         try:
             scripts[step_name] = step_run_script(workflow, step_name)
         except AssertionError as error:
@@ -485,6 +573,9 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
                 errors.append(
                     "Verify platform-control least privilege: network mutation inventory differs"
                 )
+        if step_name == SECRET_SCAN_STEP:
+            if named_workflow_step(workflow, step_name) != REVIEWED_SECRET_SCAN_STEP:
+                errors.append("secret scan reviewed step differs")
     least_privilege = scripts.get(PLATFORM_CI_STEPS[4], "")
     active_shell = "\n".join(executable_shell_statements(least_privilege))
     active_sql_payload = "\n".join(executable_sql_payloads(least_privilege))
@@ -780,6 +871,182 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             named_workflow_step(workflow, "Missing")
         with self.assertRaisesRegex(AssertionError, "found 2"):
             named_workflow_step(workflow + workflow, "Target")
+
+    def test_secret_scan_step_satisfies_executable_contract(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        script = step_run_script(workflow, SECRET_SCAN_STEP)
+
+        self.assertIn("python tools/gitleaks_fingerprint_audit.py", script)
+        self.assertIn('test "${filtered_status}" -eq 0', script)
+        self.assertEqual(validate_root_safety_workflow(workflow), [])
+
+    def test_secret_scan_contract_rejects_security_mutations(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        secret_step = named_workflow_step(workflow, SECRET_SCAN_STEP)
+
+        def mutate_secret_step(old: str, new: str) -> str:
+            mutated_step = secret_step.replace(old, new, 1)
+            self.assertNotEqual(mutated_step, secret_step)
+            return workflow.replace(secret_step, mutated_step, 1)
+
+        mutations = {
+            "non-recursive submodules": workflow.replace(
+                "git submodule foreach --recursive",
+                "git submodule foreach",
+                1,
+            ),
+            "unpinned scanner": workflow.replace(
+                GITLEAKS_IMAGE,
+                "ghcr.io/gitleaks/gitleaks:v8.27.2",
+                1,
+            ),
+            "unredacted scanner": workflow.replace(
+                "dir . --redact --no-banner",
+                "dir . --no-banner",
+                1,
+            ),
+            "unfiltered zero accepted": workflow.replace(
+                'test "${unfiltered_status}" -eq 1',
+                'test "${unfiltered_status}" -eq 0',
+                1,
+            ),
+            "filtered finding accepted": workflow.replace(
+                'test "${filtered_status}" -eq 0',
+                'test "${filtered_status}" -eq 1',
+                1,
+            ),
+            "fingerprint audit bypassed": workflow.replace(
+                "python tools/gitleaks_fingerprint_audit.py",
+                "true # fingerprint audit bypassed",
+                1,
+            ),
+            "mutation not detected": workflow.replace(
+                'test "${mutation_status}" -eq 1',
+                'test "${mutation_status}" -eq 0',
+                1,
+            ),
+            "unfiltered status forged": mutate_secret_step(
+                "          unfiltered_status=$?\n",
+                "          false\n          unfiltered_status=$?\n",
+            ),
+            "filtered status forged": mutate_secret_step(
+                "          filtered_status=$?\n",
+                "          true\n          filtered_status=$?\n",
+            ),
+            "mutation status forged": mutate_secret_step(
+                "          mutation_status=$?\n",
+                "          false\n          mutation_status=$?\n",
+            ),
+            "unfiltered errexit capture removed": mutate_secret_step(
+                "          set +e\n",
+                "          : # set +e removed\n",
+            ),
+            "unfiltered errexit restore removed": mutate_secret_step(
+                "          unfiltered_status=$?\n          set -e\n",
+                "          unfiltered_status=$?\n          set +e\n",
+            ),
+            "mutation writer removed": mutate_secret_step(
+                "          printf 'api_key = \"%s\"\\n' \"$(head -c 48 /dev/urandom | base64 | tr -d '\\n')\" > \"${mutation_path}\"\n",
+                "          : # mutation writer removed\n",
+            ),
+            "audit failure masked": mutate_secret_step(
+                '          "${audit_root}/findings.json" "${audit_root}/expected-ignore"\n',
+                '          "${audit_root}/findings.json" "${audit_root}/expected-ignore" || true\n',
+            ),
+            "audit errexit disabled": mutate_secret_step(
+                "          python tools/gitleaks_fingerprint_audit.py \\\n",
+                "          set +e\n          python tools/gitleaks_fingerprint_audit.py \\\n",
+            ),
+            "filtered gate failure masked": mutate_secret_step(
+                '          test "${filtered_status}" -eq 0\n',
+                '          test "${filtered_status}" -eq 0 || true\n',
+            ),
+            "mutation gate failure masked": mutate_secret_step(
+                '          test "${mutation_status}" -eq 1\n',
+                '          test "${mutation_status}" -eq 1 || true\n',
+            ),
+            "filtered scanner failure masked": mutate_secret_step(
+                "            --gitleaks-ignore-path /repo/.gitleaksignore\n          filtered_status=$?\n",
+                "            --gitleaks-ignore-path /repo/.gitleaksignore || true\n          filtered_status=$?\n",
+            ),
+            "filtered status forged by ignored printf": mutate_secret_step(
+                "          filtered_status=$?\n",
+                "          printf x >/dev/null\n          filtered_status=$?\n",
+            ),
+            "mutation status forged by failing printf": mutate_secret_step(
+                "          mutation_status=$?\n",
+                "          printf x >/missing/status-probe\n          mutation_status=$?\n",
+            ),
+            "filtered status forged by function definition": mutate_secret_step(
+                "          filtered_status=$?\n",
+                "          status_reset() {\n            return 0\n          }\n          filtered_status=$?\n",
+            ),
+            "filtered status forged by dead if": mutate_secret_step(
+                "          filtered_status=$?\n",
+                "          if false; then\n            :\n          fi\n          filtered_status=$?\n",
+            ),
+            "initial errexit removed": mutate_secret_step(
+                "          set -euo pipefail\n",
+                "          set -uo pipefail\n",
+            ),
+            "initial pipefail removed": mutate_secret_step(
+                "          set -euo pipefail\n",
+                "          set -eu\n",
+            ),
+            "root archive failure masked": mutate_secret_step(
+                '          git archive HEAD | tar -x -C "${scan_root}"\n',
+                '          git archive HEAD | tar -x -C "${scan_root}" || true\n',
+            ),
+            "submodule archive removed": mutate_secret_step(
+                '            git archive HEAD | tar -x -C "${destination}"\n',
+                "            : # submodule archive removed\n",
+            ),
+            "submodule archive failure masked": mutate_secret_step(
+                '            git archive HEAD | tar -x -C "${destination}"\n',
+                '            git archive HEAD | tar -x -C "${destination}" || true\n',
+            ),
+            "expected ignore move failure masked": mutate_secret_step(
+                '          mv "${scan_root}/.gitleaksignore" "${audit_root}/expected-ignore"\n',
+                '          mv "${scan_root}/.gitleaksignore" "${audit_root}/expected-ignore" || true\n',
+            ),
+            "empty ignore removed": mutate_secret_step(
+                '          : > "${audit_root}/empty-ignore"\n',
+                "          : # empty ignore removed\n",
+            ),
+            "step condition skips scan": mutate_secret_step(
+                f"      - name: {SECRET_SCAN_STEP}\n",
+                f"      - name: {SECRET_SCAN_STEP}\n        if: ${{{{ false }}}}\n",
+            ),
+            "step failure tolerated": mutate_secret_step(
+                f"      - name: {SECRET_SCAN_STEP}\n",
+                f"      - name: {SECRET_SCAN_STEP}\n        continue-on-error: true\n",
+            ),
+            "custom shell masks failure": mutate_secret_step(
+                "        shell: bash\n",
+                "        shell: bash {0} || true\n",
+            ),
+            "step environment added": mutate_secret_step(
+                "        shell: bash\n",
+                "        env:\n          BASH_ENV: /tmp/unreviewed\n        shell: bash\n",
+            ),
+            "duplicate run added": mutate_secret_step(
+                "        run: |\n",
+                "        run: echo bypass\n        run: |\n",
+            ),
+            "duplicate shell added": mutate_secret_step(
+                "        shell: bash\n",
+                "        shell: sh\n        shell: bash\n",
+            ),
+            "working directory added": mutate_secret_step(
+                "        run: |\n",
+                "        working-directory: /tmp\n        run: |\n",
+            ),
+        }
+
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
 
     def test_root_unit_gate_precedes_bootstrap_and_all_dependency_installs(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -1276,9 +1543,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
-    def test_platform_run_scripts_pass_bash_syntax_validation(self) -> None:
+    def test_reviewed_run_scripts_pass_bash_syntax_validation(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        for step_name in PLATFORM_CI_STEPS:
+        for step_name in (*PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
             script = step_run_script(workflow, step_name)
             expanded = re.sub(r"\$\{\{.*?\}\}", "reviewed-ci-value", script)
             with self.subTest(step=step_name):
