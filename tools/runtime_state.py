@@ -272,6 +272,7 @@ def _create_layout(
     identity = allocation / identity_name
     temporary = allocation / f".{identity_name}.{secrets.token_hex(8)}.tmp"
     descriptor: int | None = None
+    synced_status: os.stat_result | None = None
     try:
         descriptor = os.open(temporary, _exclusive_write_flags(), 0o600)
         _harden_managed_state_identity_file(temporary, runtime_uid)
@@ -287,6 +288,7 @@ def _create_layout(
         _require_empty_identity_file(after)
         if not _same_snapshot(opened, after):
             raise OSError
+        synced_status = after
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -294,6 +296,8 @@ def _create_layout(
     _publish_no_replace(temporary, identity)
     identity_status = os.lstat(identity)
     _require_empty_identity_file(identity_status)
+    if synced_status is None or not _same_snapshot(synced_status, identity_status):
+        raise OSError
     _verify_managed_state_identity_file(identity, runtime_uid)
     statuses[identity_name] = identity_status
     allocation_barrier_status = _validated_directory_status(allocation, runtime_uid)

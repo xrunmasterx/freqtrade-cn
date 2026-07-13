@@ -491,6 +491,69 @@ class RuntimeStateTests(unittest.TestCase):
         )
         self.assertEqual(quarantined.read_bytes(), competitor)
 
+    def test_identity_publish_rejects_source_inode_substitution(self) -> None:
+        real_publish = runtime_state._publish_no_replace
+        displaced_name: str | None = None
+        synced_identity: tuple[int, int] | None = None
+        substitute_identity: tuple[int, int] | None = None
+
+        def substitute_source(source: Path, destination: Path) -> None:
+            nonlocal displaced_name, substitute_identity, synced_identity
+            if destination.name == ".allocation-allocation-1":
+                displaced = self.state_root / ".synced-source-evidence"
+                os.rename(source, displaced)
+                displaced_name = displaced.name
+                displaced_status = displaced.stat()
+                synced_identity = displaced_status.st_dev, displaced_status.st_ino
+
+                descriptor = os.open(source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                if os.name == "nt":
+                    harden = self.real_permission_helpers[
+                        "_harden_managed_state_identity_file"
+                    ]
+                    harden(source, self.runtime_uid)
+                else:
+                    os.chmod(source, 0o600)
+                substitute_status = source.stat()
+                substitute_identity = (
+                    substitute_status.st_dev,
+                    substitute_status.st_ino,
+                )
+            real_publish(source, destination)
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_publish_no_replace",
+                side_effect=substitute_source,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provision_failed$",
+            ),
+        ):
+            self.provision()
+
+        self.assertIsNotNone(displaced_name)
+        self.assertNotEqual(synced_identity, substitute_identity)
+        quarantine = self.state_root / ".allocation-1.quarantine/runtime-1"
+        published = quarantine / ".allocation-allocation-1"
+        displaced = self.state_root / str(displaced_name)
+        published_status = published.stat()
+        displaced_status = displaced.stat()
+        self.assertEqual(
+            (published_status.st_dev, published_status.st_ino),
+            substitute_identity,
+        )
+        self.assertEqual(
+            (displaced_status.st_dev, displaced_status.st_ino),
+            synced_identity,
+        )
+
     def test_quarantine_publish_race_never_replaces_competing_destination(self) -> None:
         real_publish = runtime_state._publish_no_replace
         real_sync = runtime_state._sync_directory
