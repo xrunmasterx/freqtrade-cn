@@ -312,6 +312,7 @@ CONTROL_TOPOLOGY_FRAGMENTS = (
     "--name platform-control-ci",
     "docker network connect freqtrade-platform-ci platform-control-ci",
     "docker network disconnect bridge platform-control-ci",
+    "control_networks=\"$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort | sed '/^$/d')\"",
     'test "${control_networks}" = "freqtrade-platform-ci"',
     'control_port_mapping="$(docker inspect',
     'test "${control_port_mapping}" = "127.0.0.1|8090"',
@@ -328,6 +329,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
     ),
     PLATFORM_CI_STEPS[4]: (
         "docker network disconnect bridge platform-postgres-ci",
+        "database_networks=\"$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')\"",
         'test "${database_networks}" = "freqtrade-platform-ci"',
         "docker exec platform-postgres-ci sh /docker-entrypoint-initdb.d/init-platform-roles.sh",
         "database_privileges=",
@@ -407,7 +409,11 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
 
 def executable_statement_position(statements: list[str], fragment: str) -> int:
     assignment_fragment = fragment.endswith("=") or fragment.startswith(
-        'control_port_mapping="$(docker inspect'
+        (
+            'control_port_mapping="$(docker inspect',
+            'control_networks="$(docker inspect',
+            'database_networks="$(docker inspect',
+        )
     )
     offset = 0
     for statement in statements:
@@ -1349,6 +1355,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "expect_role_denied platform_control database-create",
             "expect_role_denied platform_supervisor delegated-sequence",
             "docker network disconnect bridge platform-postgres-ci",
+            "database_networks=\"$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')\"",
             'printf \'platform PostgreSQL networks after isolation: %s\\n\' "${database_networks}"',
             'test "${database_networks}" = "freqtrade-platform-ci"',
             "--name platform-control-ci",

@@ -324,7 +324,7 @@ jobs:
           set -euo pipefail
           platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
           docker network disconnect bridge platform-postgres-ci
-          database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort)"
+          database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
           printf 'platform PostgreSQL networks after isolation: %s\n' "${database_networks}"
           test "${database_networks}" = "freqtrade-platform-ci"
           docker exec --interactive platform-postgres-ci \
@@ -906,7 +906,7 @@ jobs:
 
           docker network connect freqtrade-platform-ci platform-control-ci
           docker network disconnect bridge platform-control-ci
-          control_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort)"
+          control_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort | sed '/^$/d')"
           test "${control_networks}" = "freqtrade-platform-ci"
           control_port_mapping="$(docker inspect --format '{{if eq (len .HostConfig.PortBindings) 1}}{{with (index .HostConfig.PortBindings "8090/tcp")}}{{if eq (len .) 1}}{{(index . 0).HostIp}}|{{(index . 0).HostPort}}{{end}}{{end}}{{end}}' platform-control-ci)"
           test "${control_port_mapping}" = "127.0.0.1|8090"
