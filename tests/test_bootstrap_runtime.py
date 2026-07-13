@@ -224,6 +224,101 @@ class BootstrapRuntimeTests(unittest.TestCase):
                 for directory in ("home", "logs", "data", "backtest_results"):
                     self.assertTrue((state_root / directory).is_dir())
 
+    def test_init_creates_and_hardens_managed_state_root_without_touching_children(self) -> None:
+        managed_root = self.root / bootstrap_runtime.MANAGED_STATE_ROOT
+        managed_root.mkdir(parents=True)
+        child = managed_root / "existing-allocation"
+        child.mkdir()
+        marker = child / "keep"
+        marker.write_text("unchanged", encoding="utf-8")
+
+        with mock.patch.object(
+            bootstrap_runtime,
+            "_harden_managed_state_directory",
+        ) as harden:
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        harden.assert_called_once_with(
+            managed_root,
+            bootstrap_runtime._expected_runtime_identity()["FREQTRADE_RUNTIME_UID"],
+        )
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
+    def test_verify_checks_managed_state_root_without_enumerating_children(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        managed_root = self.root / bootstrap_runtime.MANAGED_STATE_ROOT
+        child = managed_root / "existing-allocation"
+        child.mkdir()
+        marker = child / "keep"
+        marker.write_text("unchanged", encoding="utf-8")
+
+        with mock.patch.object(
+            bootstrap_runtime,
+            "_verify_managed_state_directory",
+        ) as verify:
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+        verify.assert_called_once_with(
+            managed_root,
+            bootstrap_runtime._expected_runtime_identity()["FREQTRADE_RUNTIME_UID"],
+        )
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
+    def test_managed_state_posix_helpers_require_exact_owner_and_modes(self) -> None:
+        directory = self.root / "managed-directory"
+        directory.mkdir()
+        identity = self.root / "managed-identity"
+        identity.write_bytes(b"")
+        runtime_uid = 1001
+        statuses = {
+            directory: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=runtime_uid),
+            identity: SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=runtime_uid,
+                st_nlink=1,
+            ),
+        }
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(os, "lstat", side_effect=lambda path: statuses[path]),
+        ):
+            bootstrap_runtime._verify_managed_state_directory(directory, runtime_uid)
+            bootstrap_runtime._verify_managed_state_identity_file(identity, runtime_uid)
+
+        statuses[directory] = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o750,
+            st_uid=runtime_uid,
+        )
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(os, "lstat", side_effect=lambda path: statuses[path]),
+            self.assertRaisesRegex(ValueError, "managed state directory"),
+        ):
+            bootstrap_runtime._verify_managed_state_directory(directory, runtime_uid)
+
+    def test_managed_state_windows_helpers_use_owner_only_acl(self) -> None:
+        directory = self.root / "managed-directory"
+        directory.mkdir()
+        identity = self.root / "managed-identity"
+        identity.write_bytes(b"")
+
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime._harden_managed_state_directory(directory, 1000)
+            bootstrap_runtime._verify_managed_state_directory(directory, 1000)
+            bootstrap_runtime._harden_managed_state_identity_file(identity, 1000)
+            bootstrap_runtime._verify_managed_state_identity_file(identity, 1000)
+
+        self.assertEqual(
+            self.mock_windows_acl.call_args_list[-4:],
+            [
+                mock.call("harden", directory),
+                mock.call("verify", directory),
+                mock.call("harden", identity),
+                mock.call("verify", identity),
+            ],
+        )
+
     def test_init_never_creates_state_strategy_directory(self) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -404,6 +499,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -499,6 +595,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file") as harden,
+            mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
         self.assertEqual(harden.call_args_list, [mock.call(environment, 1001), mock.call(override, 1001)])
@@ -825,6 +922,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -833,6 +931,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_verify_managed_state_directory"),
             mock.patch.object(
                 bootstrap_runtime, "_verify_secret_permissions"
             ) as verify_secret,
@@ -857,6 +956,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_verify_managed_state_directory"),
             mock.patch.object(bootstrap_runtime, "_verify_secret_permissions"),
             mock.patch.object(
                 bootstrap_runtime,

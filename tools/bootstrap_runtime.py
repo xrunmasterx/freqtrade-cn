@@ -32,6 +32,7 @@ PLATFORM_SECRET_SPECS = {
     "jwt_secret_key": 48,
 }
 PLATFORM_SECRET_ROOT = Path("ft_userdata/secrets/platform")
+MANAGED_STATE_ROOT = Path("ft_userdata/runtime/instances")
 RESEARCH_PATH_MIGRATIONS = (
     (
         "data_source",
@@ -166,6 +167,63 @@ def _verify_secret_permissions(path: Path, runtime_uid: int) -> None:
             raise ValueError("runtime secret permissions must be 0600")
         if status.st_uid != runtime_uid:
             raise ValueError("runtime secret must be owned by runtime uid")
+
+
+def _managed_state_status(path: Path, *, directory: bool) -> os.stat_result:
+    try:
+        status = os.lstat(path)
+    except OSError as error:
+        raise ValueError("invalid managed state path") from error
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    if stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise ValueError("invalid managed state path")
+    if directory and not stat.S_ISDIR(status.st_mode):
+        raise ValueError("invalid managed state directory")
+    if not directory and (
+        not stat.S_ISREG(status.st_mode) or status.st_nlink != 1
+    ):
+        raise ValueError("invalid managed state identity file")
+    return status
+
+
+def _harden_managed_state_directory(path: Path, runtime_uid: int) -> None:
+    status = _managed_state_status(path, directory=True)
+    if _is_windows():
+        _run_windows_acl("harden", path)
+    else:
+        if status.st_uid != runtime_uid:
+            raise ValueError("managed state directory owner differs")
+        os.chmod(path, 0o700)
+
+
+def _verify_managed_state_directory(path: Path, runtime_uid: int) -> None:
+    status = _managed_state_status(path, directory=True)
+    if _is_windows():
+        _run_windows_acl("verify", path)
+    elif status.st_uid != runtime_uid or stat.S_IMODE(status.st_mode) != 0o700:
+        raise ValueError("managed state directory must be owned by runtime uid with mode 0700")
+
+
+def _harden_managed_state_identity_file(path: Path, runtime_uid: int) -> None:
+    status = _managed_state_status(path, directory=False)
+    if _is_windows():
+        _run_windows_acl("harden", path)
+    else:
+        if status.st_uid != runtime_uid:
+            raise ValueError("managed state identity file owner differs")
+        os.chmod(path, 0o600)
+
+
+def _verify_managed_state_identity_file(path: Path, runtime_uid: int) -> None:
+    status = _managed_state_status(path, directory=False)
+    if _is_windows():
+        _run_windows_acl("verify", path)
+    elif status.st_uid != runtime_uid or stat.S_IMODE(status.st_mode) != 0o600:
+        raise ValueError(
+            "managed state identity file must be owned by runtime uid with mode 0600"
+        )
 
 
 def _expected_runtime_identity() -> dict[str, int]:
@@ -452,6 +510,12 @@ def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
     _harden_runtime_control_file(environment_path, runtime_uid)
     _merge_compose_identity(override_path, manifest, identity)
     _harden_runtime_control_file(override_path, runtime_uid)
+    managed_state_root = root / MANAGED_STATE_ROOT
+    if os.path.lexists(managed_state_root):
+        _managed_state_status(managed_state_root, directory=True)
+    else:
+        managed_state_root.mkdir(parents=True)
+    _harden_managed_state_directory(managed_state_root, runtime_uid)
     used_secret_values: set[str] = set()
     for service in manifest["services"]:
         template = root / service["config_template"]
@@ -579,6 +643,7 @@ def verify_runtime(
     )
     runtime_uid = identity["FREQTRADE_RUNTIME_UID"]
     runtime_gid = identity["FREQTRADE_RUNTIME_GID"]
+    _verify_managed_state_directory(root / MANAGED_STATE_ROOT, runtime_uid)
     all_values: list[str] = []
     state_roots: set[Path] = set()
     for service in manifest["services"]:
