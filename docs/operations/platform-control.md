@@ -18,13 +18,27 @@ Runtime Access proxying, or start, stop, retry, or retire HTTP operations.
 ## Architecture and trust boundaries
 
 The control plane has two fixed services. `platform-postgres` is reachable only
-on the internal `platform-db` network. `platform-control` connects as the
+on the internal `platform-db` network. `platform-control` joins that database
+network plus the dedicated `platform-ingress` bridge, connects as the
 least-privileged `platform_control` database role, binds inside its container in
 `container_loopback_publish` mode, and is published only on host loopback port
-8090. It runs as UID/GID 1000 with a read-only root filesystem, all capabilities
-dropped, and `no-new-privileges`. It receives no Docker socket, repository root,
-runtime state, Bot configuration, strategy, research data, trading secret, or
-general secret-root mount.
+8090. The ingress network contains no database. It exists because Docker does
+not realize host-published ports for a container attached only to an internal
+network. Platform-control runs as UID/GID 1000 with a read-only root filesystem,
+all capabilities dropped, and `no-new-privileges`. It receives no Docker socket,
+repository root, runtime state, Bot configuration, strategy, research data,
+trading secret, or general secret-root mount.
+
+`platform-ingress` is a non-internal bridge, not a one-way ingress ACL. The
+loopback publication restricts host-side inbound access, but the bridge also
+gives platform-control a default route, outbound connectivity, and potential
+reachability to its bridge gateway or any future peer mistakenly attached to
+that network. PostgreSQL and all other project services must not join it. Phase
+2A accepts this tradeoff because Docker 28 and 29 do not realize a host-published
+port for a container attached only to an internal network. If a deployment must
+also prohibit platform-control egress, its launcher must add a dedicated
+publisher/proxy or infrastructure network policy; the `platform-ingress` name
+alone does not enforce that property.
 
 Root Safety is the sole Phase 2A start acceptance. It builds the reviewed
 integrated image, starts an isolated PostgreSQL 17.10 instance on loopback,
@@ -99,11 +113,12 @@ fixed identity; administrator `SET ROLE` is not acceptance evidence.
 ## CI-only acceptance evidence
 
 The `Root Safety` workflow is executable evidence for the migration and runtime
-contract. Its fixed acceptance resources are the internal network
-`freqtrade-platform-ci`, PostgreSQL container `platform-postgres-ci`, application
-container `platform-control-ci`, production-shaped database `platform`, isolated
-test database `platform_test_ci`, database endpoint `127.0.0.1:55432`, and
-control endpoint `127.0.0.1:8090`.
+contract. Its fixed acceptance resources are the internal database network
+`freqtrade-platform-ci`, ingress network `freqtrade-platform-ingress-ci`,
+PostgreSQL container `platform-postgres-ci`, application container
+`platform-control-ci`, production-shaped database `platform`, isolated test
+database `platform_test_ci`, database endpoint `127.0.0.1:55432`, and control
+endpoint `127.0.0.1:8090`.
 
 Acceptance must show:
 
@@ -115,15 +130,16 @@ Acceptance must show:
 - Exact control-role SELECT, request/audit INSERT, and terminal request UPDATE
   operations succeed, while both fixed roles are denied temporary and persistent
   CREATE, ALTER, DROP, DELETE, TRUNCATE, and out-of-allowlist UPDATE operations.
-- The application container is created while stopped on Docker's default bridge
-  so the exact `127.0.0.1:8090` publish is allocated, connected to
-  `freqtrade-platform-ci`, disconnected from `bridge`, and inspected for the
-  exact final network and port mapping before it is started or probed.
+- The application container is created directly on
+  `freqtrade-platform-ingress-ci`, connected to the internal
+  `freqtrade-platform-ci` database network, and inspected for exactly those two
+  networks. The requested loopback mapping is checked before start and the
+  realized runtime mapping is checked after start, before HTTP readiness.
 - Platform-control reaches bounded `/api/v2/ping` readiness; authentication is
   obtained from a private file; Catalog and Registry reads succeed; `/docs`,
   `/redoc`, and `/openapi.json` return 404; lifecycle and Runtime Access routes
   are absent.
-- Both containers, the exact network, passfile, secret copies, token/probe
+- Both containers, both exact networks, passfile, secret copies, token/probe
   artifacts, and all other transient files are removed. Cleanup computes the
   exact before/after volume set difference, deletes only volumes created by the
   acceptance, rechecks equality with the baseline, and preserves a non-zero

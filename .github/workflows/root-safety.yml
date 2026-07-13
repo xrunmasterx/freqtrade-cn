@@ -197,6 +197,7 @@ jobs:
           echo "PLATFORM_TEST_POSTGRES_URL=postgresql+psycopg://postgres@127.0.0.1:55432/platform_test_ci" >> "${GITHUB_ENV}"
 
           docker network create --internal freqtrade-platform-ci
+          docker network create freqtrade-platform-ingress-ci
           docker run --detach \
             --name platform-postgres-ci \
             --publish 127.0.0.1:55432:5432 \
@@ -881,6 +882,7 @@ jobs:
 
           docker create \
             --name platform-control-ci \
+            --network freqtrade-platform-ingress-ci \
             --user 1000:1000 \
             --read-only \
             --init \
@@ -905,12 +907,13 @@ jobs:
             -m freqtrade.platform_control
 
           docker network connect freqtrade-platform-ci platform-control-ci
-          docker network disconnect bridge platform-control-ci
           control_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort | sed '/^$/d')"
-          test "${control_networks}" = "freqtrade-platform-ci"
+          test "${control_networks}" = $'freqtrade-platform-ci\nfreqtrade-platform-ingress-ci'
           control_port_mapping="$(docker inspect --format '{{if eq (len .HostConfig.PortBindings) 1}}{{with (index .HostConfig.PortBindings "8090/tcp")}}{{if eq (len .) 1}}{{(index . 0).HostIp}}|{{(index . 0).HostPort}}{{end}}{{end}}{{end}}' platform-control-ci)"
           test "${control_port_mapping}" = "127.0.0.1|8090"
           docker start platform-control-ci
+          runtime_control_port_mapping="$(docker port platform-control-ci 8090/tcp)"
+          test "${runtime_control_port_mapping}" = "127.0.0.1:8090"
 
           ready=0
           for attempt in $(seq 1 60); do
@@ -1024,8 +1027,10 @@ jobs:
           cleanup_status=0
           docker rm -f platform-control-ci platform-postgres-ci >/dev/null 2>&1 || true
           docker network rm freqtrade-platform-ci >/dev/null 2>&1 || true
+          docker network rm freqtrade-platform-ingress-ci >/dev/null 2>&1 || true
           test -z "$(docker ps --all --quiet --filter name='^/platform-control-ci$' --filter name='^/platform-postgres-ci$')" || cleanup_status=1
           docker network inspect freqtrade-platform-ci >/dev/null 2>&1 && cleanup_status=1 || true
+          docker network inspect freqtrade-platform-ingress-ci >/dev/null 2>&1 && cleanup_status=1 || true
           if test -d "${platform_ci_dir}"; then
             if test -f "${platform_ci_dir}/volumes.before"; then
               docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.detected"

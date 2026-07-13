@@ -45,7 +45,11 @@ class PlatformControlContractTests(unittest.TestCase):
                     "name": "freqtrade-cn_platform-db",
                     "ipam": {},
                     "internal": True,
-                }
+                },
+                "platform-ingress": {
+                    "name": "freqtrade-cn_platform-ingress",
+                    "ipam": {},
+                },
             },
         )
         self.assertEqual(
@@ -90,6 +94,10 @@ class PlatformControlContractTests(unittest.TestCase):
                 "PLATFORM_DATABASE_PORT": "5432",
                 "PLATFORM_DATABASE_USERNAME": "platform_control",
             },
+        )
+        self.assertEqual(
+            service["networks"],
+            {"platform-db": None, "platform-ingress": None},
         )
 
     def test_platform_control_has_no_docker_or_runtime_state_mount(self) -> None:
@@ -195,6 +203,10 @@ class PlatformControlContractTests(unittest.TestCase):
         extra_resource = copy.deepcopy(self.compose)
         extra_resource["networks"]["rogue"] = {}
         cases.append(("networks", extra_resource))
+
+        missing_ingress = copy.deepcopy(self.compose)
+        del missing_ingress["services"]["platform-control"]["networks"]["platform-ingress"]
+        cases.append(("platform-control networks", missing_ingress))
 
         extra_volume = copy.deepcopy(self.compose)
         extra_volume["volumes"]["rogue"] = {}

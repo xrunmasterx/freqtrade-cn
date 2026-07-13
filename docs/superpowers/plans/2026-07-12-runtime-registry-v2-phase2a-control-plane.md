@@ -1092,17 +1092,29 @@ The exact Compose deployment contract is:
   file path; no password or DSN value is present in environment. Its fixed
   health check is `pg_isready` against database `platform` and user `postgres`.
 - `platform-control` uses the already reviewed repository runtime image/build,
-  profile `platform`, only `platform-db`, and waits for PostgreSQL health. It is
+  profile `platform`, joins `platform-db` plus the dedicated
+  `platform-ingress` bridge, and waits for PostgreSQL health. It is
   explicitly non-root (`1000:1000`), `read_only`, `init: true`, drops all
   capabilities, enables `no-new-privileges`, has no `extra_hosts`, and has no
   volumes. It receives exactly API password, JWT secret, and platform-control DB
   password files. A fixed tmpfs is allowed only if a focused runtime test proves
   Python needs it.
-- The exact top-level platform inventory is one internal network, one named data
-  volume, and five secrets. Platform-control must not receive the admin or
-  supervisor password, trading/exchange secrets, Docker socket, root repository,
-  runtime state, Bot configuration/state, strategy, research data, or a general
-  secret-root mount.
+- The exact top-level platform inventory is one internal database network, one
+  dedicated ingress network, one named data volume, and five secrets. Only
+  platform-control joins the ingress network. Platform-control must not receive
+  the admin or supervisor password, trading/exchange secrets, Docker socket,
+  root repository, runtime state, Bot configuration/state, strategy, research
+  data, or a general secret-root mount.
+
+`platform-ingress` is deliberately non-internal so Docker can realize the
+loopback host publication; it is not a one-way ingress ACL. Host loopback limits
+inbound publication, while the bridge also gives platform-control a default
+route, outbound connectivity, and possible reachability to the bridge gateway
+or future peers. PostgreSQL and every other project service are forbidden from
+joining it. Phase 2A accepts that tradeoff because Docker 28 and 29 do not
+realize host-published ports for containers attached only to internal networks.
+A deployment that must also deny platform-control egress requires a dedicated
+publisher/proxy or infrastructure network policy in its launcher.
 
 `init-platform-roles.sh` is idempotent and safe to rerun after Alembic creates
 tables. It creates fixed LOGIN roles `platform_control` and
@@ -1172,7 +1184,8 @@ Extend `runtime_contract.py` with `validate_platform_compose()` and a closed
 `--platform` CLI selector separate from `validate_compose()` and
 `ops/runtime-services.json`; the old validator/manifest remain migration input
 for exactly three current processes. The platform validator enforces exact two
-services, exact five top-level secrets, exact internal network/named volume,
+services, exact five top-level secrets, the exact internal database and ingress
+networks, the exact named volume,
 the container-bind/host-loopback pair, fixed `_FILE` paths, no direct secret or
 DSN environment values, exact secret allocation, and every least-privilege
 mount/process rule above. Mutation tests must prove it rejects an admin or
@@ -1260,7 +1273,8 @@ Expected: missing named steps/selectors.
 After the reviewed integrated image is built, the workflow:
 
 - uses the exact five secrets produced by the existing ephemeral bootstrap;
-- creates one fixed CI-only Docker network and starts
+- creates two fixed CI-only Docker networks, one internal database network and
+  one non-internal ingress bridge, then starts
   `postgres:17.10-alpine` with loopback-only host port 55432, tmpfs database
   storage, exact three secret-file mounts, and the reviewed role initializer;
 - writes a 0600 libpq passfile and exposes only its path plus a password-free
@@ -1276,11 +1290,12 @@ After the reviewed integrated image is built, the workflow:
 - proves platform-control SELECT, request/audit INSERT and terminal-column UPDATE
   succeed while lifecycle-column UPDATE fails with permission denied;
 - starts the reviewed application image as `platform-control` with read-only
-  root, UID/GID 1000, dropped capabilities, no-new-privileges, only the CI
-  internal network, exact three secret-file mounts, and loopback host 8090;
+  root, UID/GID 1000, dropped capabilities, no-new-privileges, the exact CI
+  database and ingress networks, exact three secret-file mounts, and loopback
+  host 8090;
   then probes public readiness, token authentication, protected Catalog/Registry
   reads, closed schema/docs, and absence of lifecycle/Runtime Access routes;
-- always removes both containers, the CI network, passfiles, and transient probe
+- always removes both containers, both CI networks, passfiles, and transient probe
   files. No named or anonymous Docker volume is created.
 
 The workflow executes:

@@ -1119,12 +1119,18 @@ def validate_platform_compose(
         return [*errors, *_validate_platform_role_script(repo_root)]
 
     networks = compose.get("networks")
-    expected_network = {
-        "name": "freqtrade-cn_platform-db",
-        "ipam": {},
-        "internal": True,
+    expected_networks = {
+        "platform-db": {
+            "name": "freqtrade-cn_platform-db",
+            "ipam": {},
+            "internal": True,
+        },
+        "platform-ingress": {
+            "name": "freqtrade-cn_platform-ingress",
+            "ipam": {},
+        },
     }
-    if type(networks) is not dict or networks != {"platform-db": expected_network}:
+    if type(networks) is not dict or networks != expected_networks:
         errors.append("platform Compose networks differ")
 
     volumes = compose.get("volumes")
@@ -1251,7 +1257,7 @@ def validate_platform_compose(
         "environment": PLATFORM_CONTROL_ENVIRONMENT,
         "image": "freqtrade-cn:local",
         "init": True,
-        "networks": {"platform-db": None},
+        "networks": {"platform-db": None, "platform-ingress": None},
         "ports": [
             {
                 "mode": "ingress",

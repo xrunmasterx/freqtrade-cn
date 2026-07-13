@@ -310,13 +310,15 @@ REVIEWED_DENIAL_HELPER_BODY = (
 CONTROL_TOPOLOGY_FRAGMENTS = (
     "docker create",
     "--name platform-control-ci",
+    "--network freqtrade-platform-ingress-ci",
     "docker network connect freqtrade-platform-ci platform-control-ci",
-    "docker network disconnect bridge platform-control-ci",
     "control_networks=\"$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort | sed '/^$/d')\"",
-    'test "${control_networks}" = "freqtrade-platform-ci"',
+    "test \"${control_networks}\" = $'freqtrade-platform-ci\\nfreqtrade-platform-ingress-ci'",
     'control_port_mapping="$(docker inspect',
     'test "${control_port_mapping}" = "127.0.0.1|8090"',
     "docker start platform-control-ci",
+    'runtime_control_port_mapping="$(docker port platform-control-ci 8090/tcp)"',
+    'test "${runtime_control_port_mapping}" = "127.0.0.1:8090"',
     '"http://127.0.0.1:8090/api/v2/ping"',
 )
 
@@ -324,6 +326,7 @@ CONTROL_TOPOLOGY_FRAGMENTS = (
 WORKFLOW_EXECUTABLE_CONTRACT = {
     PLATFORM_CI_STEPS[0]: (
         "docker network create --internal freqtrade-platform-ci",
+        "docker network create freqtrade-platform-ingress-ci",
         "--publish 127.0.0.1:55432:5432",
         "docker network connect freqtrade-platform-ci platform-postgres-ci",
     ),
@@ -395,8 +398,10 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
     PLATFORM_CI_STEPS[5]: (
         "docker rm -f platform-control-ci platform-postgres-ci",
         "docker network rm freqtrade-platform-ci",
+        "docker network rm freqtrade-platform-ingress-ci",
         "docker ps --all --quiet --filter",
         "docker network inspect freqtrade-platform-ci",
+        "docker network inspect freqtrade-platform-ingress-ci",
         "comm -13",
         "docker volume rm",
         'cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after"',
@@ -413,6 +418,7 @@ def executable_statement_position(statements: list[str], fragment: str) -> int:
             'control_port_mapping="$(docker inspect',
             'control_networks="$(docker inspect',
             'database_networks="$(docker inspect',
+            'runtime_control_port_mapping="$(docker port',
         )
     )
     offset = 0
@@ -459,10 +465,25 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
                 len(create_statements) != 1
                 or create_statements[0].count("--mount ") != 3
                 or create_statements[0].count("--publish ") != 1
-                or "--network " in create_statements[0]
+                or create_statements[0].count("--network ") != 1
             ):
                 errors.append(
                     "Verify platform-control least privilege: control create inventory differs"
+                )
+            network_mutations = [
+                statement
+                for statement in statements
+                if re.search(
+                    r"(?:^|\s)docker\s+network\s+(?:connect|disconnect)\s",
+                    statement,
+                )
+            ]
+            if network_mutations != [
+                "docker network disconnect bridge platform-postgres-ci",
+                "docker network connect freqtrade-platform-ci platform-control-ci",
+            ]:
+                errors.append(
+                    "Verify platform-control least privilege: network mutation inventory differs"
                 )
     least_privilege = scripts.get(PLATFORM_CI_STEPS[4], "")
     active_shell = "\n".join(executable_shell_statements(least_privilege))
@@ -964,11 +985,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 "dead_text='docker network connect freqtrade-platform-ci platform-control-ci'",
                 1,
             ),
-            "dead control disconnect": workflow.replace(
-                "docker network disconnect bridge platform-control-ci",
-                "if false; then\n"
-                "            docker network disconnect bridge platform-control-ci\n"
-                "          fi",
+            "removed control ingress": workflow.replace(
+                "--network freqtrade-platform-ingress-ci",
+                "--network removed-platform-ingress",
                 1,
             ),
             "unreachable control create": workflow.replace(
@@ -1286,6 +1305,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             '"ft_userdata/secrets/platform/${secret_name}"',
             'docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.before"',
             "docker network create --internal freqtrade-platform-ci",
+            "docker network create freqtrade-platform-ingress-ci",
             "--name platform-postgres-ci",
             "--publish 127.0.0.1:55432:5432",
             "--tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=512m",
@@ -1366,6 +1386,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "--security-opt no-new-privileges:true",
             "REVIEWED_IMAGE_ID: ${{ steps.reviewed-image.outputs.image_id }}",
             '"${REVIEWED_IMAGE_ID}"',
+            "--network freqtrade-platform-ingress-ci",
             "docker network connect freqtrade-platform-ci platform-control-ci",
             "--publish 127.0.0.1:8090:8090",
             "--netrc-file",
@@ -1520,6 +1541,29 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             validate_root_safety_workflow(reordered),
         )
 
+        network_mutations = (
+            workflow.replace(
+                "          control_port_mapping=",
+                "          docker network connect bridge platform-control-ci\n"
+                "          control_port_mapping=",
+                1,
+            ),
+            workflow.replace(
+                '          test "${runtime_control_port_mapping}" = "127.0.0.1:8090"\n\n'
+                "          ready=0",
+                '          test "${runtime_control_port_mapping}" = "127.0.0.1:8090"\n'
+                "          docker network connect rogue-network platform-control-ci\n"
+                "          ready=0",
+                1,
+            ),
+        )
+        for mutated in network_mutations:
+            with self.subTest(kind="network mutation after exact assertion"):
+                self.assertIn(
+                    "Verify platform-control least privilege: network mutation inventory differs",
+                    validate_root_safety_workflow(mutated),
+                )
+
     def test_platform_cleanup_removes_exact_resources_and_asserts_no_volume_drift(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[5]))
@@ -1527,6 +1571,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         for fragment in (
             "docker rm -f platform-control-ci platform-postgres-ci",
             "docker network rm freqtrade-platform-ci",
+            "docker network rm freqtrade-platform-ingress-ci",
             'docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.after"',
             'cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after"',
             'rm -rf "${platform_ci_dir}"',

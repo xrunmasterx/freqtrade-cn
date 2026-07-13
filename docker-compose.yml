@@ -32,6 +32,7 @@ secrets:
 networks:
   platform-db:
     internal: true
+  platform-ingress:
 
 volumes:
   platform-postgres-data:
@@ -106,6 +107,7 @@ services:
       - no-new-privileges:true
     networks:
       - platform-db
+      - platform-ingress
     depends_on:
       platform-postgres:
         condition: service_healthy
