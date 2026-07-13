@@ -253,12 +253,12 @@ class RuntimeStateTests(unittest.TestCase):
         real_sync = runtime_state._sync_directory
         calls = 0
 
-        def fail_once(path: Path) -> None:
+        def fail_once(path: Path, *args: object) -> None:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise OSError("fault")
-            real_sync(path)
+            real_sync(path, *args)
 
         with (
             mock.patch.object(runtime_state, "_sync_directory", side_effect=fail_once),
@@ -314,24 +314,28 @@ class RuntimeStateTests(unittest.TestCase):
 
     def test_quarantine_rename_failure_retains_evidence_and_fails_closed(self) -> None:
         real_sync = runtime_state._sync_directory
-        real_rename = os.rename
+        real_publish = runtime_state._publish_no_replace
         sync_calls = 0
 
-        def fail_provision_once(path: Path) -> None:
+        def fail_provision_once(path: Path, *args: object) -> None:
             nonlocal sync_calls
             sync_calls += 1
             if sync_calls == 1:
                 raise OSError("provision fault")
-            real_sync(path)
+            real_sync(path, *args)
 
         def fail_quarantine_rename(source: Path, destination: Path) -> None:
             if destination.parent.name == ".allocation-1.quarantine":
                 raise OSError("quarantine fault")
-            real_rename(source, destination)
+            real_publish(source, destination)
 
         with (
             mock.patch.object(runtime_state, "_sync_directory", side_effect=fail_provision_once),
-            mock.patch.object(runtime_state.os, "rename", side_effect=fail_quarantine_rename),
+            mock.patch.object(
+                runtime_state,
+                "_publish_no_replace",
+                side_effect=fail_quarantine_rename,
+            ),
             self.assertRaisesRegex(
                 runtime_state.StateProvisionError,
                 "^state_quarantine_failed$",
@@ -346,12 +350,12 @@ class RuntimeStateTests(unittest.TestCase):
         real_sync = runtime_state._sync_directory
         sync_calls = 0
 
-        def fail_provision_and_quarantine(path: Path) -> None:
+        def fail_provision_and_quarantine(path: Path, *args: object) -> None:
             nonlocal sync_calls
             sync_calls += 1
             if sync_calls <= 2:
                 raise OSError("sync fault")
-            real_sync(path)
+            real_sync(path, *args)
 
         with (
             mock.patch.object(
@@ -376,9 +380,9 @@ class RuntimeStateTests(unittest.TestCase):
         replacement_marker = "replacement"
         invoked = 0
 
-        def replace_then_fail(path: Path) -> None:
+        def replace_then_fail(path: Path, *args: object) -> None:
             nonlocal invoked
-            del path
+            del path, args
             invoked += 1
             allocation = self.state_root / "runtime-1"
             os.rename(allocation, displaced)
@@ -404,9 +408,9 @@ class RuntimeStateTests(unittest.TestCase):
         real_sync = runtime_state._sync_directory
         added = False
 
-        def add_unknown(path: Path) -> None:
+        def add_unknown(path: Path, *args: object) -> None:
             nonlocal added
-            real_sync(path)
+            real_sync(path, *args)
             if not added:
                 added = True
                 (self.state_root / "runtime-1/unexpected").write_text("evidence", encoding="utf-8")
@@ -463,26 +467,212 @@ class RuntimeStateTests(unittest.TestCase):
         with self.assertRaises(OSError):
             os.fstat(failed_descriptors[0])
 
+    def test_identity_publish_race_never_overwrites_competing_target(self) -> None:
+        real_publish = runtime_state._publish_no_replace
+        competitor = b"competitor-must-survive"
+
+        def race(source: Path, destination: Path) -> None:
+            if destination.name == ".allocation-allocation-1":
+                destination.write_bytes(competitor)
+            real_publish(source, destination)
+
+        with (
+            mock.patch.object(runtime_state, "_publish_no_replace", side_effect=race),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provision_failed$",
+            ),
+        ):
+            self.provision()
+
+        quarantined = (
+            self.state_root
+            / ".allocation-1.quarantine/runtime-1/.allocation-allocation-1"
+        )
+        self.assertEqual(quarantined.read_bytes(), competitor)
+
+    def test_quarantine_publish_race_never_replaces_competing_destination(self) -> None:
+        real_publish = runtime_state._publish_no_replace
+        real_sync = runtime_state._sync_directory
+        competitor_identity: tuple[int, int] | None = None
+        sync_calls = 0
+
+        def fail_once(path: Path, *args: object) -> None:
+            nonlocal sync_calls
+            sync_calls += 1
+            if sync_calls == 1:
+                raise OSError("provision fault")
+            real_sync(path, *args)
+
+        def race(source: Path, destination: Path) -> None:
+            nonlocal competitor_identity
+            if destination.parent.name == ".allocation-1.quarantine":
+                destination.mkdir()
+                status = destination.stat()
+                competitor_identity = status.st_dev, status.st_ino
+            real_publish(source, destination)
+
+        with (
+            mock.patch.object(runtime_state, "_sync_directory", side_effect=fail_once),
+            mock.patch.object(runtime_state, "_publish_no_replace", side_effect=race),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_quarantine_failed$",
+            ),
+        ):
+            self.provision()
+
+        destination = self.state_root / ".allocation-1.quarantine/runtime-1"
+        status = destination.stat()
+        self.assertEqual((status.st_dev, status.st_ino), competitor_identity)
+        self.assertTrue((self.state_root / "runtime-1").is_dir())
+
+    def test_keyboard_interrupt_and_system_exit_are_never_translated(self) -> None:
+        cases = (
+            ("_sync_directory", KeyboardInterrupt("stop")),
+            ("_validate_final_layout", SystemExit(7)),
+        )
+        for target, error in cases:
+            with self.subTest(target=target):
+                reservation = self.make_reservation(
+                    state_allocation_id=f"allocation-{target.removeprefix('_')}",
+                    instance_id=f"runtime-{target.removeprefix('_')}",
+                    relative_path=(
+                        "ft_userdata/runtime/instances/"
+                        f"runtime-{target.removeprefix('_')}"
+                    ),
+                )
+                provider = self.provider(reservation)
+                expected = type(error)
+                with (
+                    mock.patch.object(runtime_state, target, side_effect=error),
+                    self.assertRaises(expected),
+                ):
+                    provider.provision(
+                        reservation.instance_id,
+                        reservation.state_allocation_id,
+                        "freqtrade-state-v1",
+                    )
+
+    def test_quarantine_never_swallows_control_flow_exception(self) -> None:
+        calls = 0
+
+        def interrupt_quarantine(path: Path, *args: object) -> None:
+            nonlocal calls
+            del path, args
+            calls += 1
+            if calls == 1:
+                raise OSError("provision fault")
+            raise KeyboardInterrupt("stop")
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_sync_directory",
+                side_effect=interrupt_quarantine,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.provision()
+
+    def test_allocation_replaced_at_final_root_barrier_never_returns_proof(self) -> None:
+        real_sync = runtime_state._sync_directory
+        displaced = self.state_root / "owned-at-barrier"
+        replacement = self.state_root / "runtime-1"
+        replaced = False
+
+        def replace_at_root(path: Path, *args: object) -> None:
+            nonlocal replaced
+            if path == self.state_root and not replaced:
+                replaced = True
+                os.rename(replacement, displaced)
+                replacement.mkdir()
+                (replacement / "competitor").write_text("keep", encoding="utf-8")
+            real_sync(path, *args)
+
+        with (
+            mock.patch.object(runtime_state, "_sync_directory", side_effect=replace_at_root),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_quarantine_failed$",
+            ),
+        ):
+            self.provision()
+
+        self.assertTrue(replaced)
+        self.assertEqual((replacement / "competitor").read_text(encoding="utf-8"), "keep")
+        self.assertTrue(displaced.is_dir())
+        self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink-parent integration")
+    def test_symlinked_state_root_parent_is_rejected_before_allocation_io(self) -> None:
+        outside = self.base / "outside"
+        escaped_root = outside / "instances"
+        escaped_root.mkdir(parents=True)
+        os.chmod(escaped_root, 0o700)
+        linked_parent = self.base / "linked-parent"
+        linked_parent.symlink_to(outside, target_is_directory=True)
+        provider = self.provider(state_root=linked_parent / "instances")
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_root_invalid$",
+        ):
+            self.provision(provider)
+
+        self.assertFalse((escaped_root / "runtime-1").exists())
+
+    def test_reparse_state_root_parent_is_rejected_before_allocation_io(self) -> None:
+        parent = self.state_root.parent
+        real_lstat = os.lstat
+
+        def reparse_parent(path: Path) -> os.stat_result:
+            status = real_lstat(path)
+            if Path(path) != parent:
+                return status
+            return mock.Mock(
+                st_mode=status.st_mode,
+                st_dev=status.st_dev,
+                st_ino=status.st_ino,
+                st_nlink=status.st_nlink,
+                st_size=status.st_size,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x0400,
+                ),
+            )
+
+        with (
+            mock.patch.object(runtime_state.os, "lstat", side_effect=reparse_parent),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_root_invalid$",
+            ),
+        ):
+            self.provision()
+        self.assertFalse((self.state_root / "runtime-1").exists())
+
     @unittest.skipUnless(os.name == "posix", "POSIX durability ordering")
     def test_posix_durability_barriers_have_required_order(self) -> None:
         events: list[str] = []
         real_sync_descriptor = runtime_state._sync_descriptor
         real_sync_directory = runtime_state._sync_directory
-        real_rename = os.rename
+        real_publish = runtime_state._publish_no_replace
         real_validate = runtime_state._validate_final_layout
 
         def sync_descriptor(descriptor: int) -> None:
             events.append("identity-file-sync")
             real_sync_descriptor(descriptor)
 
-        def rename(source: Path, destination: Path) -> None:
+        def publish(source: Path, destination: Path) -> None:
             if destination.name == ".allocation-allocation-1":
                 events.append("identity-rename")
-            real_rename(source, destination)
+            real_publish(source, destination)
 
-        def sync_directory(path: Path) -> None:
+        def sync_directory(path: Path, *args: object) -> None:
             events.append(f"directory-sync:{path.name}")
-            real_sync_directory(path)
+            real_sync_directory(path, *args)
 
         def validate(*args: object, **kwargs: object) -> None:
             events.append("final-validation")
@@ -491,7 +681,7 @@ class RuntimeStateTests(unittest.TestCase):
         with (
             mock.patch.object(runtime_state, "_sync_descriptor", side_effect=sync_descriptor),
             mock.patch.object(runtime_state, "_sync_directory", side_effect=sync_directory),
-            mock.patch.object(runtime_state.os, "rename", side_effect=rename),
+            mock.patch.object(runtime_state, "_publish_no_replace", side_effect=publish),
             mock.patch.object(runtime_state, "_validate_final_layout", side_effect=validate),
         ):
             self.provision()

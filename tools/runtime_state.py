@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
 import secrets
@@ -130,8 +131,21 @@ class ManagedStateProvider:
                 component_statuses,
                 self._runtime_uid,
             )
-            _sync_directory(self._state_root)
-        except BaseException:
+            root_barrier_status = _validated_directory_status(
+                self._state_root,
+                self._runtime_uid,
+            )
+            if not _same_identity(root_status, root_barrier_status):
+                raise OSError
+            _sync_directory(self._state_root, root_barrier_status)
+            _require_root_identity(self._state_root, root_status, self._runtime_uid)
+            final_allocation_status = _validated_directory_status(
+                allocation,
+                self._runtime_uid,
+            )
+            if not _same_identity(allocation_status, final_allocation_status):
+                raise OSError
+        except Exception:
             if _quarantine_owned_allocation(
                 self._state_root,
                 root_status,
@@ -199,15 +213,16 @@ def _reservation_is_valid(
 
 def _validate_root(state_root: Path, runtime_uid: int) -> os.stat_result:
     try:
-        status = os.lstat(state_root)
-        _require_directory(status)
+        before = _capture_directory_ancestry(state_root)
         _verify_managed_state_directory(state_root, runtime_uid)
-        after = os.lstat(state_root)
-        _require_directory(after)
-        if not _same_snapshot(status, after):
+        after = _capture_directory_ancestry(state_root)
+        if len(before) != len(after) or any(
+            not _same_identity(previous, current)
+            for previous, current in zip(before, after, strict=True)
+        ):
             raise OSError
         state_root.resolve(strict=True)
-        return after
+        return after[-1]
     except (OSError, RuntimeError, ValueError):
         raise StateProvisionError(_ROOT_ERROR) from None
 
@@ -217,9 +232,27 @@ def _require_root_identity(
     expected: os.stat_result,
     runtime_uid: int,
 ) -> None:
-    current = _validated_directory_status(state_root, runtime_uid)
-    if not _same_identity(expected, current):
+    before = _capture_directory_ancestry(state_root)
+    _verify_managed_state_directory(state_root, runtime_uid)
+    after = _capture_directory_ancestry(state_root)
+    if (
+        len(before) != len(after)
+        or any(
+            not _same_identity(previous, current)
+            for previous, current in zip(before, after, strict=True)
+        )
+        or not _same_identity(expected, after[-1])
+    ):
         raise OSError
+
+
+def _capture_directory_ancestry(path: Path) -> tuple[os.stat_result, ...]:
+    statuses: list[os.stat_result] = []
+    for component in (*reversed(path.parents), path):
+        status = os.lstat(component)
+        _require_directory(status)
+        statuses.append(status)
+    return tuple(statuses)
 
 
 def _create_layout(
@@ -233,7 +266,7 @@ def _create_layout(
         os.mkdir(path, 0o700)
         _harden_managed_state_directory(path, runtime_uid)
         statuses[name] = _validated_directory_status(path, runtime_uid)
-        _sync_directory(path)
+        _sync_directory(path, statuses[name])
 
     identity_name = f".allocation-{allocation_id}"
     identity = allocation / identity_name
@@ -258,14 +291,13 @@ def _create_layout(
         if descriptor is not None:
             os.close(descriptor)
 
-    if os.path.lexists(identity):
-        raise OSError
-    os.rename(temporary, identity)
+    _publish_no_replace(temporary, identity)
     identity_status = os.lstat(identity)
     _require_empty_identity_file(identity_status)
     _verify_managed_state_identity_file(identity, runtime_uid)
     statuses[identity_name] = identity_status
-    _sync_directory(allocation)
+    allocation_barrier_status = _validated_directory_status(allocation, runtime_uid)
+    _sync_directory(allocation, allocation_barrier_status)
     return statuses
 
 
@@ -341,21 +373,28 @@ def _quarantine_owned_allocation(
         os.mkdir(container, 0o700)
         _harden_managed_state_directory(container, runtime_uid)
         _validated_directory_status(container, runtime_uid)
-        if os.path.lexists(destination):
-            return False
         current = os.lstat(allocation)
         _require_directory(current)
         if not _same_identity(allocation_status, current):
             return False
-        os.rename(allocation, destination)
+        _publish_no_replace(allocation, destination)
         moved = os.lstat(destination)
         _require_directory(moved)
         if not _same_identity(allocation_status, moved) or os.path.lexists(allocation):
             return False
-        _sync_directory(container)
-        _sync_directory(state_root)
+        container_barrier_status = _validated_directory_status(container, runtime_uid)
+        _sync_directory(container, container_barrier_status)
+        root_barrier_status = _validated_directory_status(state_root, runtime_uid)
+        if not _same_identity(root_status, root_barrier_status):
+            return False
+        _sync_directory(state_root, root_barrier_status)
+        _require_root_identity(state_root, root_status, runtime_uid)
+        moved_after = os.lstat(destination)
+        _require_directory(moved_after)
+        if not _same_identity(allocation_status, moved_after):
+            return False
         return True
-    except BaseException:
+    except Exception:
         return False
 
 
@@ -415,16 +454,76 @@ def _read_only_flags() -> int:
     return flags
 
 
+def _publish_no_replace(source: Path, destination: Path) -> None:
+    if _is_windows():
+        os.rename(source, destination)
+        return
+    if os.name != "posix":
+        raise OSError(errno.ENOTSUP, "atomic no-replace publish is unsupported")
+
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+    except (AttributeError, OSError):
+        raise OSError(errno.ENOTSUP, "atomic no-replace publish is unsupported") from None
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    rename_noreplace = 1
+    result = renameat2(
+        at_fdcwd,
+        os.fsencode(source),
+        at_fdcwd,
+        os.fsencode(destination),
+        rename_noreplace,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
 def _sync_descriptor(descriptor: int) -> None:
     os.fsync(descriptor)
 
 
-def _sync_directory(path: Path) -> None:
+def _sync_directory(path: Path, expected: os.stat_result) -> None:
+    named_before = os.lstat(path)
+    _require_directory(named_before)
+    if not _same_identity(expected, named_before):
+        raise OSError
     if _is_windows():
+        named_after = os.lstat(path)
+        _require_directory(named_after)
+        if not _same_snapshot(named_before, named_after):
+            raise OSError
         return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if no_follow is None or directory is None:
+        raise OSError(errno.ENOTSUP, "directory sync proof is unsupported")
+    flags = os.O_RDONLY | no_follow | directory | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(path, flags)
     try:
+        opened_before = os.fstat(descriptor)
+        _require_directory(opened_before)
+        if not _same_snapshot(named_before, opened_before):
+            raise OSError
         os.fsync(descriptor)
+        opened_after = os.fstat(descriptor)
+        _require_directory(opened_after)
+        if not _same_snapshot(opened_before, opened_after):
+            raise OSError
+        named_after = os.lstat(path)
+        _require_directory(named_after)
+        if not _same_snapshot(opened_after, named_after):
+            raise OSError
     finally:
         os.close(descriptor)

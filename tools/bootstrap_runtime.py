@@ -174,6 +174,11 @@ def _managed_state_status(path: Path, *, directory: bool) -> os.stat_result:
         status = os.lstat(path)
     except OSError as error:
         raise ValueError("invalid managed state path") from error
+    _require_managed_state_status(status, directory=directory)
+    return status
+
+
+def _require_managed_state_status(status: os.stat_result, *, directory: bool) -> None:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
     if stat.S_ISLNK(status.st_mode) or bool(
         getattr(status, "st_file_attributes", 0) & reparse_flag
@@ -185,7 +190,6 @@ def _managed_state_status(path: Path, *, directory: bool) -> os.stat_result:
         not stat.S_ISREG(status.st_mode) or status.st_nlink != 1
     ):
         raise ValueError("invalid managed state identity file")
-    return status
 
 
 def _harden_managed_state_directory(path: Path, runtime_uid: int) -> None:
@@ -224,6 +228,54 @@ def _verify_managed_state_identity_file(path: Path, runtime_uid: int) -> None:
         raise ValueError(
             "managed state identity file must be owned by runtime uid with mode 0600"
         )
+
+
+def _managed_state_paths(root: Path) -> tuple[Path, ...]:
+    current = root
+    paths: list[Path] = []
+    for component in MANAGED_STATE_ROOT.parts:
+        current /= component
+        paths.append(current)
+    return tuple(paths)
+
+
+def _init_managed_state_root(root: Path, runtime_uid: int) -> Path:
+    paths = _managed_state_paths(root)
+    for path in paths:
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise ValueError("invalid managed state path") from error
+        _managed_state_status(path, directory=True)
+    managed_root = paths[-1]
+    _harden_managed_state_directory(managed_root, runtime_uid)
+    for path in paths:
+        _managed_state_status(path, directory=True)
+    return managed_root
+
+
+def _verify_existing_managed_state_ancestry(root: Path) -> None:
+    for path in _managed_state_paths(root):
+        try:
+            status = os.lstat(path)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise ValueError("invalid managed state path") from error
+        _require_managed_state_status(status, directory=True)
+
+
+def _verify_managed_state_root(root: Path, runtime_uid: int) -> Path:
+    paths = _managed_state_paths(root)
+    for path in paths:
+        _managed_state_status(path, directory=True)
+    managed_root = paths[-1]
+    _verify_managed_state_directory(managed_root, runtime_uid)
+    for path in paths:
+        _managed_state_status(path, directory=True)
+    return managed_root
 
 
 def _expected_runtime_identity() -> dict[str, int]:
@@ -500,6 +552,7 @@ def _init_secret_file(
 def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
     identity = _expected_runtime_identity()
     runtime_uid = identity["FREQTRADE_RUNTIME_UID"]
+    _verify_existing_managed_state_ancestry(root)
     environment_path = root / ".env"
     if os.path.lexists(environment_path):
         _require_regular_runtime_control_file(environment_path)
@@ -508,14 +561,9 @@ def init_runtime(root: Path, manifest: dict[str, Any]) -> None:
         _read_compose_identity(override_path, manifest, identity)
     _merge_runtime_identity(environment_path)
     _harden_runtime_control_file(environment_path, runtime_uid)
+    _init_managed_state_root(root, runtime_uid)
     _merge_compose_identity(override_path, manifest, identity)
     _harden_runtime_control_file(override_path, runtime_uid)
-    managed_state_root = root / MANAGED_STATE_ROOT
-    if os.path.lexists(managed_state_root):
-        _managed_state_status(managed_state_root, directory=True)
-    else:
-        managed_state_root.mkdir(parents=True)
-    _harden_managed_state_directory(managed_state_root, runtime_uid)
     used_secret_values: set[str] = set()
     for service in manifest["services"]:
         template = root / service["config_template"]
@@ -627,6 +675,10 @@ def verify_runtime(
     verify_platform_secrets: bool = True,
 ) -> dict[str, int]:
     expected_identity = _expected_runtime_identity()
+    _verify_managed_state_root(
+        root,
+        expected_identity["FREQTRADE_RUNTIME_UID"],
+    )
     environment_path = root / ".env"
     _verify_runtime_control_file(
         environment_path,
@@ -643,7 +695,6 @@ def verify_runtime(
     )
     runtime_uid = identity["FREQTRADE_RUNTIME_UID"]
     runtime_gid = identity["FREQTRADE_RUNTIME_GID"]
-    _verify_managed_state_directory(root / MANAGED_STATE_ROOT, runtime_uid)
     all_values: list[str] = []
     state_roots: set[Path] = set()
     for service in manifest["services"]:

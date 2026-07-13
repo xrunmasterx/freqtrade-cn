@@ -319,6 +319,45 @@ class BootstrapRuntimeTests(unittest.TestCase):
             ],
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink-parent integration")
+    def test_init_rejects_symlinked_managed_state_parent_without_following_it(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.root / "ft_userdata").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(ValueError, "managed state"):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        self.assertFalse((outside / "runtime/instances").exists())
+
+    def test_init_rejects_reparse_managed_state_parent(self) -> None:
+        parent = self.root / "ft_userdata/runtime"
+        parent.mkdir(parents=True)
+        real_lstat = os.lstat
+
+        def reparse_parent(path: Path) -> os.stat_result:
+            status = real_lstat(path)
+            if Path(path) != parent:
+                return status
+            return mock.Mock(
+                st_mode=status.st_mode,
+                st_uid=getattr(status, "st_uid", 0),
+                st_nlink=status.st_nlink,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x0400,
+                ),
+            )
+
+        with (
+            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_parent),
+            self.assertRaisesRegex(ValueError, "managed state"),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        self.assertFalse((parent / "instances").exists())
+
     def test_init_never_creates_state_strategy_directory(self) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 
