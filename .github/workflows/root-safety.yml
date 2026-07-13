@@ -325,6 +325,7 @@ jobs:
           platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
           docker network disconnect bridge platform-postgres-ci
           database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort)"
+          printf 'platform PostgreSQL networks after isolation: %s\n' "${database_networks}"
           test "${database_networks}" = "freqtrade-platform-ci"
           docker exec --interactive platform-postgres-ci \
             psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'

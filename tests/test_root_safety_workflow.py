@@ -1349,6 +1349,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "expect_role_denied platform_control database-create",
             "expect_role_denied platform_supervisor delegated-sequence",
             "docker network disconnect bridge platform-postgres-ci",
+            'printf \'platform PostgreSQL networks after isolation: %s\\n\' "${database_networks}"',
             'test "${database_networks}" = "freqtrade-platform-ci"',
             "--name platform-control-ci",
             "--user 1000:1000",
