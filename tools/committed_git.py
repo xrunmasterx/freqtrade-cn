@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -199,12 +200,26 @@ class CommittedGitStore:
         self._assert_clean(
             ("ops/adapter-templates", "ops/runtime-policies"),
             "template checkout must be clean",
+            required_paths=tuple(_POLICY_PATHS.values()),
+            exact_index=False,
         )
 
     def assert_runtime_checkout_clean(self) -> None:
-        self._assert_clean(_RUNTIME_PATHS, "runtime artifact checkout must be clean")
+        self._assert_clean(
+            _RUNTIME_PATHS,
+            "runtime artifact checkout must be clean",
+            required_paths=_RUNTIME_PATHS,
+            exact_index=True,
+        )
 
-    def _assert_clean(self, paths: tuple[str, ...], error: str) -> None:
+    def _assert_clean(
+        self,
+        paths: tuple[str, ...],
+        error: str,
+        *,
+        required_paths: tuple[str, ...],
+        exact_index: bool,
+    ) -> None:
         status = self._run(
             "status",
             "--porcelain=v1",
@@ -226,17 +241,72 @@ class CommittedGitStore:
             *paths,
             error=error,
         )
+        indexed_paths = self._parse_index_entries(index_entries, error)
         if any(
-            record[:1] in (b"h", b"S", b"s")
-            for record in index_entries.split(b"\0")
-            if record
+            not any(path == scope or path.startswith(f"{scope}/") for scope in paths)
+            for path in indexed_paths
         ):
             raise ValueError(error)
+        required = set(required_paths)
+        if not required.issubset(indexed_paths):
+            raise ValueError(error)
+        if exact_index and indexed_paths != required:
+            raise ValueError(error)
+        for path in required_paths:
+            self._assert_regular_worktree_file(path, error)
+
+    @staticmethod
+    def _parse_index_entries(output: bytes, error: str) -> set[str]:
+        if output and not output.endswith(b"\0"):
+            raise ValueError(error)
+        records = output.split(b"\0")[:-1] if output else []
+        paths: set[str] = set()
+        for record in records:
+            if len(record) < 3 or record[:2] != b"H ":
+                raise ValueError(error)
+            try:
+                path = record[2:].decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError(error) from None
+            if not path or path in paths:
+                raise ValueError(error)
+            paths.add(path)
+        return paths
+
+    def _assert_regular_worktree_file(self, path: str, error: str) -> None:
+        try:
+            metadata = os.lstat(self._root / path)
+        except OSError:
+            raise ValueError(error) from None
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(error)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if getattr(metadata, "st_file_attributes", 0) & reparse_flag:
+            raise ValueError(error)
+
+    def _assert_current_paths(self, paths: tuple[str, ...], error: str) -> None:
+        index_entries = self._run(
+            "ls-files",
+            "-v",
+            "-z",
+            "--",
+            *paths,
+            error=error,
+        )
+        if self._parse_index_entries(index_entries, error) != set(paths):
+            raise ValueError(error)
+        for path in paths:
+            self._assert_regular_worktree_file(path, error)
 
     def read_template_blob(self, template_id: str) -> bytes:
         if not isinstance(template_id, str) or _TEMPLATE_ID.fullmatch(template_id) is None:
             raise ValueError("template_id must be a valid platform identifier")
-        return self._blob(f"{_TEMPLATE_PREFIX}{template_id}.json")
+        path = f"{_TEMPLATE_PREFIX}{template_id}.json"
+        self._assert_current_paths(
+            (path, *_POLICY_PATHS.values()),
+            "template checkout must be clean",
+        )
+        return self._blob(path)
 
     def read_policy_blob(self, policy_field: str) -> bytes:
         try:

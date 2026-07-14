@@ -8,7 +8,7 @@
 - Task 6: complete - backend `6d9aeef84..21ffad636`, one FAIL/fix round, final independent review clean
 - Task 7: in progress - original CLI-only slice was blocked by missing registration/application/transport contracts; superseded by `docs/superpowers/plans/2026-07-14-runtime-registry-v2-phase2b-task7-contract-completion.md`
   - 7.1 Catalog/provenance correction: complete - backend `21ffad636..48573a58c`, independent review PASS with zero findings
-  - 7.2 committed paper-probe artifacts: complete
+  - 7.2 committed paper-probe artifacts: in progress - one independent review FAIL/fix round; re-review pending
   - 7.3 atomic backend registration: pending
   - 7.4 least-privilege one-shot operator boundary: pending
   - 7.5 CLI/Root Safety/gitlink closure: pending

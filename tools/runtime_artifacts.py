@@ -3,10 +3,31 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 from tools.committed_git import CommittedGitStore
+
+
+_EXCHANGE_SENSITIVE_ALIASES = frozenset(
+    {
+        "key",
+        "api_key",
+        "apiKey",
+        "secret",
+        "password",
+        "uid",
+        "account_id",
+        "accountId",
+        "wallet_address",
+        "walletAddress",
+        "private_key",
+        "privateKey",
+    }
+)
+_CCXT_CONFIG_BAGS = ("ccxt_config", "ccxt_sync_config", "ccxt_async_config")
+_CCXT_PRODUCT_KEYS = frozenset({"defaultType", "default_type"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +63,13 @@ def _reject_nonfinite_number(_value: str) -> None:
     raise _NonFiniteJsonNumber
 
 
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise _NonFiniteJsonNumber
+    return parsed
+
+
 def _strict_json(document: bytes, identity: str) -> object:
     try:
         text = document.decode("utf-8")
@@ -52,6 +80,7 @@ def _strict_json(document: bytes, identity: str) -> object:
             text,
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_nonfinite_number,
+            parse_float=_parse_finite_float,
         )
     except _DuplicateJsonKey:
         raise ValueError(f"{identity} JSON contains a duplicate key") from None
@@ -72,8 +101,39 @@ def _validate_config(document: bytes) -> None:
     exchange = payload.get("exchange")
     if not isinstance(exchange, dict) or exchange.get("name") != "bitget":
         raise ValueError("config exchange must be bitget")
-    if any(exchange.get(field) != "" for field in ("key", "secret", "password")):
+    if any(
+        exchange[field] not in (None, "")
+        for field in _EXCHANGE_SENSITIVE_ALIASES
+        if field in exchange
+    ):
         raise ValueError("exchange write credential must be empty")
+    for field in _CCXT_CONFIG_BAGS:
+        if field not in exchange:
+            continue
+        bag = exchange[field]
+        if not isinstance(bag, dict):
+            raise ValueError("CCXT configuration bag must be a JSON object")
+        _validate_ccxt_node(bag)
+
+
+def _validate_ccxt_node(value: object) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _validate_ccxt_node(item)
+        return
+    if not isinstance(value, dict):
+        return
+    for field, nested in value.items():
+        if field in _EXCHANGE_SENSITIVE_ALIASES and nested not in (None, ""):
+            raise ValueError("exchange write credential must be empty")
+        if field in _CCXT_PRODUCT_KEYS and nested != "spot":
+            raise ValueError("CCXT product override must remain spot")
+        if field == "fetchMarkets":
+            if not isinstance(nested, dict):
+                raise ValueError("CCXT product override must remain spot")
+            if "types" in nested and nested["types"] != ["spot"]:
+                raise ValueError("CCXT product override must remain spot")
+        _validate_ccxt_node(nested)
 
 
 def _validate_safety(document: bytes) -> None:

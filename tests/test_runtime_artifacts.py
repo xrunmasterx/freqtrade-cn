@@ -30,6 +30,21 @@ VALID_CONFIG = {
 }
 VALID_SAFETY = {"dry_run": True, "ignore_buying_expired_candle_after": 60}
 VALID_STRATEGY = b"import module_that_must_not_be_imported\nclass SampleStrategy: pass\n"
+EXCHANGE_SENSITIVE_ALIASES = (
+    "key",
+    "api_key",
+    "apiKey",
+    "secret",
+    "password",
+    "uid",
+    "account_id",
+    "accountId",
+    "wallet_address",
+    "walletAddress",
+    "private_key",
+    "privateKey",
+)
+CCXT_CONFIG_BAGS = ("ccxt_config", "ccxt_sync_config", "ccxt_async_config")
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -182,12 +197,124 @@ class RuntimeArtifactsTests(unittest.TestCase):
                         read_committed_paper_probe_artifacts(fixture.root, commit)
                     self.assertNotIn("credential-secret-marker", str(caught.exception))
 
+    def test_all_exchange_sensitive_aliases_allow_none_or_empty_string(self) -> None:
+        exchange = {
+            **VALID_CONFIG["exchange"],
+            **{
+                alias: None if index % 2 else ""
+                for index, alias in enumerate(EXCHANGE_SENSITIVE_ALIASES)
+            },
+        }
+        allowed_commit = self.fixture.commit_json(
+            CONFIG_PATH,
+            {**VALID_CONFIG, "exchange": exchange},
+            "allowed empty credential aliases",
+        )
+        try:
+            self.read(allowed_commit)
+        except ValueError:
+            self.fail("empty exchange credential alias was rejected")
+
+    def test_all_exchange_sensitive_aliases_reject_nonempty_values(self) -> None:
+        marker = "top-level-credential-secret-marker"
+        for alias in EXCHANGE_SENSITIVE_ALIASES:
+            with self.subTest(alias=alias):
+                commit = self.fixture.commit_json(
+                    CONFIG_PATH,
+                    {
+                        **VALID_CONFIG,
+                        "exchange": {**VALID_CONFIG["exchange"], alias: marker},
+                    },
+                    f"nonempty top-level {alias}",
+                )
+                with self.assertRaisesRegex(ValueError, "credential") as caught:
+                    self.read(commit)
+                self.assertNotIn(marker, str(caught.exception))
+                self.assertNotIn(marker, repr(caught.exception))
+
+    def test_nested_ccxt_sensitive_aliases_allow_only_empty_values(self) -> None:
+        empty_aliases = {
+            alias: None if index % 2 else ""
+            for index, alias in enumerate(EXCHANGE_SENSITIVE_ALIASES)
+        }
+        allowed_exchange = {
+            **VALID_CONFIG["exchange"],
+            **{
+                bag: {"options": {"credentials": empty_aliases}}
+                for bag in CCXT_CONFIG_BAGS
+            },
+        }
+        allowed_commit = self.fixture.commit_json(
+            CONFIG_PATH,
+            {**VALID_CONFIG, "exchange": allowed_exchange},
+            "allowed nested empty credentials",
+        )
+        self.read(allowed_commit)
+
+        marker = "nested-credential-secret-marker"
+        for bag in CCXT_CONFIG_BAGS:
+            for alias in EXCHANGE_SENSITIVE_ALIASES:
+                with self.subTest(bag=bag, alias=alias):
+                    exchange = {
+                        **VALID_CONFIG["exchange"],
+                        bag: {"options": {"credentials": {alias: marker}}},
+                    }
+                    commit = self.fixture.commit_json(
+                        CONFIG_PATH,
+                        {**VALID_CONFIG, "exchange": exchange},
+                        f"nonempty nested {bag} {alias}",
+                    )
+                    with self.assertRaisesRegex(ValueError, "credential") as caught:
+                        self.read(commit)
+                    self.assertNotIn(marker, str(caught.exception))
+                    self.assertNotIn(marker, repr(caught.exception))
+
+    def test_ccxt_product_overrides_are_closed_to_spot(self) -> None:
+        allowed_exchange = {
+            **VALID_CONFIG["exchange"],
+            "ccxt_config": {
+                "defaultType": "spot",
+                "options": {"fetchMarkets": {"types": ["spot"]}},
+            },
+            "ccxt_sync_config": {"options": {"default_type": "spot"}},
+            "ccxt_async_config": {"nested": {"defaultType": "spot"}},
+        }
+        allowed_commit = self.fixture.commit_json(
+            CONFIG_PATH,
+            {**VALID_CONFIG, "exchange": allowed_exchange},
+            "allowed spot ccxt overrides",
+        )
+        self.read(allowed_commit)
+
+        invalid_overrides = (
+            {"defaultType": "swap"},
+            {"options": {"default_type": "future"}},
+            {"options": {"fetchMarkets": {"types": ["spot", "swap"]}}},
+            {"options": {"fetchMarkets": "product-secret-marker"}},
+        )
+        marker = "product-secret-marker"
+        for bag in CCXT_CONFIG_BAGS:
+            for index, override in enumerate(invalid_overrides):
+                with self.subTest(bag=bag, index=index):
+                    exchange = {**VALID_CONFIG["exchange"], bag: override, "marker": marker}
+                    commit = self.fixture.commit_json(
+                        CONFIG_PATH,
+                        {**VALID_CONFIG, "exchange": exchange},
+                        f"invalid product override {bag} {index}",
+                    )
+                    with self.assertRaisesRegex(ValueError, "CCXT product") as caught:
+                        self.read(commit)
+                    self.assertNotIn(marker, str(caught.exception))
+                    self.assertNotIn(marker, repr(caught.exception))
+
     def test_config_and_safety_reject_duplicate_keys_and_nonfinite_numbers(self) -> None:
         variants = (
             (CONFIG_PATH, b'{"dry_run":true,"dry_run":true}\n', "duplicate"),
             (CONFIG_PATH, b'{"dry_run":true,"value":NaN}\n', "non-finite"),
+            (CONFIG_PATH, b'{"dry_run":true,"value":1e9999}\n', "non-finite"),
             (SAFETY_PATH, b'{"dry_run":true,"dry_run":true}\n', "duplicate"),
             (SAFETY_PATH, b'{"dry_run":true,"value":Infinity}\n', "non-finite"),
+            (SAFETY_PATH, b'{"dry_run":true,"value":-1e9999}\n', "non-finite"),
         )
         for path, contents, message in variants:
             with self.subTest(path=path, message=message):

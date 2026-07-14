@@ -407,10 +407,29 @@ class RuntimeTemplateGitTests(unittest.TestCase):
     def test_missing_policy_artifact_is_rejected(self) -> None:
         (self.fixture.root / "ops/runtime-policies/image-policies.json").unlink()
         commit = self.fixture.create_commit("remove image policies")
-        with self.assertRaisesRegex(ValueError, "required artifact"):
+        with self.assertRaisesRegex(ValueError, "checkout must be clean"):
             read_committed_template(
                 self.fixture.root, "freqtrade-paper-probe-v1", commit
             )
+
+    def test_current_index_must_retain_selected_template_and_all_policies(self) -> None:
+        selected_paths = (
+            "ops/adapter-templates/freqtrade-paper-probe-v1.json",
+            "ops/runtime-policies/image-policies.json",
+        )
+        for path in selected_paths:
+            with self.subTest(path=path):
+                with tempfile.TemporaryDirectory() as directory:
+                    fixture = GitFixture(Path(directory))
+                    selected_commit = fixture.commit
+                    (fixture.root / path).unlink()
+                    fixture.create_commit(f"delete {path}")
+                    with self.assertRaisesRegex(ValueError, "checkout must be clean"):
+                        read_committed_template(
+                            fixture.root,
+                            "freqtrade-paper-probe-v1",
+                            selected_commit,
+                        )
 
     def test_future_worktree_policy_cannot_substitute_for_source_commit(self) -> None:
         future_command = "future-reviewed-command-v1"

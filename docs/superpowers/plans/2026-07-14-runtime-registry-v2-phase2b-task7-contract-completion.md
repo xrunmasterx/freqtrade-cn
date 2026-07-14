@@ -12,7 +12,7 @@
 
 ## Locked assumptions and success criteria
 
-- `paper_probe` is fixed to instance `phase2-paper-probe`, owner `paper_probe/phase2-paper-probe/v1`, Digital Assets + Spot + Bitget, environment `paper`, `SampleStrategy`, and exact boolean `dry_run=true`.
+- `paper_probe` preserves the approved design/compiler identity: instance and owner ID `phase2-spot-paper-probe`, owner revision `phase2-spot-paper-probe-v1`, Digital Assets + Spot + Bitget, environment `paper`, `SampleStrategy`, and exact boolean `dry_run=true`.
 - The selected strategy is the root-owned committed blob `ft_userdata/user_data/strategies/sample_strategy.py`; therefore its trusted commit is `root_commit`. `strategies_commit` remains component provenance and is not falsely used as the blob owner.
 - The committed config is `ft_userdata/user_data/config.example.json`; the committed safety policy is `ops/config/trading-safety.json`. No caller may provide alternative paths, market/product/venue, strategy, environment, template, policy, state path, secret path, image, command, mount, port, network, privilege, Compose fragment, or Docker project.
 - The compiler must use the exact immutable Catalog revision and exact active AdapterTemplate revision persisted in PostgreSQL. Bitget Spot paper capability must exist; Live remains denied.
@@ -97,12 +97,16 @@ python -S -m unittest tests.test_committed_git tests.test_runtime_artifacts test
 - Create `freqtrade/freqtrade/platform/runtime_registration_repository.py`
 - Modify `freqtrade/freqtrade/platform/runtime_service.py`
 - Modify `freqtrade/freqtrade/platform/runtime_domain.py`
+- Modify `freqtrade/freqtrade/platform/runtime_models.py`
 - Modify `freqtrade/freqtrade/platform/__init__.py`
-- Create `freqtrade/platform_migrations/versions/20260714_0003_runtime_registration.py`
+- Modify `freqtrade/freqtrade/platform/template_repository.py`
+- Create `freqtrade/platform_migrations/versions/20260714_0004_runtime_registration.py`
 - Create `freqtrade/tests/platform/test_runtime_registration.py`
 - Create `freqtrade/tests/platform/test_runtime_registration_repository.py`
 - Create `freqtrade/tests/platform/test_runtime_registration_repository_postgres.py`
 - Modify `freqtrade/tests/platform/test_runtime_service.py`
+- Modify `freqtrade/tests/platform/test_template_repository.py`
+- Modify `freqtrade/tests/platform/test_template_repository_postgres.py`
 - Modify `freqtrade/tests/platform/test_platform_migrations.py`
 - Modify `freqtrade/tests/platform/test_template_migrations.py` only if the head-migration assertions require it
 
@@ -114,26 +118,49 @@ RuntimeApplicationService.ensure_paper_probe_registration(request, actor, occurr
 RuntimeApplicationService.registration_status(instance_id)
 ```
 
-The existing lifecycle `request()` method remains behaviorally unchanged. Construction uses explicit narrow repository/compiler dependencies; platform-control is not given the registration repository.
+The existing positional `RuntimeApplicationService(repository)` lifecycle construction and `request()` behavior remain unchanged. Add keyword-only narrow `template_repository` and `registration_repository` dependencies; an operator-style service need not receive a lifecycle repository, and platform-control is not given the registration repository. A missing required dependency returns one stable configuration error rather than `AttributeError`.
+
+`EnsurePaperProbeRegistrationRequest` exposes only exact template revision ID, component commits, the three committed artifact digests, literal `SampleStrategy`, and the closed policy snapshot. Owner, instance, Catalog, market/product/venue, environment, state/reference IDs, paths, dry-run, and raw runtime power remain backend constants. The stable result/status DTO excludes timestamps, content, paths, DSNs, secret values/versions, and caller choices.
+
+Use deterministic backend-owned identities:
+
+```text
+instance/owner_id: phase2-spot-paper-probe
+owner_revision: phase2-spot-paper-probe-v1
+state_allocation_id: state-phase2-spot-paper-probe-v1
+secret reference IDs:
+  secret-phase2-spot-paper-probe-api-password-v1
+  secret-phase2-spot-paper-probe-jwt-secret-v1
+  secret-phase2-spot-paper-probe-ws-token-v1
+audit_event_id: audit-register-phase2-spot-paper-probe
+request_id: request-register-phase2-spot-paper-probe
+```
+
+The registration repository, not the service or CLI, constructs the fixed `CompileRuntimeRequest` from transaction-local typed rows and the trusted committed evidence.
 
 **Repository transaction rules:**
 
-- The transaction first locks the exact active paper-probe template as its concurrency anchor.
-- It inserts the exact built-in Catalog v2 only when absent; an existing revision must have byte-for-byte equivalent validated payload or the transaction fails.
-- It idempotently ensures one fresh/reserved `StateAllocationRecord` and exactly three active `SecretReferenceRecord`s, then invokes the pure compiler with those typed records and the committed artifact identities.
+- The transaction first acquires a deterministic PostgreSQL transaction-scoped advisory lock derived from the exact paper-probe template revision ID, then reads and validates the exact active template row. Registration must not use `SELECT ... FOR UPDATE`, because the one-shot operator role intentionally has no table UPDATE privilege.
+- Template deprecate/revoke transitions acquire the same advisory lock before their existing row lock. This preserves serialization between registration and status transitions without expanding operator grants. SQLite uses an explicit no-op adapter only for unit tests; PostgreSQL integration proves the real lock.
+- It inserts the exact built-in Catalog v2 only when absent; an existing JSON row must pass exact `CatalogSnapshot` validation and canonical semantic equality with the built-in v2 snapshot. Byte formatting is not compared because the JSON database type does not preserve it.
+- Catalog insertion uses insert-if-absent/no-update semantics and then exact readback so a concurrent immutable Catalog publisher cannot abort or overwrite registration.
+- It idempotently ensures one fresh/reserved `StateAllocationRecord` and exactly three active `SecretReferenceRecord`s for the fixed owner. Existing rows must exactly match every non-historical field; missing, extra-active, disabled, retired, restored, ready, alternate-generation, alternate-path, or alternate-owner metadata is a stable conflict.
+- All ORM access occurs through one `Session.begin()`. Existing repository public methods that create another Session must not be called. Extract/reuse pure row-to-typed-view validation from `template_repository.py` rather than duplicating its canonical payload/digest/provenance checks.
+- It invokes the pure compiler with those transaction-local typed records and committed artifact identities. SQLite tests prove sequential atomicity/replay/conflict only; PostgreSQL tests own advisory-lock and concurrent-idempotency guarantees.
 - It inserts or exactly validates the immutable `RuntimeSpecRevisionRecord`, inserts or exactly validates the stopped/registered `RuntimeInstanceRecord`, and appends exactly one `register_paper_probe` audit event before commit.
 - Registration does not create a directory, read a secret, resolve a secret version, create a lifecycle job, or leave a reserved half-state visible after failure.
-- An identical digest/instance replay returns the existing view without a second audit. A mismatching Catalog payload, digest, owner, allocation, secret set, template status, or component evidence fails closed with a stable conflict.
+- An identical digest/instance replay returns the same stable result without a second audit. Existing instance-without-audit or audit-without-instance is corruption and fails closed rather than being silently healed. A mismatching Catalog payload, digest, owner, allocation, secret set, template status, or component evidence fails with a stable conflict.
+- `ensure` always requires the template to remain active; read-only `registration_status` returns the historical registered identity even if the template is later deprecated/revoked.
 - Only expected uniqueness races are translated. Unexpected `IntegrityError` is re-raised. No broad exception swallowing or automatic retry.
-- Add only the closed audit action `register_paper_probe`; Catalog/allocation/reference/spec/instance inserts are one atomic business action and do not manufacture misleading partial audit events. Migration `0003` expands the database check constraint without weakening other values. Upgrade from `0001`, `0002`, and head fixtures must be tested on PostgreSQL.
+- Add only the closed audit action `register_paper_probe`; Catalog/allocation/reference/spec/instance inserts are one atomic business action and do not manufacture misleading partial audit events. Existing revision `20260714_0003` belongs to template audit actions and must not be rewritten. New linear migration `20260714_0004` has `down_revision="20260714_0003"` and expands the database check constraint without weakening other values. Downgrade to `0003` succeeds only when no registration audit exists; otherwise it fails closed and preserves append-only evidence. Upgrade from `0001`, `0002`, `0003`, and head fixtures, empty downgrade, populated downgrade refusal, single head, and metadata drift must be tested on PostgreSQL.
 
 **TDD gate:**
 
 ```powershell
 cd freqtrade
-python -m pytest tests/platform/test_runtime_registration.py tests/platform/test_runtime_registration_repository.py tests/platform/test_runtime_registration_repository_postgres.py tests/platform/test_runtime_service.py tests/platform/test_platform_migrations.py tests/platform/test_template_migrations.py -q -p no:cacheprovider
+python -m pytest tests/platform/test_runtime_registration.py tests/platform/test_runtime_registration_repository.py tests/platform/test_runtime_registration_repository_postgres.py tests/platform/test_runtime_service.py tests/platform/test_template_repository.py tests/platform/test_template_repository_postgres.py tests/platform/test_platform_migrations.py tests/platform/test_template_migrations.py -q -p no:cacheprovider
 alembic -c alembic-platform.ini check
-ruff check freqtrade/platform/runtime_registration.py freqtrade/platform/runtime_registration_repository.py freqtrade/platform/runtime_service.py freqtrade/platform/runtime_domain.py platform_migrations/versions/20260714_0003_runtime_registration.py tests/platform/test_runtime_registration.py tests/platform/test_runtime_registration_repository.py tests/platform/test_runtime_registration_repository_postgres.py tests/platform/test_runtime_service.py
+ruff check freqtrade/platform/runtime_registration.py freqtrade/platform/runtime_registration_repository.py freqtrade/platform/runtime_service.py freqtrade/platform/runtime_domain.py freqtrade/platform/template_repository.py platform_migrations/versions/20260714_0004_runtime_registration.py tests/platform/test_runtime_registration.py tests/platform/test_runtime_registration_repository.py tests/platform/test_runtime_registration_repository_postgres.py tests/platform/test_runtime_service.py tests/platform/test_template_repository.py tests/platform/test_template_repository_postgres.py
 ```
 
 The PostgreSQL selector must run against `PLATFORM_TEST_POSTGRES_URL`; a skip is a gate failure, not a pass.

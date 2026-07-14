@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+
+
+RUNTIME_PATHS = (
+    "ft_userdata/user_data/config.example.json",
+    "ft_userdata/user_data/strategies/sample_strategy.py",
+    "ops/config/trading-safety.json",
+)
 
 
 def git(repository: Path, *arguments: str, input_bytes: bytes | None = None) -> str:
@@ -188,6 +197,71 @@ class CommittedGitStoreTests(unittest.TestCase):
                     store = CommittedGitStore(fixture.root, fixture.commit)
                     with self.assertRaisesRegex(ValueError, "checkout must be clean"):
                         store.assert_runtime_checkout_clean()
+
+    def test_runtime_clean_guard_requires_exact_well_formed_index_entries(self) -> None:
+        store = CommittedGitStore(self.fixture.root, self.fixture.commit)
+        valid = b"".join(f"H {path}\0".encode("ascii") for path in RUNTIME_PATHS)
+        variants = (
+            b"",
+            b"malformed\0",
+            b"".join(f"H {path}\0".encode("ascii") for path in RUNTIME_PATHS[:2]),
+            valid + f"H {RUNTIME_PATHS[0]}\0".encode("ascii"),
+        )
+        for output in variants:
+            with self.subTest(output=output):
+                with patch.object(CommittedGitStore, "_run", side_effect=(b"", output)):
+                    with self.assertRaisesRegex(ValueError, "checkout must be clean"):
+                        store.assert_runtime_checkout_clean()
+
+    def test_selected_ancestor_fails_when_current_index_cleanly_deletes_artifact(self) -> None:
+        selected_commit = self.fixture.commit
+        (self.fixture.root / RUNTIME_PATHS[0]).unlink()
+        git(self.fixture.root, "add", "--update", "--", RUNTIME_PATHS[0])
+        self.fixture.create_index_commit("delete runtime config")
+
+        store = CommittedGitStore(self.fixture.root, selected_commit)
+        with self.assertRaisesRegex(ValueError, "checkout must be clean"):
+            store.assert_runtime_checkout_clean()
+
+    def test_runtime_clean_guard_requires_current_worktree_regular_files(self) -> None:
+        for kind in ("missing", "directory"):
+            with self.subTest(kind=kind):
+                with tempfile.TemporaryDirectory() as directory:
+                    fixture = CommittedGitFixture(Path(directory))
+                    path = fixture.root / RUNTIME_PATHS[0]
+                    path.unlink()
+                    if kind == "directory":
+                        path.mkdir()
+                    store = CommittedGitStore(fixture.root, fixture.commit)
+                    original_run = CommittedGitStore._run
+
+                    def clean_status(
+                        instance: CommittedGitStore,
+                        *arguments: str,
+                        error: str = "Git operation failed",
+                    ) -> bytes:
+                        if arguments[0] == "status":
+                            return b""
+                        return original_run(instance, *arguments, error=error)
+
+                    with patch.object(
+                        CommittedGitStore,
+                        "_run",
+                        autospec=True,
+                        side_effect=clean_status,
+                    ):
+                        with self.assertRaisesRegex(ValueError, "checkout must be clean"):
+                            store.assert_runtime_checkout_clean()
+
+    def test_runtime_clean_guard_rejects_worktree_reparse_file(self) -> None:
+        store = CommittedGitStore(self.fixture.root, self.fixture.commit)
+        reparse = SimpleNamespace(
+            st_mode=stat.S_IFREG,
+            st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+        )
+        with patch("tools.committed_git.os.lstat", return_value=reparse):
+            with self.assertRaisesRegex(ValueError, "checkout must be clean"):
+                store.assert_runtime_checkout_clean()
 
 
 if __name__ == "__main__":
