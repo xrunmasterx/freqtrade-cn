@@ -162,6 +162,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          operator_image_baseline="${RUNNER_TEMP}/platform-operator-images.before"
+          operator_image_ids_baseline="${RUNNER_TEMP}/platform-operator-image-ids.before"
+          : > "${operator_image_baseline}"
+          while IFS= read -r operator_tag; do
+            test -n "${operator_tag}" || continue
+            operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
+            printf '%s|%s\n' "${operator_tag}" "${operator_id}"
+          done < <(
+            docker image ls --format '{{.Repository}}:{{.Tag}}' \
+              | grep --extended-regexp '^freqtrade-cn-operator:' \
+              | sort --unique || true
+          ) | sort > "${operator_image_baseline}"
+          docker image ls --all --no-trunc --quiet \
+            | sort --unique > "${operator_image_ids_baseline}"
           image_id="$(python tools/image_provenance.py build-operator --print-image-id)"
           echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
           docker tag "${image_id}" freqtrade-cn-operator:local
@@ -384,6 +398,8 @@ jobs:
             printf '%s\n' "${validate_first}" > "${platform_ci_dir}/operator-validate.json"
           )
           test "$(docker network inspect --format '{{.Internal}}' freqtrade-cn_platform-db)" = "true"
+          operator_database_networks_before="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
+          test -n "${operator_database_networks_before}"
           docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci
 
           (
@@ -450,23 +466,81 @@ jobs:
               documents.append(document)
 
           validate, publish, register, compile_result, status = documents
-          if validate["root_commit"] != root_commit or publish["root_commit"] != root_commit:
-              raise SystemExit("operator output root commit differs")
-          if validate["status"] != "valid" or publish["status"] != "active":
-              raise SystemExit("operator output status differs")
-          if validate["template_id"] != "freqtrade-paper-probe-v1":
-              raise SystemExit("operator template identity differs")
+          validate_keys = {
+              "backend_commit", "config_blob_digest", "frontend_commit", "root_commit",
+              "safety_policy_digest", "status", "strategies_commit",
+              "strategy_class_name", "strategy_digest", "template_id",
+              "template_payload_digest",
+          }
+          publish_keys = {
+              "adapter_template_revision_id", "backend_commit", "frontend_commit",
+              "root_commit", "status", "strategies_commit", "template_id",
+              "template_payload_digest",
+          }
+          registration_keys = {
+              "instance_id", "runtime_spec_revision_id",
+              "adapter_template_revision_id", "catalog_revision_id",
+              "state_allocation_id", "secret_reference_ids", "desired_state",
+              "lifecycle_status",
+          }
+          if set(validate) != validate_keys:
+              raise SystemExit("operator validation output schema differs")
+          if set(publish) != publish_keys:
+              raise SystemExit("operator publication output schema differs")
+          if set(register) != registration_keys:
+              raise SystemExit("operator registration output schema differs")
           if register != compile_result or register != status:
               raise SystemExit("operator registration outputs differ")
-          if register["instance_id"] != "phase2-spot-paper-probe":
-              raise SystemExit("operator instance identity differs")
-          if register["desired_state"] != "stopped" or register["lifecycle_status"] != "registered":
-              raise SystemExit("operator registration state differs")
-          if len(register["secret_reference_ids"]) != 3:
-              raise SystemExit("operator secret reference count differs")
-          for key, value in {**validate, **publish}.items():
-              if key.endswith("digest") and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+          commit_pattern = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+          digest_pattern = re.compile(r"[0-9a-f]{64}")
+          commit_keys = ("root_commit", "backend_commit", "frontend_commit", "strategies_commit")
+          for key in commit_keys:
+              if commit_pattern.fullmatch(validate[key]) is None:
+                  raise SystemExit("operator commit identity differs")
+              if validate[key] != publish[key]:
+                  raise SystemExit("operator component commits differ")
+          if validate["root_commit"] != root_commit:
+              raise SystemExit("operator output root commit differs")
+          for key in (
+              "config_blob_digest", "safety_policy_digest", "strategy_digest",
+              "template_payload_digest",
+          ):
+              if digest_pattern.fullmatch(validate[key]) is None:
                   raise SystemExit("operator digest differs")
+          if publish["template_payload_digest"] != validate["template_payload_digest"]:
+              raise SystemExit("operator template digest differs")
+          if publish["adapter_template_revision_id"] != f"template-{validate['template_payload_digest']}":
+              raise SystemExit("operator template revision differs")
+          if register["adapter_template_revision_id"] != publish["adapter_template_revision_id"]:
+              raise SystemExit("operator registration template differs")
+          runtime_spec_revision_id = register["runtime_spec_revision_id"]
+          if (
+              not runtime_spec_revision_id.startswith("runtime-spec-")
+              or digest_pattern.fullmatch(
+                  runtime_spec_revision_id.removeprefix("runtime-spec-")
+              ) is None
+          ):
+              raise SystemExit("operator runtime specification revision differs")
+          expected_secret_references = (
+              "secret-phase2-spot-paper-probe-api-password-v1",
+              "secret-phase2-spot-paper-probe-jwt-secret-v1",
+              "secret-phase2-spot-paper-probe-ws-token-v1",
+          )
+          if tuple(register["secret_reference_ids"]) != expected_secret_references:
+              raise SystemExit("operator secret references differ")
+          if (
+              validate["status"] != "valid"
+              or publish["status"] != "active"
+              or validate["template_id"] != "freqtrade-paper-probe-v1"
+              or publish["template_id"] != "freqtrade-paper-probe-v1"
+              or validate["strategy_class_name"] != "SampleStrategy"
+              or register["instance_id"] != "phase2-spot-paper-probe"
+              or register["catalog_revision_id"] != "builtin-market-catalog-v2"
+              or register["state_allocation_id"] != "state-phase2-spot-paper-probe-v1"
+              or register["desired_state"] != "stopped"
+              or register["lifecycle_status"] != "registered"
+          ):
+              raise SystemExit("operator fixed identity or status differs")
           PY
 
           alias_id="$(docker image inspect --format '{{.Id}}' freqtrade-cn-operator:local)"
@@ -476,7 +550,7 @@ jobs:
           docker network disconnect freqtrade-cn_platform-db platform-postgres-ci
           docker network rm freqtrade-cn_platform-db
           operator_database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
-          test "${operator_database_networks}" = "freqtrade-platform-ci"
+          test "${operator_database_networks}" = "${operator_database_networks_before}"
           sudo rm -rf "${operator_root}"
           test ! -e "${operator_root}"
 
@@ -659,6 +733,143 @@ jobs:
 
           docker exec platform-postgres-ci \
             sh /docker-entrypoint-initdb.d/init-platform-roles.sh
+
+          operator_membership_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_auth_members AS membership
+              JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid
+              JOIN pg_roles AS member_role ON member_role.oid = membership.member
+              WHERE granted_role.rolname = 'platform_operator'
+                 OR member_role.rolname = 'platform_operator'")"
+          test "${operator_membership_count}" = "0"
+          operator_default_acl_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_default_acl AS default_acl
+              LEFT JOIN LATERAL aclexplode(default_acl.defaclacl) AS privilege ON true
+              LEFT JOIN pg_roles AS default_owner
+                ON default_owner.oid = default_acl.defaclrole
+              LEFT JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE default_owner.rolname = 'platform_operator'
+                 OR grantee.rolname = 'platform_operator'
+                 OR privilege.grantee = 0")"
+          test "${operator_default_acl_count}" = "0"
+          direct_operator_database_acl_difference="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH actual AS (
+                SELECT database.datname::text AS object_name,
+                       privilege.privilege_type::text AS privilege_type,
+                       privilege.is_grantable
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                WHERE grantee.rolname = 'platform_operator'
+              ), expected(object_name, privilege_type, is_grantable) AS (
+                VALUES ('platform'::text, 'CONNECT'::text, false)
+              ), difference AS (
+                (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+                UNION ALL
+                (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+              )
+              SELECT count(*) FROM difference")"
+          test "${direct_operator_database_acl_difference}" = "0"
+          direct_operator_schema_acl_difference="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH actual AS (
+                SELECT namespace.nspname::text AS object_name,
+                       privilege.privilege_type::text AS privilege_type,
+                       privilege.is_grantable
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                WHERE grantee.rolname = 'platform_operator'
+              ), expected(object_name, privilege_type, is_grantable) AS (
+                VALUES ('public'::text, 'USAGE'::text, false)
+              ), difference AS (
+                (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+                UNION ALL
+                (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+              )
+              SELECT count(*) FROM difference")"
+          test "${direct_operator_schema_acl_difference}" = "0"
+          direct_operator_relation_acl_difference="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH actual AS (
+                SELECT namespace.nspname::text AS schema_name,
+                       relation.relname::text AS object_name,
+                       privilege.privilege_type::text AS privilege_type,
+                       privilege.is_grantable
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                WHERE grantee.rolname = 'platform_operator'
+                  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+                  AND namespace.nspname <> 'information_schema'
+                  AND namespace.nspname !~ '^pg_'
+              ), expected(schema_name, object_name, privilege_type, is_grantable) AS (
+                SELECT 'public'::text, table_name::text, privilege_type::text, false
+                FROM (VALUES
+                  ('platform_catalog_revisions'),
+                  ('adapter_template_revisions'),
+                  ('state_allocations'),
+                  ('secret_references'),
+                  ('runtime_spec_revisions'),
+                  ('runtime_instances'),
+                  ('runtime_audit_events')
+                ) AS tables(table_name)
+                CROSS JOIN (VALUES ('SELECT'), ('INSERT')) AS privileges(privilege_type)
+              ), difference AS (
+                (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+                UNION ALL
+                (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+              )
+              SELECT count(*) FROM difference")"
+          test "${direct_operator_relation_acl_difference}" = "0"
+          direct_operator_sequence_acl_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_class AS relation
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+              JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE grantee.rolname = 'platform_operator'
+                AND relation.relkind = 'S'
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'")"
+          test "${direct_operator_sequence_acl_count}" = "0"
+          direct_operator_column_acl_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_attribute AS attribute
+              JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+              LEFT JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND (grantee.rolname = 'platform_operator' OR privilege.grantee = 0)")"
+          test "${direct_operator_column_acl_count}" = "0"
+          direct_operator_routine_acl_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_proc AS routine
+              JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+              CROSS JOIN LATERAL aclexplode(routine.proacl) AS privilege
+              JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE grantee.rolname = 'platform_operator'
+                AND namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'")"
+          test "${direct_operator_routine_acl_count}" = "0"
 
           residual_operator_authority="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
@@ -1484,22 +1695,65 @@ jobs:
             sudo rm -rf "${operator_root}"
           fi
           test ! -e "${operator_root}" || cleanup_status=1
-          if test -n "${reviewed_operator_image_id}"; then
-            mapfile -t operator_tags < <(
-              docker image inspect \
-                --format '{{range .RepoTags}}{{println .}}{{end}}' \
-                "${reviewed_operator_image_id}" 2>/dev/null \
-                | grep --extended-regexp '^freqtrade-cn-operator:' || true
-            )
-            for operator_tag in "${operator_tags[@]}"; do
+          operator_image_baseline="${RUNNER_TEMP}/platform-operator-images.before"
+          operator_image_ids_baseline="${RUNNER_TEMP}/platform-operator-image-ids.before"
+          operator_image_current="${RUNNER_TEMP}/platform-operator-images.current"
+          operator_image_created="${RUNNER_TEMP}/platform-operator-images.created"
+          operator_image_created_ids="${RUNNER_TEMP}/platform-operator-image-ids.created"
+          if test -f "${operator_image_baseline}"; then
+            docker image ls --format '{{.Repository}}:{{.Tag}}' \
+              | grep --extended-regexp '^freqtrade-cn-operator:' \
+              | sort --unique > "${operator_image_current}" || true
+            cut --delimiter='|' --fields=1 "${operator_image_baseline}" \
+              > "${operator_image_baseline}.tags"
+            comm -13 "${operator_image_baseline}.tags" \
+              "${operator_image_current}" > "${operator_image_created}"
+            : > "${operator_image_created_ids}"
+            while IFS= read -r operator_tag; do
+              test -n "${operator_tag}" || continue
+              operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
+              if ! grep --fixed-strings --line-regexp \
+                "${operator_id}" "${operator_image_ids_baseline}"; then
+                printf '%s\n' "${operator_id}" >> "${operator_image_created_ids}"
+              fi
+            done < "${operator_image_current}"
+            sort --unique --output="${operator_image_created_ids}" \
+              "${operator_image_created_ids}"
+            while IFS= read -r operator_tag; do
+              test -n "${operator_tag}" || continue
               docker image rm "${operator_tag}" >/dev/null 2>&1 || cleanup_status=1
-            done
-            docker image rm --force "${reviewed_operator_image_id}" >/dev/null 2>&1 || true
-          fi
-          docker image rm freqtrade-cn-operator:local >/dev/null 2>&1 || true
-          docker image inspect freqtrade-cn-operator:local >/dev/null 2>&1 && cleanup_status=1 || true
-          if test -n "${reviewed_operator_image_id}"; then
-            docker image inspect "${reviewed_operator_image_id}" >/dev/null 2>&1 && cleanup_status=1 || true
+            done < "${operator_image_created}"
+            while IFS='|' read -r operator_tag operator_id; do
+              test -n "${operator_tag}" || continue
+              docker tag "${operator_id}" "${operator_tag}" >/dev/null 2>&1 \
+                || cleanup_status=1
+            done < "${operator_image_baseline}"
+            while IFS= read -r operator_id; do
+              test -n "${operator_id}" || continue
+              docker image rm --force "${operator_id}" >/dev/null 2>&1 || true
+              docker image inspect "${operator_id}" \
+                >/dev/null 2>&1 && cleanup_status=1 || true
+            done < "${operator_image_created_ids}"
+            if test -n "${reviewed_operator_image_id}" \
+              && ! grep --fixed-strings --line-regexp \
+                "${reviewed_operator_image_id}" "${operator_image_ids_baseline}"; then
+              docker image rm --force "${reviewed_operator_image_id}" \
+                >/dev/null 2>&1 || true
+              docker image inspect "${reviewed_operator_image_id}" \
+                >/dev/null 2>&1 && cleanup_status=1 || true
+            fi
+            : > "${operator_image_current}"
+            while IFS= read -r operator_tag; do
+              test -n "${operator_tag}" || continue
+              operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
+              printf '%s|%s\n' "${operator_tag}" "${operator_id}"
+            done < <(
+              docker image ls --format '{{.Repository}}:{{.Tag}}' \
+                | grep --extended-regexp '^freqtrade-cn-operator:' \
+                | sort --unique || true
+            ) | sort > "${operator_image_current}"
+            cmp "${operator_image_baseline}" "${operator_image_current}" \
+              || cleanup_status=1
           fi
           exit "${cleanup_status}"
 

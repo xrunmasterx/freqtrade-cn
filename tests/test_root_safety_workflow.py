@@ -414,6 +414,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "docker network connect freqtrade-platform-ci platform-postgres-ci",
     ),
     OPERATOR_CI_STEPS[0]: (
+        "operator_database_networks_before=",
         "git clone --no-local --no-checkout",
         "git checkout --detach",
         "submodule update --init --recursive",
@@ -433,7 +434,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
         "docker network rm freqtrade-cn_platform-db",
         "operator_database_networks=",
-        'test "${operator_database_networks}" = "freqtrade-platform-ci"',
+        'test "${operator_database_networks}" = "${operator_database_networks_before}"',
         "sudo rm -rf",
     ),
     OPERATOR_CI_STEPS[1]: (
@@ -448,6 +449,20 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test "${direct_operator_table_acl}" = "14|14|0"',
         "direct_column_acl_count=",
         'test "${direct_column_acl_count}" = "0"',
+        "operator_membership_count=",
+        'test "${operator_membership_count}" = "0"',
+        "operator_default_acl_count=",
+        'test "${operator_default_acl_count}" = "0"',
+        "direct_operator_database_acl_difference=",
+        'test "${direct_operator_database_acl_difference}" = "0"',
+        "direct_operator_schema_acl_difference=",
+        'test "${direct_operator_schema_acl_difference}" = "0"',
+        "direct_operator_relation_acl_difference=",
+        'test "${direct_operator_relation_acl_difference}" = "0"',
+        "direct_operator_sequence_acl_count=",
+        'test "${direct_operator_sequence_acl_count}" = "0"',
+        "direct_operator_routine_acl_count=",
+        'test "${direct_operator_routine_acl_count}" = "0"',
         'expect_operator_denied temp "CREATE TEMP TABLE',
         'expect_operator_denied create "CREATE SCHEMA',
         'expect_operator_denied update "UPDATE runtime_instances',
@@ -546,11 +561,11 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after"',
         'rm -rf "${platform_ci_dir}"',
         'test ! -e "${platform_ci_dir}"',
-        "--format '{{range .RepoTags}}{{println .}}{{end}}'",
         'docker image rm "${operator_tag}"',
+        'docker tag "${operator_id}" "${operator_tag}"',
         'docker image rm --force "${reviewed_operator_image_id}"',
-        "docker image inspect freqtrade-cn-operator:local",
         'docker image inspect "${reviewed_operator_image_id}"',
+        'cmp "${operator_image_baseline}" "${operator_image_current}"',
         'exit "${cleanup_status}"',
     ),
     SECRET_SCAN_STEP: (
@@ -569,6 +584,23 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test "${mutation_status}" -eq 1',
     ),
 }
+
+OPERATOR_OUTPUT_CONTRACT = (
+    "validate_keys = {",
+    "publish_keys = {",
+    "registration_keys = {",
+    "if set(validate) != validate_keys",
+    "if set(publish) != publish_keys",
+    "if set(register) != registration_keys",
+    'validate["strategy_class_name"] != "SampleStrategy"',
+    'register["catalog_revision_id"] != "builtin-market-catalog-v2"',
+    'register["state_allocation_id"] != "state-phase2-spot-paper-probe-v1"',
+    'runtime_spec_revision_id.startswith("runtime-spec-")',
+    "secret-phase2-spot-paper-probe-api-password-v1",
+    "secret-phase2-spot-paper-probe-jwt-secret-v1",
+    "secret-phase2-spot-paper-probe-ws-token-v1",
+    "commit_pattern.fullmatch",
+)
 
 
 def executable_statement_position(statements: list[str], fragment: str) -> int:
@@ -750,6 +782,20 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     )
     if default_acl < 0 or null_probe < 0 or default_acl >= null_probe:
         errors.append("operator null ACL contamination order differs")
+    operator_acceptance = scripts.get(OPERATOR_CI_STEPS[0], "")
+    for fragment in OPERATOR_OUTPUT_CONTRACT:
+        if fragment not in operator_acceptance:
+            errors.append(f"operator output contract missing: {fragment}")
+    topology_fragments = (
+        "operator_database_networks_before=",
+        "docker network connect --alias platform-postgres",
+        "docker network disconnect freqtrade-cn_platform-db",
+        "operator_database_networks=",
+        'test "${operator_database_networks}" = "${operator_database_networks_before}"',
+    )
+    topology_positions = [operator_acceptance.find(value) for value in topology_fragments]
+    if any(position < 0 for position in topology_positions) or topology_positions != sorted(topology_positions):
+        errors.append("operator database topology restoration order differs")
 
     denial_bodies = active_shell_function_bodies(least_privilege, "expect_role_denied")
     if len(denial_bodies) != 1:
@@ -2097,6 +2143,27 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertNotIn("git@", step)
         self.assertNotIn("https://", step)
 
+    def test_operator_acceptance_restores_the_observed_database_network_baseline(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        before = 'operator_database_networks_before="$(docker inspect'
+        connect = "docker network connect --alias platform-postgres"
+        disconnect = "docker network disconnect freqtrade-cn_platform-db"
+        after = 'operator_database_networks="$(docker inspect'
+        equality = 'test "${operator_database_networks}" = "${operator_database_networks_before}"'
+        for fragment in (before, connect, disconnect, after, equality):
+            self.assertIn(fragment, step)
+        positions = [step.index(fragment) for fragment in (before, connect, disconnect, after, equality)]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('test "${operator_database_networks}" = "freqtrade-platform-ci"', step)
+        reordered = workflow.replace(before, "topology-baseline-placeholder", 1)
+        reordered = reordered.replace(connect, before, 1)
+        reordered = reordered.replace("topology-baseline-placeholder", connect, 1)
+        self.assertIn(
+            "operator database topology restoration order differs",
+            validate_root_safety_workflow(reordered),
+        )
+
     def test_operator_cleanup_restores_postgres_topology_and_removes_temp_resources(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         acceptance = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
@@ -2114,7 +2181,6 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "docker network rm freqtrade-cn_platform-db",
             'operator_root="${RUNNER_TEMP}/platform-operator"',
             'sudo rm -rf "${operator_root}"',
-            "docker image rm freqtrade-cn-operator:local",
         ):
             self.assertIn(fragment, cleanup)
 
@@ -2164,19 +2230,104 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             step.index("CREATE FUNCTION public.platform_operator_public_null_probe()"),
         )
 
+    def test_operator_privilege_gate_has_exact_catalog_authority_inventories(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        required = (
+            "operator_membership_count=",
+            "pg_auth_members",
+            'test "${operator_membership_count}" = "0"',
+            "operator_default_acl_count=",
+            "pg_default_acl",
+            'test "${operator_default_acl_count}" = "0"',
+            "direct_operator_database_acl_difference=",
+            "direct_operator_schema_acl_difference=",
+            "direct_operator_relation_acl_difference=",
+            "direct_operator_sequence_acl_count=",
+            "direct_operator_routine_acl_count=",
+            "EXCEPT ALL",
+            "'platform'",
+            "'CONNECT'",
+            "'public'",
+            "'USAGE'",
+            'test "${direct_operator_database_acl_difference}" = "0"',
+            'test "${direct_operator_schema_acl_difference}" = "0"',
+            'test "${direct_operator_relation_acl_difference}" = "0"',
+            'test "${direct_operator_sequence_acl_count}" = "0"',
+            'test "${direct_operator_routine_acl_count}" = "0"',
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+
+    def test_operator_acceptance_requires_exact_output_schemas_and_fixed_ids(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        for fragment in (
+            "validate_keys = {",
+            "publish_keys = {",
+            "registration_keys = {",
+            "if set(validate) != validate_keys",
+            "if set(publish) != publish_keys",
+            "if set(register) != registration_keys",
+            'validate["strategy_class_name"] != "SampleStrategy"',
+            'register["catalog_revision_id"] != "builtin-market-catalog-v2"',
+            'register["state_allocation_id"] != "state-phase2-spot-paper-probe-v1"',
+            'f"template-{validate[\'template_payload_digest\']}"',
+            'runtime_spec_revision_id.removeprefix("runtime-spec-")',
+            'runtime_spec_revision_id.startswith("runtime-spec-")',
+            "secret-phase2-spot-paper-probe-api-password-v1",
+            "secret-phase2-spot-paper-probe-jwt-secret-v1",
+            "secret-phase2-spot-paper-probe-ws-token-v1",
+            "commit_pattern.fullmatch",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        for fragment in OPERATOR_OUTPUT_CONTRACT:
+            with self.subTest(mutation=fragment):
+                mutated = workflow.replace(fragment, "removed-output-contract", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
+
     def test_operator_cleanup_removes_all_reviewed_image_tags_and_asserts_absence(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
         for fragment in (
             'reviewed_operator_image_id="${{ steps.reviewed-operator-image.outputs.image_id }}"',
-            "--format '{{range .RepoTags}}{{println .}}{{end}}'",
+            "--format '{{.Repository}}:{{.Tag}}'",
             "grep --extended-regexp '^freqtrade-cn-operator:'",
             'docker image rm "${operator_tag}"',
+            'docker tag "${operator_id}" "${operator_tag}"',
             'docker image rm --force "${reviewed_operator_image_id}"',
-            "docker image inspect freqtrade-cn-operator:local",
             'docker image inspect "${reviewed_operator_image_id}"',
+            'cmp "${operator_image_baseline}" "${operator_image_current}"',
         ):
             self.assertIn(fragment, cleanup)
+
+    def test_operator_image_cleanup_uses_prebuild_baseline_when_output_is_empty(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        build = active_step_text(named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP))
+        cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
+        baseline = '${RUNNER_TEMP}/platform-operator-images.before'
+        self.assertIn(baseline, build)
+        self.assertLess(
+            build.index(baseline),
+            build.index("python tools/image_provenance.py build-operator"),
+        )
+        for fragment in (
+            baseline,
+            "platform-operator-images.current",
+            "platform-operator-images.created",
+            "platform-operator-image-ids.created",
+            "comm -13",
+            "docker image rm \"${operator_tag}\"",
+            'docker image rm --force "${operator_id}"',
+            "cmp",
+        ):
+            self.assertIn(fragment, cleanup)
+        baseline_branch = cleanup.index('if test -f "${operator_image_baseline}"; then')
+        output_branch = cleanup.index('if test -n "${reviewed_operator_image_id}"')
+        self.assertLess(baseline_branch, output_branch)
 
     def test_operator_contract_rejects_missing_executable_and_sql_evidence(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
