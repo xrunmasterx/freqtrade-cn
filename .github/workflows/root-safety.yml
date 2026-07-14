@@ -197,6 +197,7 @@ jobs:
           while IFS= read -r operator_tag; do
             test -n "${operator_tag}" || continue
             operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
+            test -n "${operator_id}"
             printf '%s|%s\n' "${operator_tag}" "${operator_id}"
           done < "${operator_image_tags_tmp}" >> "${operator_image_baseline_tmp}"
           docker image ls --all --no-trunc --quiet > "${operator_image_ids_raw_tmp}"
@@ -1883,6 +1884,20 @@ jobs:
               cleanup_status=1
               operator_image_inventory_trusted=0
             fi
+            reviewed_operator_image_is_created=0
+            if test "${operator_image_inventory_trusted}" -eq 1 \
+              && test -n "${reviewed_operator_image_id}"; then
+              reviewed_id_membership_status=0
+              grep --fixed-strings --line-regexp \
+                "${reviewed_operator_image_id}" "${operator_image_ids_baseline}" \
+                >/dev/null || reviewed_id_membership_status=$?
+              if test "${reviewed_id_membership_status}" -eq 1; then
+                reviewed_operator_image_is_created=1
+              elif test "${reviewed_id_membership_status}" -ne 0; then
+                cleanup_status=1
+                operator_image_inventory_trusted=0
+              fi
+            fi
             if test "${operator_image_inventory_trusted}" -eq 1; then
               while IFS= read -r operator_tag; do
                 test -n "${operator_tag}" || continue
@@ -1898,9 +1913,7 @@ jobs:
                 test -n "${operator_id}" || continue
                 remove_operator_image_id "${operator_id}"
               done < "${operator_image_created_ids}"
-              if test -n "${reviewed_operator_image_id}" \
-                && ! grep --fixed-strings --line-regexp \
-                  "${reviewed_operator_image_id}" "${operator_image_ids_baseline}"; then
+              if test "${reviewed_operator_image_is_created}" -eq 1; then
                 remove_operator_image_id "${reviewed_operator_image_id}"
               fi
               if ! capture_operator_image_mapping "${operator_image_current}"; then

@@ -1107,6 +1107,184 @@ docker() {
     return result, events
 
 
+def run_cleanup_with_stateful_images(
+    scenario: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str], str, int]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    new_id = "sha256:" + "b" * 64
+    reviewed_id = "" if scenario == "empty" else new_id
+    cleanup_script = step_run_script(workflow, PLATFORM_CI_STEPS[5]).replace(
+        "${{ steps.reviewed-operator-image.outputs.image_id }}",
+        reviewed_id,
+    )
+    export_scenario = f"export STUB_IMAGE_SCENARIO={shlex.quote(scenario)}\n"
+    stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+old_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+new_id="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+baseline="${RUNNER_TEMP}/platform-operator-images.before"
+baseline_ids="${RUNNER_TEMP}/platform-operator-image-ids.before"
+state="${RUNNER_TEMP}/image-state"
+image_ids="${RUNNER_TEMP}/image-ids"
+events="${RUNNER_TEMP}/image-events"
+image_list_count_file="${RUNNER_TEMP}/image-list-count"
+: > "${events}"
+printf '0\n' > "${image_list_count_file}"
+case "${STUB_IMAGE_SCENARIO}" in
+  restore)
+    printf 'freqtrade-cn-operator:preexisting|%s\n' "${old_id}" > "${baseline}"
+    printf '%s\n' "${old_id}" > "${baseline_ids}"
+    printf 'freqtrade-cn-operator:created|%s\n' "${new_id}" > "${state}"
+    printf 'freqtrade-cn-operator:preexisting|%s\n' "${new_id}" >> "${state}"
+    printf '%s\n%s\n' "${old_id}" "${new_id}" > "${image_ids}"
+    ;;
+  reviewed-membership-error)
+    printf 'freqtrade-cn-operator:preexisting|%s\n' "${old_id}" > "${baseline}"
+    printf '%s\n' "${old_id}" > "${baseline_ids}"
+    : > "${state}"
+    printf '%s\n%s\n' "${old_id}" "${new_id}" > "${image_ids}"
+    ;;
+  empty)
+    : > "${baseline}"
+    : > "${baseline_ids}"
+    : > "${state}"
+    : > "${image_ids}"
+    ;;
+  *) exit 97 ;;
+esac
+printf 'ready\n' > "${RUNNER_TEMP}/platform-operator-images.ready"
+trap '
+  status=$?
+  printf "IMAGE_LIST_COUNT:%s\n" "$(cat "${image_list_count_file}")"
+  sed "s/^/EVENT:/" "${events}"
+  if test -f "${RUNNER_TEMP}/platform-operator-images.current"; then
+    sed "s/^/FINAL:/" "${RUNNER_TEMP}/platform-operator-images.current"
+  fi
+  rm -rf "${RUNNER_TEMP}"
+  exit "${status}"
+' EXIT
+
+grep() {
+  if test "${STUB_IMAGE_SCENARIO}" = "reviewed-membership-error" \
+    && test "${*: -1}" = "${baseline_ids}" \
+    && printf '%s\n' "$*" | command grep --fixed-strings --quiet "${new_id}"; then
+    return 2
+  fi
+  command grep "$@"
+}
+remove_state_tag() {
+  removed_tag="$1"
+  : > "${state}.next"
+  while IFS='|' read -r tag image_id; do
+    test "${tag}" = "${removed_tag}" || printf '%s|%s\n' "${tag}" "${image_id}" \
+      >> "${state}.next"
+  done < "${state}"
+  mv "${state}.next" "${state}"
+}
+remove_image_id() {
+  removed_id="$1"
+  : > "${image_ids}.next"
+  while IFS= read -r image_id; do
+    test "${image_id}" = "${removed_id}" || printf '%s\n' "${image_id}" \
+      >> "${image_ids}.next"
+  done < "${image_ids}"
+  mv "${image_ids}.next" "${image_ids}"
+  : > "${state}.next"
+  while IFS='|' read -r tag image_id; do
+    test "${image_id}" = "${removed_id}" || printf '%s|%s\n' "${tag}" "${image_id}" \
+      >> "${state}.next"
+  done < "${state}"
+  mv "${state}.next" "${state}"
+}
+docker() {
+  if test "$1" = "ps"; then return 0; fi
+  if test "$1" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "ls"; then
+    image_list_count="$(( $(cat "${image_list_count_file}") + 1 ))"
+    printf '%s\n' "${image_list_count}" > "${image_list_count_file}"
+    while IFS='|' read -r tag image_id; do
+      test -n "${tag}" && printf '%s\n' "${tag}"
+    done < "${state}"
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect" && test "$3" = "--format"; then
+    inspected_tag="$5"
+    while IFS='|' read -r tag image_id; do
+      if test "${tag}" = "${inspected_tag}"; then
+        printf '%s\n' "${image_id}"
+        return 0
+      fi
+    done < "${state}"
+    printf 'Error response from daemon: No such image: %s\n' "${inspected_tag}" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    inspected_id="$3"
+    if command grep --fixed-strings --line-regexp --quiet "${inspected_id}" "${image_ids}"; then
+      return 0
+    fi
+    printf 'Error response from daemon: No such image: %s\n' "${inspected_id}" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "rm"; then
+    printf 'image-rm:%s\n' "$*" >> "${events}"
+    if test "$3" = "--force"; then
+      removed_id="$4"
+      if ! command grep --fixed-strings --line-regexp --quiet "${removed_id}" "${image_ids}"; then
+        printf 'Error response from daemon: No such image: %s\n' "${removed_id}" >&2
+        return 1
+      fi
+      remove_image_id "${removed_id}"
+    else
+      remove_state_tag "$3"
+    fi
+    return 0
+  fi
+  if test "$1" = "tag"; then
+    tagged_id="$2"
+    tagged_name="$3"
+    printf 'tag:%s\n' "$*" >> "${events}"
+    remove_state_tag "${tagged_name}"
+    printf '%s|%s\n' "${tagged_name}" "${tagged_id}" >> "${state}"
+    command sort --output="${state}" "${state}"
+    return 0
+  fi
+  return 99
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        input=(export_scenario + stub + cleanup_script).encode(),
+        capture_output=True,
+        check=False,
+    )
+    stdout = raw_result.stdout.decode()
+    result = subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        stdout,
+        raw_result.stderr.decode(),
+    )
+    events = [line.removeprefix("EVENT:") for line in stdout.splitlines() if line.startswith("EVENT:")]
+    final_mapping = "\n".join(
+        line.removeprefix("FINAL:")
+        for line in stdout.splitlines()
+        if line.startswith("FINAL:")
+    )
+    count_line = next(
+        line for line in stdout.splitlines() if line.startswith("IMAGE_LIST_COUNT:")
+    )
+    return result, events, final_mapping, int(count_line.rsplit(":", 1)[1])
+
+
 def run_operator_image_build_with_stubbed_inventory(
     failure: str,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
@@ -1162,6 +1340,10 @@ docker() {
       && test "$5" = "freqtrade-cn-operator:preexisting"; then
       printf 'docker daemon unavailable\n' >&2
       return 125
+    fi
+    if test "${STUB_BUILD_FAILURE}" = "image-id-empty" \
+      && test "$5" = "freqtrade-cn-operator:preexisting"; then
+      return 0
     fi
     if test "$5" = "freqtrade-cn-operator:local"; then
       printf '%s\n' 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
@@ -2295,6 +2477,14 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(events, [])
 
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_build_rejects_an_empty_inspected_id(self) -> None:
+        result, events = run_operator_image_build_with_stubbed_inventory(
+            "image-id-empty"
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, [])
+
     def test_operator_image_build_uses_explicit_checked_inventory_files(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         build = step_run_script(workflow, BUILD_OPERATOR_IMAGE_STEP)
@@ -2305,6 +2495,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             'operator_image_tags_tmp="${operator_image_baseline}.tags.tmp"',
             'docker image ls --format \'{{.Repository}}:{{.Tag}}\' > "${operator_image_tags_raw_tmp}"',
             'sort --unique "${operator_image_tags_tmp}"',
+            'test -n "${operator_id}"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, build)
@@ -2608,8 +2799,10 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         baseline_branch = cleanup.index('if test -f "${operator_image_baseline}"')
         self.assertIn('test -f "${operator_image_ids_baseline}"', cleanup)
         self.assertIn('test -f "${operator_image_baseline_ready}"', cleanup)
-        output_branch = cleanup.index('if test -n "${reviewed_operator_image_id}"')
-        self.assertLess(baseline_branch, output_branch)
+        membership_branch = cleanup.index("reviewed_id_membership_status=0")
+        mutation_branch = cleanup.index('docker image rm "${operator_tag}"')
+        self.assertLess(baseline_branch, membership_branch)
+        self.assertLess(membership_branch, mutation_branch)
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
     def test_operator_image_cleanup_ignores_incomplete_baseline(self) -> None:
@@ -2696,45 +2889,45 @@ docker() {
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
     def test_operator_cleanup_restores_a_complete_image_baseline(self) -> None:
-        result, events = run_cleanup_with_stubbed_docker_failure("")
+        result, events, final_mapping, image_list_count = (
+            run_cleanup_with_stateful_images("restore")
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        old_id = "sha256:" + "a" * 64
+        new_id = "sha256:" + "b" * 64
         self.assertIn(
-            "tag:tag "
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "
-            "freqtrade-cn-operator:preexisting",
+            "image-rm:image rm freqtrade-cn-operator:created",
             events,
         )
+        self.assertIn(f"tag:tag {old_id} freqtrade-cn-operator:preexisting", events)
+        self.assertIn(f"image-rm:image rm --force {new_id}", events)
+        self.assertEqual(
+            final_mapping,
+            f"freqtrade-cn-operator:preexisting|{old_id}",
+        )
+        self.assertEqual(image_list_count, 2)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_rejects_reviewed_id_membership_query_errors_before_mutation(
+        self,
+    ) -> None:
+        result, events, final_mapping, image_list_count = (
+            run_cleanup_with_stateful_images("reviewed-membership-error")
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, [])
+        self.assertEqual(final_mapping, "")
+        self.assertEqual(image_list_count, 1)
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
     def test_operator_cleanup_accepts_empty_docker_query_results(self) -> None:
-        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        cleanup = step_run_script(workflow, PLATFORM_CI_STEPS[-1]).replace(
-            "${{ steps.reviewed-operator-image.outputs.image_id }}", ""
+        result, events, final_mapping, image_list_count = (
+            run_cleanup_with_stateful_images("empty")
         )
-        stub = r'''
-RUNNER_TEMP="$(mktemp -d)"
-trap 'rm -rf "${RUNNER_TEMP}"' EXIT
-docker() {
-  if test "$1" = "ps"; then return 0; fi
-  if test "$1" = "rm"; then return 0; fi
-  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
-  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
-  if test "$1" = "network" && test "$2" = "inspect"; then
-    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
-    return 1
-  fi
-  return 99
-}
-'''
-        result = subprocess.run(
-            [shutil.which("bash") or "bash", "-s"],
-            cwd=REPO_ROOT,
-            input=(stub + cleanup).encode(),
-            capture_output=True,
-            check=False,
-        )
-        output = (result.stdout + result.stderr).decode(errors="replace")
-        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, [])
+        self.assertEqual(final_mapping, "")
+        self.assertEqual(image_list_count, 2)
 
     def test_operator_contract_rejects_missing_executable_and_sql_evidence(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
