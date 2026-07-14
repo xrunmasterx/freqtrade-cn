@@ -168,25 +168,40 @@ jobs:
           operator_image_baseline_tmp="${operator_image_baseline}.tmp"
           operator_image_ids_baseline_tmp="${operator_image_ids_baseline}.tmp"
           operator_image_baseline_ready_tmp="${operator_image_baseline_ready}.tmp"
+          operator_image_tags_raw_tmp="${operator_image_baseline}.tags.raw.tmp"
+          operator_image_tags_tmp="${operator_image_baseline}.tags.tmp"
+          operator_image_ids_raw_tmp="${operator_image_ids_baseline}.raw.tmp"
           rm -f \
             "${operator_image_baseline}" \
             "${operator_image_ids_baseline}" \
             "${operator_image_baseline_ready}" \
             "${operator_image_baseline_tmp}" \
             "${operator_image_ids_baseline_tmp}" \
-            "${operator_image_baseline_ready_tmp}"
+            "${operator_image_baseline_ready_tmp}" \
+            "${operator_image_tags_raw_tmp}" \
+            "${operator_image_tags_tmp}" \
+            "${operator_image_ids_raw_tmp}"
+          docker image ls --format '{{.Repository}}:{{.Tag}}' > "${operator_image_tags_raw_tmp}"
+          operator_tag_filter_status=0
+          grep --extended-regexp '^freqtrade-cn-operator:' \
+            "${operator_image_tags_raw_tmp}" > "${operator_image_tags_tmp}" \
+            || operator_tag_filter_status=$?
+          if test "${operator_tag_filter_status}" -eq 1; then
+            : > "${operator_image_tags_tmp}"
+          elif test "${operator_tag_filter_status}" -ne 0; then
+            exit "${operator_tag_filter_status}"
+          fi
+          sort --unique "${operator_image_tags_tmp}" \
+            --output="${operator_image_tags_tmp}"
           : > "${operator_image_baseline_tmp}"
           while IFS= read -r operator_tag; do
             test -n "${operator_tag}" || continue
             operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
             printf '%s|%s\n' "${operator_tag}" "${operator_id}"
-          done < <(
-            docker image ls --format '{{.Repository}}:{{.Tag}}' \
-              | grep --extended-regexp '^freqtrade-cn-operator:' \
-              | sort --unique || true
-          ) | sort > "${operator_image_baseline_tmp}"
-          docker image ls --all --no-trunc --quiet \
-            | sort --unique > "${operator_image_ids_baseline_tmp}"
+          done < "${operator_image_tags_tmp}" >> "${operator_image_baseline_tmp}"
+          docker image ls --all --no-trunc --quiet > "${operator_image_ids_raw_tmp}"
+          sort --unique "${operator_image_ids_raw_tmp}" \
+            > "${operator_image_ids_baseline_tmp}"
           mv "${operator_image_baseline_tmp}" "${operator_image_baseline}"
           mv "${operator_image_ids_baseline_tmp}" "${operator_image_ids_baseline}"
           printf 'ready\n' > "${operator_image_baseline_ready_tmp}"
@@ -574,11 +589,33 @@ jobs:
         run: |
           set -euo pipefail
           platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
-          operator_password="$(tr -d '\r\n' < "${platform_ci_dir}/platform_operator_db_password")"
+          operator_pgpass="${platform_ci_dir}/operator.pgpass"
+          cleanup_operator_pgpass() {
+            rm -f "${operator_pgpass}"
+          }
+          trap cleanup_operator_pgpass EXIT
+          python - "${platform_ci_dir}/platform_operator_db_password" "${operator_pgpass}" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          password = Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\r\n")
+          if not password or any(character in password for character in "\r\n\x00"):
+              raise SystemExit("invalid platform operator database password")
+          escaped_password = password.replace("\\", "\\\\").replace(":", "\\:")
+          descriptor = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as passfile:
+              passfile.write(
+                  f"127.0.0.1:55432:platform:platform_operator:{escaped_password}\n"
+              )
+          PY
+          test "$(stat --format '%a' "${operator_pgpass}")" = "600"
+          command -v psql >/dev/null
 
           operator_psql() {
-            docker exec --env PGPASSWORD="${operator_password}" platform-postgres-ci \
-              psql --host 127.0.0.1 --username platform_operator --dbname platform \
+            PGPASSFILE="${operator_pgpass}" psql \
+              --host 127.0.0.1 --port 55432 \
+              --username platform_operator --dbname platform \
               --set ON_ERROR_STOP=on "$@"
           }
           expect_operator_denied() {
@@ -1674,8 +1711,83 @@ jobs:
           operator_root="${RUNNER_TEMP}/platform-operator"
           reviewed_operator_image_id="${{ steps.reviewed-operator-image.outputs.image_id }}"
           cleanup_status=0
-          operator_containers="$(docker ps --all --quiet --filter label=com.docker.compose.service=platform-operator)"
-          if test -n "${operator_containers}"; then
+          network_query_error="${RUNNER_TEMP}/platform-network-query.err"
+          image_query_error="${RUNNER_TEMP}/platform-operator-image-query.err"
+
+          verify_network_absent() {
+            network_name="$1"
+            if docker network inspect "${network_name}" \
+              >/dev/null 2>"${network_query_error}"; then
+              cleanup_status=1
+            elif ! grep --extended-regexp --quiet \
+              "No such network|network .* not found" "${network_query_error}"; then
+              cleanup_status=1
+            fi
+          }
+          capture_operator_image_mapping() {
+            mapping_path="$1"
+            raw_path="${mapping_path}.raw"
+            matching_path="${mapping_path}.matching"
+            tags_path="${mapping_path}.tags"
+            if ! docker image ls --format '{{.Repository}}:{{.Tag}}' \
+              > "${raw_path}"; then
+              return 1
+            fi
+            grep_status=0
+            grep --extended-regexp '^freqtrade-cn-operator:' \
+              "${raw_path}" > "${matching_path}" || grep_status=$?
+            if test "${grep_status}" -eq 1; then
+              : > "${matching_path}"
+            elif test "${grep_status}" -ne 0; then
+              return 1
+            fi
+            if ! sort --unique "${matching_path}" > "${tags_path}"; then
+              return 1
+            fi
+            : > "${mapping_path}"
+            while IFS= read -r operator_tag; do
+              test -n "${operator_tag}" || continue
+              if ! operator_id="$(docker image inspect \
+                --format '{{.Id}}' "${operator_tag}")"; then
+                return 1
+              fi
+              test -n "${operator_id}" || return 1
+              if ! printf '%s|%s\n' "${operator_tag}" "${operator_id}" \
+                >> "${mapping_path}"; then
+                return 1
+              fi
+            done < "${tags_path}"
+          }
+          verify_operator_image_absent() {
+            operator_id="$1"
+            if docker image inspect "${operator_id}" \
+              >/dev/null 2>"${image_query_error}"; then
+              cleanup_status=1
+            elif ! grep --extended-regexp --quiet \
+              "No such image|No such object" "${image_query_error}"; then
+              cleanup_status=1
+            fi
+          }
+          remove_operator_image_id() {
+            operator_id="$1"
+            if ! docker image rm --force "${operator_id}" \
+              >/dev/null 2>"${image_query_error}" \
+              && ! grep --extended-regexp --quiet \
+                "No such image|No such object" "${image_query_error}"; then
+              cleanup_status=1
+            fi
+            verify_operator_image_absent "${operator_id}"
+          }
+
+          operator_containers=""
+          operator_container_inventory_trusted=1
+          if ! operator_containers="$(docker ps --all --quiet \
+            --filter label=com.docker.compose.service=platform-operator)"; then
+            cleanup_status=1
+            operator_container_inventory_trusted=0
+          fi
+          if test "${operator_container_inventory_trusted}" -eq 1 \
+            && test -n "${operator_containers}"; then
             docker rm -f ${operator_containers} >/dev/null 2>&1 || cleanup_status=1
           fi
           docker network disconnect freqtrade-cn_platform-db platform-postgres-ci >/dev/null 2>&1 || true
@@ -1683,11 +1795,23 @@ jobs:
           docker network rm freqtrade-cn_platform-db >/dev/null 2>&1 || true
           docker network rm freqtrade-platform-ci >/dev/null 2>&1 || true
           docker network rm freqtrade-platform-ingress-ci >/dev/null 2>&1 || true
-          test -z "$(docker ps --all --quiet --filter label=com.docker.compose.service=platform-operator)" || cleanup_status=1
-          test -z "$(docker ps --all --quiet --filter name='^/platform-control-ci$' --filter name='^/platform-postgres-ci$')" || cleanup_status=1
-          docker network inspect freqtrade-cn_platform-db >/dev/null 2>&1 && cleanup_status=1 || true
-          docker network inspect freqtrade-platform-ci >/dev/null 2>&1 && cleanup_status=1 || true
-          docker network inspect freqtrade-platform-ingress-ci >/dev/null 2>&1 && cleanup_status=1 || true
+          if ! operator_containers="$(docker ps --all --quiet \
+            --filter label=com.docker.compose.service=platform-operator)"; then
+            cleanup_status=1
+          elif test -n "${operator_containers}"; then
+            cleanup_status=1
+          fi
+          platform_containers=""
+          if ! platform_containers="$(docker ps --all --quiet \
+            --filter name='^/platform-control-ci$' \
+            --filter name='^/platform-postgres-ci$')"; then
+            cleanup_status=1
+          elif test -n "${platform_containers}"; then
+            cleanup_status=1
+          fi
+          verify_network_absent freqtrade-cn_platform-db
+          verify_network_absent freqtrade-platform-ci
+          verify_network_absent freqtrade-platform-ingress-ci
           if test -d "${platform_ci_dir}"; then
             if test -f "${platform_ci_dir}/volumes.before"; then
               docker volume ls --quiet | sort > "${platform_ci_dir}/volumes.detected"
@@ -1719,59 +1843,72 @@ jobs:
           if test -f "${operator_image_baseline}" \
             && test -f "${operator_image_ids_baseline}" \
             && test -f "${operator_image_baseline_ready}"; then
-            docker image ls --format '{{.Repository}}:{{.Tag}}' \
-              | grep --extended-regexp '^freqtrade-cn-operator:' \
-              | sort --unique > "${operator_image_current}" || true
-            cut --delimiter='|' --fields=1 "${operator_image_baseline}" \
-              > "${operator_image_baseline}.tags"
-            comm -13 "${operator_image_baseline}.tags" \
-              "${operator_image_current}" > "${operator_image_created}"
-            : > "${operator_image_created_ids}"
-            while IFS= read -r operator_tag; do
-              test -n "${operator_tag}" || continue
-              operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
-              if ! grep --fixed-strings --line-regexp \
-                "${operator_id}" "${operator_image_ids_baseline}"; then
-                printf '%s\n' "${operator_id}" >> "${operator_image_created_ids}"
-              fi
-            done < "${operator_image_current}"
-            sort --unique --output="${operator_image_created_ids}" \
-              "${operator_image_created_ids}"
-            while IFS= read -r operator_tag; do
-              test -n "${operator_tag}" || continue
-              docker image rm "${operator_tag}" >/dev/null 2>&1 || cleanup_status=1
-            done < "${operator_image_created}"
-            while IFS='|' read -r operator_tag operator_id; do
-              test -n "${operator_tag}" || continue
-              docker tag "${operator_id}" "${operator_tag}" >/dev/null 2>&1 \
-                || cleanup_status=1
-            done < "${operator_image_baseline}"
-            while IFS= read -r operator_id; do
-              test -n "${operator_id}" || continue
-              docker image rm --force "${operator_id}" >/dev/null 2>&1 || true
-              docker image inspect "${operator_id}" \
-                >/dev/null 2>&1 && cleanup_status=1 || true
-            done < "${operator_image_created_ids}"
-            if test -n "${reviewed_operator_image_id}" \
-              && ! grep --fixed-strings --line-regexp \
-                "${reviewed_operator_image_id}" "${operator_image_ids_baseline}"; then
-              docker image rm --force "${reviewed_operator_image_id}" \
-                >/dev/null 2>&1 || true
-              docker image inspect "${reviewed_operator_image_id}" \
-                >/dev/null 2>&1 && cleanup_status=1 || true
+            operator_image_inventory_trusted=1
+            if ! capture_operator_image_mapping "${operator_image_current}"; then
+              cleanup_status=1
+              operator_image_inventory_trusted=0
             fi
-            : > "${operator_image_current}"
-            while IFS= read -r operator_tag; do
-              test -n "${operator_tag}" || continue
-              operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
-              printf '%s|%s\n' "${operator_tag}" "${operator_id}"
-            done < <(
-              docker image ls --format '{{.Repository}}:{{.Tag}}' \
-                | grep --extended-regexp '^freqtrade-cn-operator:' \
-                | sort --unique || true
-            ) | sort > "${operator_image_current}"
-            cmp "${operator_image_baseline}" "${operator_image_current}" \
-              || cleanup_status=1
+            if test "${operator_image_inventory_trusted}" -eq 1 \
+              && ! cut --delimiter='|' --fields=1 "${operator_image_baseline}" \
+                > "${operator_image_baseline}.tags"; then
+              cleanup_status=1
+              operator_image_inventory_trusted=0
+            fi
+            if test "${operator_image_inventory_trusted}" -eq 1 \
+              && ! comm -13 "${operator_image_baseline}.tags" \
+                "${operator_image_current}.tags" > "${operator_image_created}"; then
+              cleanup_status=1
+              operator_image_inventory_trusted=0
+            fi
+            if test "${operator_image_inventory_trusted}" -eq 1; then
+              : > "${operator_image_created_ids}"
+              while IFS='|' read -r operator_tag operator_id; do
+                test -n "${operator_tag}" || continue
+                baseline_id_status=0
+                grep --fixed-strings --line-regexp \
+                  "${operator_id}" "${operator_image_ids_baseline}" \
+                  >/dev/null || baseline_id_status=$?
+                if test "${baseline_id_status}" -eq 1; then
+                  printf '%s\n' "${operator_id}" >> "${operator_image_created_ids}"
+                elif test "${baseline_id_status}" -ne 0; then
+                  cleanup_status=1
+                  operator_image_inventory_trusted=0
+                  break
+                fi
+              done < "${operator_image_current}"
+            fi
+            if test "${operator_image_inventory_trusted}" -eq 1 \
+              && ! sort --unique --output="${operator_image_created_ids}" \
+                "${operator_image_created_ids}"; then
+              cleanup_status=1
+              operator_image_inventory_trusted=0
+            fi
+            if test "${operator_image_inventory_trusted}" -eq 1; then
+              while IFS= read -r operator_tag; do
+                test -n "${operator_tag}" || continue
+                docker image rm "${operator_tag}" >/dev/null 2>&1 \
+                  || cleanup_status=1
+              done < "${operator_image_created}"
+              while IFS='|' read -r operator_tag operator_id; do
+                test -n "${operator_tag}" || continue
+                docker tag "${operator_id}" "${operator_tag}" >/dev/null 2>&1 \
+                  || cleanup_status=1
+              done < "${operator_image_baseline}"
+              while IFS= read -r operator_id; do
+                test -n "${operator_id}" || continue
+                remove_operator_image_id "${operator_id}"
+              done < "${operator_image_created_ids}"
+              if test -n "${reviewed_operator_image_id}" \
+                && ! grep --fixed-strings --line-regexp \
+                  "${reviewed_operator_image_id}" "${operator_image_ids_baseline}"; then
+                remove_operator_image_id "${reviewed_operator_image_id}"
+              fi
+              if ! capture_operator_image_mapping "${operator_image_current}"; then
+                cleanup_status=1
+              elif ! cmp "${operator_image_baseline}" "${operator_image_current}"; then
+                cleanup_status=1
+              fi
+            fi
           fi
           exit "${cleanup_status}"
 

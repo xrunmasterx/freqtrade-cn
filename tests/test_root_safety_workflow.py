@@ -438,7 +438,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "sudo rm -rf",
     ),
     OPERATOR_CI_STEPS[1]: (
-        "operator_password=",
+        "operator_pgpass=",
         "role_state=",
         'test "${role_state}" = "t|f|f|f|f|f|f"',
         "database_schema_state=",
@@ -553,9 +553,9 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "docker rm -f platform-control-ci platform-postgres-ci",
         "docker network rm freqtrade-platform-ci",
         "docker network rm freqtrade-platform-ingress-ci",
-        "docker ps --all --quiet --filter name='^/platform-control-ci$' --filter name='^/platform-postgres-ci$'",
-        "docker network inspect freqtrade-platform-ci",
-        "docker network inspect freqtrade-platform-ingress-ci",
+        'if ! platform_containers="$(docker ps --all --quiet',
+        "verify_network_absent freqtrade-platform-ci",
+        "verify_network_absent freqtrade-platform-ingress-ci",
         "comm -13",
         "docker volume rm",
         'cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after"',
@@ -563,8 +563,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test ! -e "${platform_ci_dir}"',
         'docker image rm "${operator_tag}"',
         'docker tag "${operator_id}" "${operator_tag}"',
-        'docker image rm --force "${reviewed_operator_image_id}"',
-        'docker image inspect "${reviewed_operator_image_id}"',
+        'remove_operator_image_id "${reviewed_operator_image_id}"',
         'cmp "${operator_image_baseline}" "${operator_image_current}"',
         'exit "${cleanup_status}"',
     ),
@@ -754,8 +753,9 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     if len(operator_psql_bodies) != 1 or any(
         fragment not in operator_psql_bodies[0]
         for fragment in (
-            'PGPASSWORD="${operator_password}"',
+            'PGPASSFILE="${operator_pgpass}"',
             "--host 127.0.0.1",
+            "--port 55432",
             "--username platform_operator",
             "--dbname platform",
         )
@@ -945,6 +945,7 @@ docker() {
     return 0
   fi
   if test "$1" = "network" && test "$2" = "inspect"; then
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
     return 1
   fi
   if test "$1" = "volume" && test "$2" = "ls"; then
@@ -983,6 +984,212 @@ docker() {
         stderr,
     )
     return result, removed
+
+
+def run_cleanup_with_stubbed_docker_failure(
+    failure: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    cleanup_script = step_run_script(workflow, PLATFORM_CI_STEPS[5]).replace(
+        "${{ steps.reviewed-operator-image.outputs.image_id }}",
+        "",
+    )
+    export_failure = f"export STUB_DOCKER_FAILURE={shlex.quote(failure)}\n"
+    stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+baseline_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+printf 'freqtrade-cn-operator:preexisting|%s\n' "${baseline_id}" \
+  > "${RUNNER_TEMP}/platform-operator-images.before"
+printf '%s\n' "${baseline_id}" \
+  > "${RUNNER_TEMP}/platform-operator-image-ids.before"
+printf 'ready\n' > "${RUNNER_TEMP}/platform-operator-images.ready"
+image_mutations="${RUNNER_TEMP}/image-mutations"
+: > "${image_mutations}"
+cleanup_actions="${RUNNER_TEMP}/cleanup-actions"
+: > "${cleanup_actions}"
+image_list_count_file="${RUNNER_TEMP}/image-list-count"
+image_inspect_count_file="${RUNNER_TEMP}/image-inspect-count"
+docker_ps_count_file="${RUNNER_TEMP}/docker-ps-count"
+printf '0\n' > "${image_list_count_file}"
+printf '0\n' > "${image_inspect_count_file}"
+printf '0\n' > "${docker_ps_count_file}"
+trap 'cat "${image_mutations}"; cat "${cleanup_actions}"; rm -rf "${RUNNER_TEMP}"' EXIT
+
+docker() {
+  if test "$1" = "ps"; then
+    docker_ps_count="$(( $(cat "${docker_ps_count_file}") + 1 ))"
+    printf '%s\n' "${docker_ps_count}" > "${docker_ps_count_file}"
+    if test "${STUB_DOCKER_FAILURE}" = "docker-ps" \
+      || { test "${STUB_DOCKER_FAILURE}" = "docker-ps-final" \
+        && test "${docker_ps_count}" -ge 2; }; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    return 0
+  fi
+  if test "$1" = "rm"; then
+    printf 'cleanup:%s\n' "$*" >> "${cleanup_actions}"
+    return 0
+  fi
+  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    if test "${STUB_DOCKER_FAILURE}" = "network-inspect"; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "ls"; then
+    image_list_count="$(( $(cat "${image_list_count_file}") + 1 ))"
+    printf '%s\n' "${image_list_count}" > "${image_list_count_file}"
+    if test "${STUB_DOCKER_FAILURE}" = "image-list" \
+      || { test "${STUB_DOCKER_FAILURE}" = "image-list-final" \
+        && test "${image_list_count}" -ge 2; }; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    printf '%s\n' 'freqtrade-cn-operator:preexisting'
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    if test "$3" = "--format"; then
+      image_inspect_count="$(( $(cat "${image_inspect_count_file}") + 1 ))"
+      printf '%s\n' "${image_inspect_count}" > "${image_inspect_count_file}"
+    else
+      image_inspect_count="0"
+    fi
+    if test "${STUB_DOCKER_FAILURE}" = "image-inspect" \
+      || { test "${STUB_DOCKER_FAILURE}" = "image-inspect-final" \
+        && test "${image_inspect_count}" -ge 2; }; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    if test "$3" = "--format"; then
+      printf '%s\n' "${baseline_id}"
+      return 0
+    fi
+    printf 'Error response from daemon: No such image: %s\n' "$3" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "rm"; then
+    printf 'image-rm:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  if test "$1" = "tag"; then
+    printf 'tag:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  return 99
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        input=(export_failure + stub + cleanup_script).encode(),
+        capture_output=True,
+        check=False,
+    )
+    stdout = raw_result.stdout.decode()
+    result = subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        stdout,
+        raw_result.stderr.decode(),
+    )
+    events = [
+        line
+        for line in stdout.splitlines()
+        if line.startswith(("image-rm:", "tag:", "cleanup:"))
+    ]
+    return result, events
+
+
+def run_operator_image_build_with_stubbed_inventory(
+    failure: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    build_script = step_run_script(workflow, BUILD_OPERATOR_IMAGE_STEP)
+    export_failure = f"export STUB_BUILD_FAILURE={shlex.quote(failure)}\n"
+    stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+GITHUB_OUTPUT="${RUNNER_TEMP}/github-output"
+export RUNNER_TEMP GITHUB_OUTPUT
+events="${RUNNER_TEMP}/events"
+sort_count_file="${RUNNER_TEMP}/sort-count"
+printf '0\n' > "${sort_count_file}"
+: > "${events}"
+trap '
+  if test -f "${RUNNER_TEMP}/platform-operator-images.ready"; then
+    printf "ready\n" >> "${events}"
+  fi
+  cat "${events}"
+  rm -rf "${RUNNER_TEMP}"
+' EXIT
+
+python() {
+  printf 'build\n' >> "${events}"
+  printf '%s\n' 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+}
+sort() {
+  sort_count="$(( $(cat "${sort_count_file}") + 1 ))"
+  printf '%s\n' "${sort_count}" > "${sort_count_file}"
+  if test "${STUB_BUILD_FAILURE}" = "sort" && test "${sort_count}" -eq 1; then
+    printf 'sort failed\n' >&2
+    return 2
+  fi
+  command sort "$@"
+}
+docker() {
+  if test "$1" = "image" && test "$2" = "ls"; then
+    if test "${STUB_BUILD_FAILURE}" = "image-list" && test "$3" = "--format"; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    if test "$3" = "--format"; then
+      if test "${STUB_BUILD_FAILURE}" != "zero-match"; then
+        printf '%s\n' 'freqtrade-cn-operator:preexisting'
+      fi
+    else
+      printf '%s\n' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    if test "${STUB_BUILD_FAILURE}" = "image-inspect" \
+      && test "$5" = "freqtrade-cn-operator:preexisting"; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    if test "$5" = "freqtrade-cn-operator:local"; then
+      printf '%s\n' 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    else
+      printf '%s\n' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    return 0
+  fi
+  if test "$1" = "tag"; then return 0; fi
+  return 99
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        input=(export_failure + stub + build_script).encode(),
+        capture_output=True,
+        check=False,
+    )
+    stdout = raw_result.stdout.decode()
+    result = subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        stdout,
+        raw_result.stderr.decode(),
+    )
+    return result, [line for line in stdout.splitlines() if line in {"build", "ready"}]
 
 
 class RootSafetyWorkflowTests(unittest.TestCase):
@@ -2076,6 +2283,38 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             workflow.index(f"      - name: {BUILD_OPERATOR_IMAGE_STEP}"),
         )
 
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_build_rejects_untrusted_baseline_inventory(self) -> None:
+        for failure in ("image-list", "sort", "image-inspect"):
+            with self.subTest(failure=failure):
+                result, events = run_operator_image_build_with_stubbed_inventory(failure)
+                self.assertNotEqual(
+                    result.returncode,
+                    0,
+                    result.stdout + result.stderr,
+                )
+                self.assertEqual(events, [])
+
+    def test_operator_image_build_uses_explicit_checked_inventory_files(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        build = step_run_script(workflow, BUILD_OPERATOR_IMAGE_STEP)
+        self.assertNotIn("done < <(", build)
+        self.assertNotIn("| sort --unique || true", build)
+        for fragment in (
+            'operator_image_tags_raw_tmp="${operator_image_baseline}.tags.raw.tmp"',
+            'operator_image_tags_tmp="${operator_image_baseline}.tags.tmp"',
+            'docker image ls --format \'{{.Repository}}:{{.Tag}}\' > "${operator_image_tags_raw_tmp}"',
+            'sort --unique "${operator_image_tags_tmp}"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, build)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_build_accepts_an_empty_tag_inventory(self) -> None:
+        result, events = run_operator_image_build_with_stubbed_inventory("zero-match")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, ["build", "ready"])
+
     def test_operator_steps_have_fixed_order_after_phase2b_regressions(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         positions = [
@@ -2176,7 +2415,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             self.assertIn(fragment, acceptance)
         cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
         for fragment in (
-            "docker ps --all --quiet --filter label=com.docker.compose.service=platform-operator",
+            "--filter label=com.docker.compose.service=platform-operator",
             "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
             "docker network rm freqtrade-cn_platform-db",
             'operator_root="${RUNNER_TEMP}/platform-operator"',
@@ -2188,8 +2427,10 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
         for fragment in (
-            'PGPASSWORD="${operator_password}"',
-            "--host 127.0.0.1 --username platform_operator --dbname platform",
+            'operator_pgpass="${platform_ci_dir}/operator.pgpass"',
+            'PGPASSFILE="${operator_pgpass}"',
+            "--host 127.0.0.1 --port 55432",
+            "--username platform_operator --dbname platform",
             "adapter_template_revisions",
             "state_allocations",
             "secret_references",
@@ -2217,6 +2458,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, step)
         self.assertNotIn("SET ROLE platform_operator", step)
+        self.assertNotIn("PGPASSWORD", step)
+        self.assertNotIn("operator_password=", step)
+        self.assertNotIn("docker exec --env", step)
         self.assertNotIn("does not exist", step)
         self.assertNotIn("FROM secret_versions", step)
         self.assertIn("SELECT * FROM secret_version_metadata", step)
@@ -2229,6 +2473,31 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             step.index("ALTER DEFAULT PRIVILEGES FOR ROLE postgres"),
             step.index("CREATE FUNCTION public.platform_operator_public_null_probe()"),
         )
+
+    def test_operator_login_uses_a_private_cleaned_libpq_passfile(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        for fragment in (
+            'operator_pgpass="${platform_ci_dir}/operator.pgpass"',
+            'Path(sys.argv[1]).read_text(encoding="utf-8")',
+            "os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)",
+            'test "$(stat --format \'%a\' "${operator_pgpass}")" = "600"',
+            "cleanup_operator_pgpass() {",
+            'rm -f "${operator_pgpass}"',
+            "trap cleanup_operator_pgpass EXIT",
+            'PGPASSFILE="${operator_pgpass}" psql',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        for forbidden in (
+            "PGPASSWORD",
+            "operator_password=",
+            "--env PGPASSWORD",
+            '$(cat "${platform_ci_dir}/platform_operator_db_password")',
+            '$(tr -d \'\\r\\n\' < "${platform_ci_dir}/platform_operator_db_password")',
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, step)
 
     def test_operator_privilege_gate_has_exact_catalog_authority_inventories(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -2298,8 +2567,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "grep --extended-regexp '^freqtrade-cn-operator:'",
             'docker image rm "${operator_tag}"',
             'docker tag "${operator_id}" "${operator_tag}"',
-            'docker image rm --force "${reviewed_operator_image_id}"',
-            'docker image inspect "${reviewed_operator_image_id}"',
+            'docker image rm --force "${operator_id}"',
+            'docker image inspect "${operator_id}"',
+            'remove_operator_image_id "${reviewed_operator_image_id}"',
             'cmp "${operator_image_baseline}" "${operator_image_current}"',
         ):
             self.assertIn(fragment, cleanup)
@@ -2361,7 +2631,10 @@ docker() {
   if test "$1" = "rm"; then return 0; fi
   if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
   if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
-  if test "$1" = "network" && test "$2" = "inspect"; then return 1; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
+    return 1
+  fi
   if test "$1" = "image" && test "$2" = "ls"; then
     printf '%s\n' 'freqtrade-cn-operator:preexisting'
     return 0
@@ -2385,6 +2658,78 @@ docker() {
             [shutil.which("bash") or "bash", "-s"],
             cwd=REPO_ROOT,
             input=(stub + cleanup + 'test ! -s "${image_mutations}"\n').encode(),
+            capture_output=True,
+            check=False,
+        )
+        output = (result.stdout + result.stderr).decode(errors="replace")
+        self.assertEqual(result.returncode, 0, output)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_fails_closed_when_docker_queries_fail(self) -> None:
+        for failure in (
+            "docker-ps",
+            "docker-ps-final",
+            "network-inspect",
+            "image-list",
+            "image-list-final",
+            "image-inspect",
+            "image-inspect-final",
+        ):
+            with self.subTest(failure=failure):
+                result, events = run_cleanup_with_stubbed_docker_failure(failure)
+                self.assertNotEqual(
+                    result.returncode,
+                    0,
+                    result.stdout + result.stderr,
+                )
+                self.assertTrue(
+                    any(event.startswith("cleanup:rm") for event in events),
+                    events,
+                )
+                if failure in {"image-list", "image-inspect"}:
+                    image_mutations = [
+                        event
+                        for event in events
+                        if event.startswith(("image-rm:", "tag:"))
+                    ]
+                    self.assertEqual(image_mutations, [])
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_restores_a_complete_image_baseline(self) -> None:
+        result, events = run_cleanup_with_stubbed_docker_failure("")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "tag:tag "
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "
+            "freqtrade-cn-operator:preexisting",
+            events,
+        )
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_accepts_empty_docker_query_results(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cleanup = step_run_script(workflow, PLATFORM_CI_STEPS[-1]).replace(
+            "${{ steps.reviewed-operator-image.outputs.image_id }}", ""
+        )
+        stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+trap 'rm -rf "${RUNNER_TEMP}"' EXIT
+docker() {
+  if test "$1" = "ps"; then return 0; fi
+  if test "$1" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
+    return 1
+  fi
+  return 99
+}
+'''
+        result = subprocess.run(
+            [shutil.which("bash") or "bash", "-s"],
+            cwd=REPO_ROOT,
+            input=(stub + cleanup).encode(),
             capture_output=True,
             check=False,
         )
