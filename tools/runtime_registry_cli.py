@@ -9,28 +9,8 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
-from sqlalchemy import Engine
-
-from freqtrade.platform.database import (
-    PlatformDatabaseSettings,
-    create_platform_engine,
-)
-from freqtrade.platform.runtime_registration import (
-    PAPER_PROBE_INSTANCE_ID,
-    EnsurePaperProbeRegistrationRequest,
-    PaperProbeRegistrationStatus,
-)
-from freqtrade.platform.runtime_registration_repository import (
-    SqlPaperProbeRegistrationRepository,
-)
-from freqtrade.platform.runtime_service import RuntimeApplicationService
-from freqtrade.platform.template_domain import AdapterTemplate
-from freqtrade.platform.template_repository import (
-    CommittedTemplatePublication,
-    SqlTemplateRepository,
-)
 from tools.runtime_artifacts import (
     CommittedPaperProbeArtifacts,
     read_committed_paper_probe_artifacts,
@@ -47,6 +27,7 @@ REPOSITORY_ROOT = Path("/opt/platform-operator/repository")
 ROOT_COMMIT_FILE = Path("/opt/platform-operator/root-commit")
 DATABASE_PASSWORD_FILE = Path("/run/secrets/database_password")
 PAPER_PROBE_TEMPLATE_ID = "freqtrade-paper-probe-v1"
+PAPER_PROBE_INSTANCE_ID = "phase2-spot-paper-probe"
 PLATFORM_OPERATOR_ACTOR = "platform-operator"
 
 _GIT_IDENTITY = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})\n")
@@ -59,9 +40,58 @@ class _CommittedEvidence:
     policies: ClosedPolicyRegistry
 
 
+@dataclass(frozen=True, slots=True)
+class _BackendBindings:
+    platform_database_settings: Any
+    create_platform_engine: Any
+    sql_template_repository: Any
+    sql_registration_repository: Any
+    runtime_application_service: Any
+    adapter_template: Any
+    committed_template_publication: Any
+    ensure_registration_request: Any
+    registration_status: Any
+
+
 class _ClosedArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
     def error(self, _message: str) -> None:
         self.exit(2, "invalid_arguments\n")
+
+
+def _load_backend_bindings() -> _BackendBindings:
+    from freqtrade.platform.database import (
+        PlatformDatabaseSettings,
+        create_platform_engine,
+    )
+    from freqtrade.platform.runtime_registration import (
+        EnsurePaperProbeRegistrationRequest,
+        PaperProbeRegistrationStatus,
+    )
+    from freqtrade.platform.runtime_registration_repository import (
+        SqlPaperProbeRegistrationRepository,
+    )
+    from freqtrade.platform.runtime_service import RuntimeApplicationService
+    from freqtrade.platform.template_domain import AdapterTemplate
+    from freqtrade.platform.template_repository import (
+        CommittedTemplatePublication,
+        SqlTemplateRepository,
+    )
+
+    return _BackendBindings(
+        platform_database_settings=PlatformDatabaseSettings,
+        create_platform_engine=create_platform_engine,
+        sql_template_repository=SqlTemplateRepository,
+        sql_registration_repository=SqlPaperProbeRegistrationRepository,
+        runtime_application_service=RuntimeApplicationService,
+        adapter_template=AdapterTemplate,
+        committed_template_publication=CommittedTemplatePublication,
+        ensure_registration_request=EnsurePaperProbeRegistrationRequest,
+        registration_status=PaperProbeRegistrationStatus,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -138,15 +168,15 @@ def _load_committed_evidence() -> _CommittedEvidence:
     )
 
 
-def _publication(evidence: _CommittedEvidence) -> CommittedTemplatePublication:
+def _publication(evidence: _CommittedEvidence, bindings: _BackendBindings) -> Any:
     payload = {
         key: value
         for key, value in evidence.template.payload.items()
         if key != "schema_version"
     }
     artifacts = evidence.artifacts
-    return CommittedTemplatePublication(
-        template=AdapterTemplate.model_validate(payload),
+    return bindings.committed_template_publication(
+        template=bindings.adapter_template.model_validate(payload),
         canonical_payload=evidence.template.canonical_json,
         payload_digest=evidence.template.digest,
         source_commit=evidence.template.source_commit,
@@ -159,10 +189,11 @@ def _publication(evidence: _CommittedEvidence) -> CommittedTemplatePublication:
 
 def _registration_request(
     evidence: _CommittedEvidence,
-) -> EnsurePaperProbeRegistrationRequest:
+    bindings: _BackendBindings,
+) -> Any:
     artifacts = evidence.artifacts
     policies = evidence.policies
-    return EnsurePaperProbeRegistrationRequest(
+    return bindings.ensure_registration_request(
         adapter_template_revision_id=f"template-{evidence.template.digest}",
         component_commits={
             "root_commit": artifacts.root_commit,
@@ -204,31 +235,36 @@ def _validation_payload(evidence: _CommittedEvidence) -> dict[str, str]:
     }
 
 
-def _status_payload(status: PaperProbeRegistrationStatus) -> dict[str, object]:
-    validated = PaperProbeRegistrationStatus.model_validate(
+def _status_payload(status: Any, bindings: _BackendBindings) -> dict[str, object]:
+    validated = bindings.registration_status.model_validate(
         status.model_dump(mode="python")
     )
     return validated.model_dump(mode="json")
 
 
-def _create_engine() -> Engine:
-    settings = PlatformDatabaseSettings(
+def _create_engine(bindings: _BackendBindings) -> Any:
+    settings = bindings.platform_database_settings(
         host="platform-postgres",
         port=5432,
         database="platform",
         username="platform_operator",
         password_file=DATABASE_PASSWORD_FILE,
     )
-    return create_platform_engine(settings)
+    return bindings.create_platform_engine(settings)
 
 
 def _publish(actor: str) -> dict[str, str]:
     evidence = _load_committed_evidence()
-    engine = _create_engine()
+    bindings = _load_backend_bindings()
+    engine = _create_engine(bindings)
     try:
-        repository = SqlTemplateRepository(engine)
-        service = RuntimeApplicationService(template_repository=repository)
-        view = service.publish_template(_publication(evidence), actor, datetime.now(UTC))
+        repository = bindings.sql_template_repository(engine)
+        service = bindings.runtime_application_service(template_repository=repository)
+        view = service.publish_template(
+            _publication(evidence, bindings),
+            actor,
+            datetime.now(UTC),
+        )
     finally:
         engine.dispose()
     return {
@@ -245,29 +281,31 @@ def _publish(actor: str) -> dict[str, str]:
 
 def _ensure_registration(actor: str) -> dict[str, object]:
     evidence = _load_committed_evidence()
-    engine = _create_engine()
+    bindings = _load_backend_bindings()
+    engine = _create_engine(bindings)
     try:
-        repository = SqlPaperProbeRegistrationRepository(engine)
-        service = RuntimeApplicationService(registration_repository=repository)
+        repository = bindings.sql_registration_repository(engine)
+        service = bindings.runtime_application_service(registration_repository=repository)
         status = service.ensure_paper_probe_registration(
-            _registration_request(evidence),
+            _registration_request(evidence, bindings),
             actor,
             datetime.now(UTC),
         )
     finally:
         engine.dispose()
-    return _status_payload(status)
+    return _status_payload(status, bindings)
 
 
 def _registration_status(instance_id: str) -> dict[str, object]:
-    engine = _create_engine()
+    bindings = _load_backend_bindings()
+    engine = _create_engine(bindings)
     try:
-        repository = SqlPaperProbeRegistrationRepository(engine)
-        service = RuntimeApplicationService(registration_repository=repository)
+        repository = bindings.sql_registration_repository(engine)
+        service = bindings.runtime_application_service(registration_repository=repository)
         status = service.registration_status(instance_id)
     finally:
         engine.dispose()
-    return _status_payload(status)
+    return _status_payload(status, bindings)
 
 
 def _execute(arguments: argparse.Namespace) -> dict[str, object]:

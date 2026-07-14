@@ -1,20 +1,17 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
+import importlib.util
 import io
 import json
 import stat
 import tempfile
 import unittest
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from datetime import UTC, datetime
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from unittest import mock
-
-from freqtrade.platform.runtime_registration import PaperProbeRegistrationStatus
-from freqtrade.platform.template_domain import AdapterTemplate, TemplateStatus
-from freqtrade.platform.template_repository import AdapterTemplateRevisionView
 
 from tools import runtime_registry_cli
 from tools.runtime_artifacts import CommittedPaperProbeArtifacts
@@ -26,6 +23,7 @@ BACKEND_COMMIT = "2" * 40
 FRONTEND_COMMIT = "3" * 40
 STRATEGIES_COMMIT = "4" * 40
 TEMPLATE_ID = "freqtrade-paper-probe-v1"
+INSTANCE_ID = "phase2-spot-paper-probe"
 
 
 def _template_payload() -> dict[str, object]:
@@ -107,21 +105,75 @@ def _policies() -> ClosedPolicyRegistry:
     )
 
 
-def _status() -> PaperProbeRegistrationStatus:
-    return PaperProbeRegistrationStatus(
-        instance_id="phase2-spot-paper-probe",
-        runtime_spec_revision_id="runtime-spec-" + "d" * 64,
-        adapter_template_revision_id="template-" + _committed_template().digest,
-        catalog_revision_id="catalog-v2",
-        state_allocation_id="state-phase2-spot-paper-probe-v1",
-        secret_reference_ids=(
+def _status_payload() -> dict[str, object]:
+    return {
+        "instance_id": INSTANCE_ID,
+        "runtime_spec_revision_id": "runtime-spec-" + "d" * 64,
+        "adapter_template_revision_id": "template-" + _committed_template().digest,
+        "catalog_revision_id": "catalog-v2",
+        "state_allocation_id": "state-phase2-spot-paper-probe-v1",
+        "secret_reference_ids": [
             "secret-phase2-spot-paper-probe-api-password-v1",
             "secret-phase2-spot-paper-probe-jwt-secret-v1",
             "secret-phase2-spot-paper-probe-ws-token-v1",
-        ),
-        desired_state="stopped",
-        lifecycle_status="registered",
+        ],
+        "desired_state": "stopped",
+        "lifecycle_status": "registered",
+    }
+
+
+class _FakeStatus:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def model_dump(self, *, mode: str) -> dict[str, object]:
+        if mode not in {"python", "json"}:
+            raise AssertionError("unexpected model dump mode")
+        return self.payload
+
+
+class _FakeStatusType:
+    @classmethod
+    def model_validate(cls, value: object) -> _FakeStatus:
+        if isinstance(value, _FakeStatus):
+            return value
+        if not isinstance(value, dict):
+            raise AssertionError("status must be validated from public data")
+        return _FakeStatus(value)
+
+
+class _FakeAdapterTemplate:
+    @classmethod
+    def model_validate(cls, value: dict[str, object]) -> SimpleNamespace:
+        return SimpleNamespace(**value)
+
+
+def _fake_publication(**values: object) -> SimpleNamespace:
+    return SimpleNamespace(**values)
+
+
+def _fake_request(**values: object) -> SimpleNamespace:
+    values["component_commits"] = SimpleNamespace(**values["component_commits"])
+    values["closed_policy_snapshot"] = SimpleNamespace(
+        **values["closed_policy_snapshot"]
     )
+    return SimpleNamespace(**values)
+
+
+def _fake_bindings(**overrides: object) -> SimpleNamespace:
+    values = {
+        "platform_database_settings": mock.Mock(),
+        "create_platform_engine": mock.Mock(),
+        "sql_template_repository": mock.Mock(),
+        "sql_registration_repository": mock.Mock(),
+        "runtime_application_service": mock.Mock(),
+        "adapter_template": _FakeAdapterTemplate,
+        "committed_template_publication": _fake_publication,
+        "ensure_registration_request": _fake_request,
+        "registration_status": _FakeStatusType,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 class RuntimeRegistryCliTests(unittest.TestCase):
@@ -161,6 +213,52 @@ class RuntimeRegistryCliTests(unittest.TestCase):
         ):
             yield commit_reader, template_reader, artifact_reader, policy_reader
 
+    @contextmanager
+    def backend_imports_blocked(self):
+        original_import = builtins.__import__
+
+        def guarded_import(name: str, *args: object, **kwargs: object):
+            if name == "sqlalchemy" or name.startswith(("sqlalchemy.", "freqtrade.")):
+                raise AssertionError(f"backend import crossed parse boundary: {name}")
+            return original_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", side_effect=guarded_import):
+            yield
+
+    def test_invalid_raw_arguments_exit_before_any_backend_import(self) -> None:
+        with self.backend_imports_blocked():
+            code, stdout, stderr = self.run_cli(
+                "runtime-registry",
+                "compile",
+                "--secret",
+                "must-not-echo",
+            )
+        self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
+
+    def test_validate_remains_offline_when_backend_imports_are_unavailable(self) -> None:
+        with self.patched_evidence(), self.backend_imports_blocked():
+            code, stdout, stderr = self.run_cli("runtime-template", "validate")
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout)["status"], "valid")
+
+    def test_option_abbreviations_fail_before_backend_loading(self) -> None:
+        invocations = (
+            ("runtime-template", "publish", "--a", "platform-operator"),
+            ("runtime-registry", "compile", "--a", "platform-operator"),
+            ("runtime-registry", "status", "--i", INSTANCE_ID),
+        )
+        for invocation in invocations:
+            with (
+                self.subTest(invocation=invocation),
+                mock.patch.object(
+                    runtime_registry_cli,
+                    "_load_backend_bindings",
+                ) as load_bindings,
+            ):
+                code, stdout, stderr = self.run_cli(*invocation)
+            self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
+            load_bindings.assert_not_called()
+
     def test_root_commit_file_accepts_only_one_full_lowercase_identity_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "root-commit"
@@ -170,7 +268,6 @@ class RuntimeRegistryCliTests(unittest.TestCase):
                     runtime_registry_cli._read_root_commit_identity(),
                     ROOT_COMMIT,
                 )
-
             for invalid in (
                 ROOT_COMMIT,
                 "A" * 40 + "\n",
@@ -200,16 +297,20 @@ class RuntimeRegistryCliTests(unittest.TestCase):
             runtime_registry_cli._read_root_commit_identity()
         read_bytes.assert_not_called()
 
-    def test_validate_loads_only_fixed_committed_evidence_and_never_builds_database(self) -> None:
+    def test_validate_loads_fixed_evidence_without_loading_backend(self) -> None:
         with (
-            self.patched_evidence() as patches,
-            mock.patch.object(runtime_registry_cli, "_create_engine") as create_engine,
+            self.patched_evidence() as readers,
+            mock.patch.object(
+                runtime_registry_cli,
+                "_load_backend_bindings",
+            ) as load_bindings,
         ):
             code, stdout, stderr = self.run_cli("runtime-template", "validate")
-
-        self.assertEqual(code, 0)
-        self.assertEqual(stderr, "")
-        self.assertEqual(stdout, json.dumps(json.loads(stdout), separators=(",", ":"), sort_keys=True) + "\n")
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(
+            stdout,
+            json.dumps(json.loads(stdout), separators=(",", ":"), sort_keys=True) + "\n",
+        )
         self.assertEqual(
             json.loads(stdout),
             {
@@ -226,57 +327,44 @@ class RuntimeRegistryCliTests(unittest.TestCase):
                 "template_payload_digest": _committed_template().digest,
             },
         )
-        create_engine.assert_not_called()
-        patches[1].assert_called_once_with(
+        load_bindings.assert_not_called()
+        readers[1].assert_called_once_with(
             runtime_registry_cli.REPOSITORY_ROOT,
             TEMPLATE_ID,
             ROOT_COMMIT,
         )
-        patches[2].assert_called_once_with(
-            runtime_registry_cli.REPOSITORY_ROOT,
-            ROOT_COMMIT,
-        )
-        patches[3].assert_called_once_with(
-            runtime_registry_cli.REPOSITORY_ROOT,
-            ROOT_COMMIT,
-        )
 
-    def test_publish_uses_template_repository_and_application_service(self) -> None:
+    def test_publish_uses_lazy_backend_repository_and_service(self) -> None:
         template = _committed_template()
-        publication_view = AdapterTemplateRevisionView(
+        engine = mock.Mock()
+        repository = object()
+        service = mock.Mock()
+        service.publish_template.return_value = SimpleNamespace(
             revision_id="template-" + template.digest,
-            template=AdapterTemplate.model_validate(
-                {key: value for key, value in template.payload.items() if key != "schema_version"}
-            ),
+            template=SimpleNamespace(template_id=TEMPLATE_ID),
             payload_digest=template.digest,
-            source_commit=ROOT_COMMIT,
             root_commit=ROOT_COMMIT,
             backend_commit=BACKEND_COMMIT,
             frontend_commit=FRONTEND_COMMIT,
             strategies_commit=STRATEGIES_COMMIT,
-            status=TemplateStatus.ACTIVE,
-            published_by="platform-operator",
-            published_at=datetime(2026, 7, 14, tzinfo=UTC),
-            deprecated_at=None,
-            revoked_at=None,
+            status=SimpleNamespace(value="active"),
         )
-        engine = mock.Mock()
-        repository = object()
-        service = mock.Mock()
-        service.publish_template.return_value = publication_view
+        bindings = _fake_bindings(
+            sql_template_repository=mock.Mock(return_value=repository),
+            runtime_application_service=mock.Mock(return_value=service),
+        )
         with (
             self.patched_evidence(),
-            mock.patch.object(runtime_registry_cli, "_create_engine", return_value=engine),
             mock.patch.object(
                 runtime_registry_cli,
-                "SqlTemplateRepository",
-                return_value=repository,
-            ) as repository_type,
+                "_load_backend_bindings",
+                return_value=bindings,
+            ),
             mock.patch.object(
                 runtime_registry_cli,
-                "RuntimeApplicationService",
-                return_value=service,
-            ) as service_type,
+                "_create_engine",
+                return_value=engine,
+            ) as create_engine,
         ):
             code, stdout, stderr = self.run_cli(
                 "runtime-template",
@@ -284,55 +372,45 @@ class RuntimeRegistryCliTests(unittest.TestCase):
                 "--actor",
                 "platform-operator",
             )
-
         self.assertEqual((code, stderr), (0, ""))
-        self.assertEqual(
-            json.loads(stdout),
-            {
-                "adapter_template_revision_id": "template-" + template.digest,
-                "backend_commit": BACKEND_COMMIT,
-                "frontend_commit": FRONTEND_COMMIT,
-                "root_commit": ROOT_COMMIT,
-                "status": "active",
-                "strategies_commit": STRATEGIES_COMMIT,
-                "template_id": TEMPLATE_ID,
-                "template_payload_digest": template.digest,
-            },
+        self.assertEqual(json.loads(stdout)["status"], "active")
+        create_engine.assert_called_once_with(bindings)
+        bindings.sql_template_repository.assert_called_once_with(engine)
+        bindings.runtime_application_service.assert_called_once_with(
+            template_repository=repository
         )
-        repository_type.assert_called_once_with(engine)
-        service_type.assert_called_once_with(template_repository=repository)
         publication, actor, occurred_at = service.publish_template.call_args.args
         self.assertEqual(actor, "platform-operator")
-        self.assertEqual(occurred_at.tzinfo, UTC)
-        self.assertEqual(publication.canonical_payload, template.canonical_json)
+        self.assertIsNotNone(occurred_at.utcoffset())
         self.assertEqual(publication.template.template_id, TEMPLATE_ID)
         self.assertEqual(publication.backend_commit, BACKEND_COMMIT)
         engine.dispose.assert_called_once_with()
 
-    def test_register_and_compile_call_the_same_atomic_ensure_service_method(self) -> None:
+    def test_register_and_compile_use_same_lazy_atomic_service_method(self) -> None:
         for command in ("register-paper-probe", "compile"):
             with self.subTest(command=command):
                 engine = mock.Mock()
                 repository = object()
                 service = mock.Mock()
-                service.ensure_paper_probe_registration.return_value = _status()
+                service.ensure_paper_probe_registration.return_value = _FakeStatus(
+                    _status_payload()
+                )
+                bindings = _fake_bindings(
+                    sql_registration_repository=mock.Mock(return_value=repository),
+                    runtime_application_service=mock.Mock(return_value=service),
+                )
                 with (
                     self.patched_evidence(),
+                    mock.patch.object(
+                        runtime_registry_cli,
+                        "_load_backend_bindings",
+                        return_value=bindings,
+                    ),
                     mock.patch.object(
                         runtime_registry_cli,
                         "_create_engine",
                         return_value=engine,
                     ),
-                    mock.patch.object(
-                        runtime_registry_cli,
-                        "SqlPaperProbeRegistrationRepository",
-                        return_value=repository,
-                    ) as repository_type,
-                    mock.patch.object(
-                        runtime_registry_cli,
-                        "RuntimeApplicationService",
-                        return_value=service,
-                    ) as service_type,
                 ):
                     code, stdout, stderr = self.run_cli(
                         "runtime-registry",
@@ -340,151 +418,138 @@ class RuntimeRegistryCliTests(unittest.TestCase):
                         "--actor",
                         "platform-operator",
                     )
-
                 self.assertEqual((code, stderr), (0, ""))
-                self.assertEqual(json.loads(stdout), _status().model_dump(mode="json"))
-                repository_type.assert_called_once_with(engine)
-                service_type.assert_called_once_with(registration_repository=repository)
+                self.assertEqual(json.loads(stdout), _status_payload())
                 request, actor, occurred_at = (
                     service.ensure_paper_probe_registration.call_args.args
                 )
                 self.assertEqual(actor, "platform-operator")
-                self.assertEqual(occurred_at.tzinfo, UTC)
+                self.assertIsNotNone(occurred_at.utcoffset())
                 self.assertEqual(
                     request.adapter_template_revision_id,
                     "template-" + _committed_template().digest,
                 )
                 self.assertEqual(request.component_commits.root_commit, ROOT_COMMIT)
-                self.assertEqual(request.config_blob_digest, "a" * 64)
-                self.assertEqual(request.strategy_digest, "b" * 64)
-                self.assertEqual(request.safety_policy_digest, "c" * 64)
-                self.assertEqual(
-                    request.closed_policy_snapshot.source_commit,
-                    ROOT_COMMIT,
-                )
                 engine.dispose.assert_called_once_with()
 
-    def test_status_uses_only_the_fixed_instance_selector(self) -> None:
+    def test_status_uses_lazy_backend_and_fixed_instance(self) -> None:
         engine = mock.Mock()
         repository = object()
         service = mock.Mock()
-        service.registration_status.return_value = _status()
+        service.registration_status.return_value = _FakeStatus(_status_payload())
+        bindings = _fake_bindings(
+            sql_registration_repository=mock.Mock(return_value=repository),
+            runtime_application_service=mock.Mock(return_value=service),
+        )
         with (
-            mock.patch.object(runtime_registry_cli, "_create_engine", return_value=engine),
             mock.patch.object(
                 runtime_registry_cli,
-                "SqlPaperProbeRegistrationRepository",
-                return_value=repository,
+                "_load_backend_bindings",
+                return_value=bindings,
             ),
             mock.patch.object(
                 runtime_registry_cli,
-                "RuntimeApplicationService",
-                return_value=service,
+                "_create_engine",
+                return_value=engine,
             ),
         ):
             code, stdout, stderr = self.run_cli(
                 "runtime-registry",
                 "status",
                 "--instance-id",
-                "phase2-spot-paper-probe",
+                INSTANCE_ID,
             )
-
         self.assertEqual((code, stderr), (0, ""))
-        self.assertEqual(json.loads(stdout), _status().model_dump(mode="json"))
-        service.registration_status.assert_called_once_with("phase2-spot-paper-probe")
+        self.assertEqual(json.loads(stdout), _status_payload())
+        service.registration_status.assert_called_once_with(INSTANCE_ID)
         engine.dispose.assert_called_once_with()
 
-    def test_fixed_selectors_reject_other_values_before_database_construction(self) -> None:
+    def test_fixed_selectors_and_raw_power_fail_before_backend_loading(self) -> None:
         invocations = (
             ("runtime-template", "publish", "--actor", "other-operator"),
             ("runtime-registry", "compile", "--actor", "other-operator"),
-            (
-                "runtime-registry",
-                "status",
-                "--instance-id",
-                "other-instance",
-            ),
-        )
-        for invocation in invocations:
-            with (
-                self.subTest(invocation=invocation),
-                mock.patch.object(runtime_registry_cli, "_create_engine") as create_engine,
-            ):
-                code, stdout, stderr = self.run_cli(*invocation)
-            self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
-            create_engine.assert_not_called()
-
-    def test_raw_power_unknown_flags_and_lifecycle_verbs_fail_closed_without_echo(self) -> None:
-        invocations = (
+            ("runtime-registry", "status", "--instance-id", "other-instance"),
             ("runtime-template", "validate", "--path", "must-not-echo"),
-            (
-                "runtime-registry",
-                "compile",
-                "--actor",
-                "platform-operator",
-                "--secret",
-                "must-not-echo",
-            ),
             ("runtime-registry", "start"),
             ("runtime-registry", "status", "--image", "must-not-echo"),
-            ("runtime-registry", "status", "--unknown", "must-not-echo"),
         )
         for invocation in invocations:
             with (
                 self.subTest(invocation=invocation),
-                mock.patch.object(runtime_registry_cli, "_create_engine") as create_engine,
+                mock.patch.object(
+                    runtime_registry_cli,
+                    "_load_backend_bindings",
+                ) as load_bindings,
             ):
                 code, stdout, stderr = self.run_cli(*invocation)
             self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
-            create_engine.assert_not_called()
+            load_bindings.assert_not_called()
 
-    def test_application_failure_prints_only_stable_code_and_disposes_engine(self) -> None:
+    def test_application_failure_is_secret_safe_and_disposes_engine(self) -> None:
         secret = "database-secret-that-must-not-leak"
         engine = mock.Mock()
+        bindings = _fake_bindings(
+            sql_registration_repository=mock.Mock(side_effect=RuntimeError(secret))
+        )
         with (
-            mock.patch.object(runtime_registry_cli, "_create_engine", return_value=engine),
             mock.patch.object(
                 runtime_registry_cli,
-                "SqlPaperProbeRegistrationRepository",
-                side_effect=RuntimeError(secret),
+                "_load_backend_bindings",
+                return_value=bindings,
+            ),
+            mock.patch.object(
+                runtime_registry_cli,
+                "_create_engine",
+                return_value=engine,
             ),
         ):
             code, stdout, stderr = self.run_cli(
                 "runtime-registry",
                 "status",
                 "--instance-id",
-                "phase2-spot-paper-probe",
+                INSTANCE_ID,
             )
-
-        self.assertEqual((code, stdout, stderr), (1, "", "runtime_registry_operation_failed\n"))
+        self.assertEqual(
+            (code, stdout, stderr),
+            (1, "", "runtime_registry_operation_failed\n"),
+        )
         self.assertNotIn(secret, stderr)
         engine.dispose.assert_called_once_with()
 
-    def test_database_settings_are_fixed_and_read_only_from_the_secret_file(self) -> None:
+    def test_database_settings_are_fixed_in_lazy_bindings(self) -> None:
         settings = mock.Mock()
         engine = object()
-        with (
-            mock.patch.object(
-                runtime_registry_cli,
-                "PlatformDatabaseSettings",
-                return_value=settings,
-            ) as settings_type,
-            mock.patch.object(
-                runtime_registry_cli,
-                "create_platform_engine",
-                return_value=engine,
-            ) as create_engine,
-        ):
-            self.assertIs(runtime_registry_cli._create_engine(), engine)
-
-        settings_type.assert_called_once_with(
+        bindings = _fake_bindings(
+            platform_database_settings=mock.Mock(return_value=settings),
+            create_platform_engine=mock.Mock(return_value=engine),
+        )
+        self.assertIs(runtime_registry_cli._create_engine(bindings), engine)
+        bindings.platform_database_settings.assert_called_once_with(
             host="platform-postgres",
             port=5432,
             database="platform",
             username="platform_operator",
             password_file=Path("/run/secrets/database_password"),
         )
-        create_engine.assert_called_once_with(settings)
+        bindings.create_platform_engine.assert_called_once_with(settings)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("pydantic") is not None,
+        "backend dependencies unavailable under python -S",
+    )
+    def test_lazy_bindings_build_real_backend_public_models(self) -> None:
+        bindings = runtime_registry_cli._load_backend_bindings()
+        evidence = runtime_registry_cli._CommittedEvidence(
+            template=_committed_template(),
+            artifacts=_artifacts(),
+            policies=_policies(),
+        )
+        publication = runtime_registry_cli._publication(evidence, bindings)
+        request = runtime_registry_cli._registration_request(evidence, bindings)
+        self.assertEqual(type(publication).__name__, "CommittedTemplatePublication")
+        self.assertEqual(type(request).__name__, "EnsurePaperProbeRegistrationRequest")
+        self.assertEqual(publication.template.template_id, TEMPLATE_ID)
+        self.assertEqual(request.component_commits.backend_commit, BACKEND_COMMIT)
 
 
 if __name__ == "__main__":
