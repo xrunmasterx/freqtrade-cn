@@ -43,6 +43,7 @@ else:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_PROFILES = {"trading", "research"}
 PLATFORM_PROFILE = "platform"
+PLATFORM_OPERATOR_PROFILE = "platform-operator"
 ALLOWED_ACTIONS = {"config", "up", "down", "stop", "ps", "logs"}
 FORMAL_SERVICES = {"freqtrade", "freqtrade-futures", "freqtrade-research"}
 EMERGENCY_ACTIONS = {"down", "stop", "ps", "logs"}
@@ -72,10 +73,15 @@ class UnsupportedArguments(ValueError):
 
 def parse_platform_arguments(arguments: Sequence[str]) -> list[str]:
     tokens = list(arguments)
-    if tokens[:3] != ["--profile", PLATFORM_PROFILE, "config"]:
+    if tokens[:2] != ["--profile", PLATFORM_PROFILE]:
+        raise UnsupportedArguments
+    index = 2
+    if tokens[index : index + 2] == ["--profile", PLATFORM_OPERATOR_PROFILE]:
+        index += 2
+    if index >= len(tokens) or tokens[index] != "config":
         raise UnsupportedArguments
     seen: set[str] = set()
-    index = 3
+    index += 1
     while index < len(tokens):
         token = tokens[index]
         if token == "--quiet" and token not in seen:
@@ -493,7 +499,15 @@ def render_compose(*, root: Path = REPO_ROOT) -> dict[str, Any]:
 
 def render_platform_compose(*, root: Path = REPO_ROOT) -> dict[str, Any]:
     completed = run_compose(
-        ["--profile", PLATFORM_PROFILE, "config", "--format", "json"],
+        [
+            "--profile",
+            PLATFORM_PROFILE,
+            "--profile",
+            PLATFORM_OPERATOR_PROFILE,
+            "config",
+            "--format",
+            "json",
+        ],
         root=root,
         capture_output=True,
     )

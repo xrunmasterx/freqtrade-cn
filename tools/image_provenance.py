@@ -42,6 +42,13 @@ def provenance_tag(identity: CommitIdentity) -> str:
     )
 
 
+def operator_provenance_tag(identity: CommitIdentity) -> str:
+    return (
+        f"freqtrade-cn-operator:p0-{identity.root[:12]}-{identity.backend[:12]}-"
+        f"{identity.frontend[:12]}"
+    )
+
+
 def expected_labels(identity: CommitIdentity) -> dict[str, str]:
     return {
         f"{LABEL_PREFIX}root": identity.root,
@@ -68,6 +75,36 @@ def build_committed_image(
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         raise ValueError("Docker image build failed") from None
+    return tag
+
+
+def build_committed_operator_image(
+    context: Path, identity: CommitIdentity, *, timeout_seconds: int = 1800
+) -> str:
+    tag = operator_provenance_tag(identity)
+    command = [
+        "docker",
+        "build",
+        "--tag",
+        tag,
+        "--target",
+        "platform-operator-image",
+        "--build-arg",
+        f"PLATFORM_OPERATOR_ROOT_COMMIT={identity.root}",
+    ]
+    for name, value in expected_labels(identity).items():
+        command.extend(["--label", f"{name}={value}"])
+    command.append(str(context))
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise ValueError("Docker operator image build failed") from None
     return tag
 
 
@@ -112,6 +149,18 @@ def verify_image_provenance(image: InspectedImage, identity: CommitIdentity) -> 
         raise ValueError("Docker image labels do not match committed revisions")
 
 
+def verify_operator_image_provenance(
+    image: InspectedImage, identity: CommitIdentity
+) -> None:
+    if image.tag != operator_provenance_tag(identity):
+        raise ValueError("Docker operator image tag is invalid")
+    identity_labels = {
+        name: value for name, value in image.labels.items() if name.startswith(LABEL_PREFIX)
+    }
+    if identity_labels != expected_labels(identity):
+        raise ValueError("Docker image labels do not match committed revisions")
+
+
 def build_and_inspect_image(context: Path, identity: CommitIdentity) -> InspectedImage:
     tag = build_committed_image(context, identity)
     image = inspect_image(tag)
@@ -119,15 +168,27 @@ def build_and_inspect_image(context: Path, identity: CommitIdentity) -> Inspecte
     return image
 
 
+def build_and_inspect_operator_image(
+    context: Path, identity: CommitIdentity
+) -> InspectedImage:
+    tag = build_committed_operator_image(context, identity)
+    image = inspect_image(tag)
+    verify_operator_image_provenance(image, identity)
+    return image
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("build",))
+    parser.add_argument("command", choices=("build", "build-operator"))
     parser.add_argument("--print-image-id", action="store_true")
     options = parser.parse_args(arguments)
     try:
         identity = resolve_commit_identity(REPO_ROOT)
         with committed_build_context(REPO_ROOT, identity) as context:
-            image = build_and_inspect_image(context, identity)
+            if options.command == "build-operator":
+                image = build_and_inspect_operator_image(context, identity)
+            else:
+                image = build_and_inspect_image(context, identity)
     except (OSError, ValueError):
         sys.stderr.write("image provenance: verification failed\n")
         return 78

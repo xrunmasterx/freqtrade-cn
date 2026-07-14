@@ -64,3 +64,50 @@ USER ftuser
 
 ENTRYPOINT ["python", "/usr/local/bin/freqtrade-entrypoint"]
 CMD ["trade"]
+
+FROM runtime-image AS platform-operator-image
+
+USER root
+RUN apt-get update \
+  && apt-get -y install --no-install-recommends git \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --chown=root:root --chmod=0444 \
+  tools/__init__.py \
+  tools/committed_git.py \
+  tools/runtime_templates.py \
+  tools/runtime_artifacts.py \
+  tools/runtime_registry_cli.py \
+  /opt/platform-operator/tools/
+
+ARG PLATFORM_OPERATOR_ROOT_COMMIT
+RUN case "$PLATFORM_OPERATOR_ROOT_COMMIT" in \
+      *[!0-9a-f]*) exit 1 ;; \
+    esac \
+  && case "${#PLATFORM_OPERATOR_ROOT_COMMIT}" in \
+      40|64) ;; \
+      *) exit 1 ;; \
+    esac \
+  && install -d -o root -g root -m 0555 \
+    /opt/platform-operator/repository/.git \
+    /opt/platform-operator/repository/ops/adapter-templates \
+    /opt/platform-operator/repository/ops/runtime-policies \
+    /opt/platform-operator/repository/ops/config \
+    /opt/platform-operator/repository/ft_userdata/user_data/strategies \
+  && install -o root -g root -m 0444 /dev/null \
+    /opt/platform-operator/repository/ft_userdata/user_data/config.example.json \
+  && install -o root -g root -m 0444 /dev/null \
+    /opt/platform-operator/repository/ft_userdata/user_data/strategies/sample_strategy.py \
+  && install -o root -g root -m 0444 /dev/null \
+    /opt/platform-operator/repository/ops/config/trading-safety.json \
+  && printf '%s\n' "$PLATFORM_OPERATOR_ROOT_COMMIT" \
+    > /opt/platform-operator/root-commit \
+  && chmod 0444 /opt/platform-operator/root-commit
+
+WORKDIR /opt/platform-operator
+USER ftuser
+ENTRYPOINT ["python", "-m", "tools.runtime_registry_cli"]
+CMD []
+
+FROM runtime-image AS final-runtime-image

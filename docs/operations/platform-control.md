@@ -17,7 +17,7 @@ Runtime Access proxying, or start, stop, retry, or retire HTTP operations.
 
 ## Architecture and trust boundaries
 
-The control plane has two fixed runnable services. `platform-postgres` is reachable only
+The control plane has two fixed long-running services. `platform-postgres` is reachable only
 on the internal `platform-db` network. `platform-control` joins that database
 network plus the dedicated `platform-ingress` bridge, connects as the
 least-privileged `platform_control` database role, binds inside its container in
@@ -29,12 +29,31 @@ all capabilities dropped, and `no-new-privileges`. It receives no Docker socket,
 repository root, runtime state, Bot configuration, strategy, research data,
 trading secret, or general secret-root mount.
 
-Task 7.4 establishes only the `platform_operator` database authority and its
-root-managed credential. `platform-operator` is not a Compose service in Task
-7.4, and the `platform` profile still contains only `platform-postgres` and
-`platform-control`. The operator service, image copy, CLI, and executable
-PostgreSQL probes arrive atomically in Task 7.5. Until then, no supported command
-carrier can log in as this role.
+`platform-operator` is a one-shot command carrier in its own
+`platform-operator` profile. It is never started by the long-running `platform`
+profile. It receives only the internal database network, its operator database
+credential, the complete `.git` metadata directory, and the reviewed template,
+policy, and three paper-probe artifact paths. All repository mounts are read-only;
+the full worktree, runtime state, secret roots, trading configuration, Docker
+socket, host ports, and lifecycle authority are absent.
+
+Normal use starts with a normal recursive checkout; linked-worktree `.git`
+indirection is unsupported. PostgreSQL must already be healthy before any
+database-backed command. Build the reviewed carrier with
+`python tools/image_provenance.py build-operator`, then invoke its typed surface,
+for example:
+
+```text
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-template validate
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-template publish --actor platform-operator
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-registry compile --actor platform-operator
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-registry status --instance-id phase2-spot-paper-probe
+```
+
+The image owns the reviewed root commit and CLI entrypoint. Docker administrators
+remain platform root: they can replace an image, entrypoint, mount, or environment
+and are outside the operator service isolation claim. Operators must use only the
+reviewed invocation and typed CLI arguments above.
 
 `platform-ingress` is a non-internal bridge, not a one-way ingress ACL. The
 loopback publication restricts host-side inbound access, but the bridge also
@@ -70,9 +89,10 @@ Secret values are consumed through files. They must not be copied into ordinary
 environment variables, DSNs, command arguments, logs, or artifacts. The admin
 password is reserved for database administration and migration. The control and
 supervisor database passwords belong only to their fixed roles. The operator
-database password belongs only to the staged `platform_operator` role and is
-mounted read-only into `platform-postgres` for role reconciliation; no
-long-running service receives it. The API password and JWT key belong only to
+database password belongs only to `platform_operator`. It is mounted read-only
+into `platform-postgres` for role reconciliation and into the one-shot
+`platform-operator` carrier as `database_password`; no long-running service
+receives it. The API password and JWT key belong only to
 platform-control authentication.
 
 Database-role password rotation is deliberately deferred in Phase 2A because it
@@ -80,8 +100,8 @@ requires a coordinated database transaction and service handoff. Do not add the
 platform inventory to the legacy `rotate-secrets` route. The one narrow staging
 exception is fixed: `rotate-secrets --service platform-operator` rotates only
 `platform_operator_db_password`. This selector names one credential group; it
-does not imply that an operator Compose service or CLI exists in Task 7.4. A
-reviewed Supervisor or infrastructure launcher must define rotation, restart,
+does not grant Docker or database authority. A reviewed Supervisor or
+infrastructure launcher must define rotation, restart,
 verification, and rollback as one operation before production use.
 
 ## Migration and reconciliation contract
@@ -143,15 +163,12 @@ TRUNCATE, REFERENCES, TRIGGER, MAINTAIN, secret-version authority, or lifecycle/
 Access table authority. The initializer skips absent allowlisted tables and is
 rerunnable after Alembic creates them.
 
-Task 7.4 provides structural and mutation-test evidence for this staged role but
-does not change the Root Safety workflow. Actual login probes as
-`platform_operator` are deferred with the operator service and CLI to Task 7.5.
-Task 7.5 must probe PostgreSQL 17 effective privileges, including authority
+Root Safety probes PostgreSQL 17 effective privileges, including authority
 inherited through `PUBLIC`, using each fixed login identity rather than relying on
 named-role ACL rows or administrator `SET ROLE` alone. Its database, schema, table,
 column, sequence, routine, and default-ACL checks must cover both explicit ACLs and
 hard-wired defaults represented by null catalog ACLs.
-Task 7.5 must contaminate fixed roles with routine ownership, direct routine
+Root Safety must contaminate fixed roles with routine ownership, direct routine
 `EXECUTE`, and table `MAINTAIN` authority. It must prove that a rerun fails closed
 while a fixed role owns the routine; after an administrator restores ownership, a
 rerun must remove the direct `EXECUTE` and `MAINTAIN` grants and each affected fixed

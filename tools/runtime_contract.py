@@ -95,7 +95,7 @@ EXPECTED_EXTENSION = {
     "restart": "unless-stopped",
     "security_opt": ["no-new-privileges:true"],
 }
-PLATFORM_SERVICES = {"platform-postgres", "platform-control"}
+PLATFORM_SERVICES = {"platform-postgres", "platform-control", "platform-operator"}
 PLATFORM_SECRET_FILES = {
     "platform_postgres_admin_password": "postgres_admin_password",
     "platform_control_db_password": "platform_control_db_password",
@@ -1497,6 +1497,53 @@ def validate_platform_compose(
             if control.get("secrets") != expected_control["secrets"]:
                 errors.append("platform-control secret allocation differs")
 
+    operator_mounts = (
+        (".git", ".git"),
+        ("ops/adapter-templates", "ops/adapter-templates"),
+        ("ops/runtime-policies", "ops/runtime-policies"),
+        (
+            "ft_userdata/user_data/config.example.json",
+            "ft_userdata/user_data/config.example.json",
+        ),
+        (
+            "ft_userdata/user_data/strategies/sample_strategy.py",
+            "ft_userdata/user_data/strategies/sample_strategy.py",
+        ),
+        ("ops/config/trading-safety.json", "ops/config/trading-safety.json"),
+    )
+    expected_operator = {
+        "profiles": ["platform-operator"],
+        "cap_drop": ["ALL"],
+        "command": None,
+        "entrypoint": None,
+        "image": "freqtrade-cn-operator:local",
+        "init": True,
+        "networks": {"platform-db": None},
+        "read_only": True,
+        "restart": "no",
+        "secrets": [
+            {
+                "source": "platform_operator_db_password",
+                "target": "database_password",
+            }
+        ],
+        "security_opt": ["no-new-privileges:true"],
+        "user": "1000:1000",
+        "volumes": [
+            {
+                "type": "bind",
+                "source": str((repo_root / source).resolve()),
+                "target": f"/opt/platform-operator/repository/{target}",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            }
+            for source, target in operator_mounts
+        ],
+    }
+    operator = services["platform-operator"]
+    if type(operator) is not dict or operator != expected_operator:
+        errors.append("platform-operator fields differ")
+
     errors.extend(_validate_platform_role_script(repo_root))
     return errors
 
@@ -1543,6 +1590,8 @@ def _render_platform_compose() -> dict[str, Any] | None:
         str((REPO_ROOT / "tools/compose_runtime.py").resolve()),
         "--profile",
         "platform",
+        "--profile",
+        "platform-operator",
         "config",
         "--format",
         "json",

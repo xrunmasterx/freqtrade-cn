@@ -139,6 +139,60 @@ services:
         host_ip: 127.0.0.1
         protocol: tcp
 
+  platform-operator:
+    profiles: ["platform-operator"]
+    image: freqtrade-cn-operator:local
+    restart: "no"
+    user: "1000:1000"
+    read_only: true
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - platform-db
+    secrets:
+      - source: platform_operator_db_password
+        target: database_password
+    volumes:
+      - type: bind
+        source: ./.git
+        target: /opt/platform-operator/repository/.git
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ops/adapter-templates
+        target: /opt/platform-operator/repository/ops/adapter-templates
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ops/runtime-policies
+        target: /opt/platform-operator/repository/ops/runtime-policies
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/config.example.json
+        target: /opt/platform-operator/repository/ft_userdata/user_data/config.example.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ft_userdata/user_data/strategies/sample_strategy.py
+        target: /opt/platform-operator/repository/ft_userdata/user_data/strategies/sample_strategy.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./ops/config/trading-safety.json
+        target: /opt/platform-operator/repository/ops/config/trading-safety.json
+        read_only: true
+        bind:
+          create_host_path: false
+
   freqtrade:
     <<: *freqtrade-common
     profiles: ["trading"]

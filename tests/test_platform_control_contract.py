@@ -37,22 +37,23 @@ class PlatformControlContractTests(unittest.TestCase):
             path.write_text(script, encoding="utf-8", newline="")
             return runtime_contract._validate_platform_role_script(root)
 
-    def test_documentation_keeps_operator_runtime_deferred_to_task_7_5(self) -> None:
+    def test_documentation_defines_the_one_shot_operator_boundary(self) -> None:
         document = (REPO_ROOT / "docs/operations/platform-control.md").read_text(
             encoding="utf-8"
         )
         normalized = " ".join(document.split())
         required = (
-            "Task 7.4 establishes only the `platform_operator` database authority",
-            "`platform-operator` is not a Compose service in Task 7.4",
-            "the `platform` profile still contains only `platform-postgres` and "
-            "`platform-control`",
+            "`platform-operator` is a one-shot command carrier",
+            "docker compose --profile platform-operator run --rm --no-deps "
+            "platform-operator",
+            "PostgreSQL must already be healthy",
+            "normal recursive checkout",
+            "Docker administrators remain platform root",
+            "outside the operator service isolation claim",
             "`rotate-secrets --service platform-operator` rotates only "
             "`platform_operator_db_password`",
-            "The operator service, image copy, CLI, and executable PostgreSQL probes arrive "
-            "atomically in Task 7.5",
             "none of the fixed roles inherits database DDL or temporary-table authority",
-            "Task 7.5 must probe PostgreSQL 17 effective privileges, including authority "
+            "Root Safety probes PostgreSQL 17 effective privileges, including authority "
             "inherited through `PUBLIC`",
             "contaminate fixed roles with routine ownership, direct routine `EXECUTE`, "
             "and table `MAINTAIN` authority",
@@ -61,7 +62,10 @@ class PlatformControlContractTests(unittest.TestCase):
             self.assertIn(statement, normalized)
 
     def test_platform_compose_has_exact_isolated_inventory(self) -> None:
-        self.assertEqual(set(self.compose["services"]), {"platform-postgres", "platform-control"})
+        self.assertEqual(
+            set(self.compose["services"]),
+            {"platform-postgres", "platform-control", "platform-operator"},
+        )
         self.assertEqual(
             self.compose["networks"],
             {
@@ -93,7 +97,7 @@ class PlatformControlContractTests(unittest.TestCase):
         )
         self.assertEqual(self.errors(), [])
 
-    def test_operator_database_secret_is_mounted_only_into_postgres(self) -> None:
+    def test_operator_database_secret_is_mounted_only_into_postgres_and_operator(self) -> None:
         definition = self.compose["secrets"]["platform_operator_db_password"]
         self.assertEqual(
             definition,
@@ -136,6 +140,72 @@ class PlatformControlContractTests(unittest.TestCase):
                 for secret in self.compose["services"]["platform-control"]["secrets"]
             },
         )
+        self.assertEqual(
+            self.compose["services"]["platform-operator"]["secrets"],
+            [
+                {
+                    "source": "platform_operator_db_password",
+                    "target": "database_password",
+                }
+            ],
+        )
+
+    def test_operator_is_an_exact_one_shot_read_only_carrier(self) -> None:
+        operator = self.compose["services"]["platform-operator"]
+        self.assertEqual(operator["profiles"], ["platform-operator"])
+        self.assertEqual(operator["image"], "freqtrade-cn-operator:local")
+        self.assertEqual(operator["restart"], "no")
+        self.assertEqual(operator["user"], "1000:1000")
+        self.assertTrue(operator["read_only"])
+        self.assertTrue(operator["init"])
+        self.assertEqual(operator["cap_drop"], ["ALL"])
+        self.assertEqual(operator["security_opt"], ["no-new-privileges:true"])
+        self.assertEqual(operator["networks"], {"platform-db": None})
+        for forbidden in (
+            "build",
+            "container_name",
+            "ports",
+            "depends_on",
+            "environment",
+        ):
+            self.assertNotIn(forbidden, operator)
+        self.assertIsNone(operator["command"])
+        self.assertIsNone(operator["entrypoint"])
+
+        expected_mounts = (
+            (".git", ".git"),
+            ("ops/adapter-templates", "ops/adapter-templates"),
+            ("ops/runtime-policies", "ops/runtime-policies"),
+            (
+                "ft_userdata/user_data/config.example.json",
+                "ft_userdata/user_data/config.example.json",
+            ),
+            (
+                "ft_userdata/user_data/strategies/sample_strategy.py",
+                "ft_userdata/user_data/strategies/sample_strategy.py",
+            ),
+            ("ops/config/trading-safety.json", "ops/config/trading-safety.json"),
+        )
+        self.assertEqual(len(operator["volumes"]), len(expected_mounts))
+        for mount, (source, target) in zip(operator["volumes"], expected_mounts):
+            self.assertEqual(
+                mount,
+                {
+                    "type": "bind",
+                    "source": str((REPO_ROOT / source).resolve()),
+                    "target": f"/opt/platform-operator/repository/{target}",
+                    "read_only": True,
+                    "bind": {"create_host_path": False},
+                },
+            )
+        rendered = json.dumps(operator, sort_keys=True)
+        for forbidden in (
+            "docker.sock",
+            "ft_userdata/runtime",
+            "ft_userdata/secrets",
+            "config.volatility.futures.json",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_operator_database_secret_mutations_fail_closed(self) -> None:
         mutations: list[tuple[str, dict[str, object]]] = []
@@ -175,15 +245,78 @@ class PlatformControlContractTests(unittest.TestCase):
         ] = "private-operator-value"
         mutations.append(("platform-control direct secret environment", direct_value))
 
-        extra_service = copy.deepcopy(self.compose)
-        extra_service["services"]["platform-operator"] = {}
-        mutations.append(("platform Compose services differ", extra_service))
+        operator_admin_secret = copy.deepcopy(self.compose)
+        operator_admin_secret["services"]["platform-operator"]["secrets"].append(
+            {"source": "platform_postgres_admin_password", "target": "admin"}
+        )
+        mutations.append(("platform-operator fields differ", operator_admin_secret))
 
         for expected, compose in mutations:
             with self.subTest(expected=expected):
                 text = "\n".join(self.errors(compose))
                 self.assertIn(expected, text)
                 self.assertNotIn("private-operator", text)
+
+    def test_operator_mutations_fail_closed(self) -> None:
+        cases: list[tuple[str, dict[str, object]]] = []
+        for field, value in (
+            ("entrypoint", ["sh"]),
+            ("command", ["start"]),
+            ("environment", {"DATABASE_URL": "private-value"}),
+            ("ports", [{"target": 8091, "published": "8091"}]),
+            ("depends_on", {"platform-postgres": {"condition": "service_healthy"}}),
+            ("build", {"context": "."}),
+            ("container_name", "operator"),
+        ):
+            mutated = copy.deepcopy(self.compose)
+            mutated["services"]["platform-operator"][field] = value
+            cases.append(("platform-operator fields differ", mutated))
+
+        writable_mount = copy.deepcopy(self.compose)
+        writable_mount["services"]["platform-operator"]["volumes"][0]["read_only"] = False
+        cases.append(("platform-operator fields differ", writable_mount))
+
+        full_root = copy.deepcopy(self.compose)
+        full_root["services"]["platform-operator"]["volumes"][0]["source"] = str(REPO_ROOT)
+        cases.append(("platform-operator fields differ", full_root))
+
+        wrong_profile = copy.deepcopy(self.compose)
+        wrong_profile["services"]["platform-operator"]["profiles"] = ["platform"]
+        cases.append(("platform-operator fields differ", wrong_profile))
+
+        for expected, compose in cases:
+            with self.subTest(expected=expected):
+                errors = "\n".join(self.errors(compose))
+                self.assertIn(expected, errors)
+                self.assertNotIn("private-value", errors)
+
+    def test_operator_dockerfile_stage_is_fixed_and_default_image_stays_runtime(self) -> None:
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("FROM runtime-image AS platform-operator-image", dockerfile)
+        self.assertIn("ARG PLATFORM_OPERATOR_ROOT_COMMIT", dockerfile)
+        self.assertIn("/opt/platform-operator/root-commit", dockerfile)
+        self.assertIn(
+            'ENTRYPOINT ["python", "-m", "tools.runtime_registry_cli"]',
+            dockerfile,
+        )
+        self.assertTrue(
+            dockerfile.rstrip().endswith("FROM runtime-image AS final-runtime-image")
+        )
+        operator_stage = dockerfile.split(
+            "FROM runtime-image AS platform-operator-image", 1
+        )[1].split("FROM runtime-image AS final-runtime-image", 1)[0]
+        for module in (
+            "tools/__init__.py",
+            "tools/committed_git.py",
+            "tools/runtime_templates.py",
+            "tools/runtime_artifacts.py",
+            "tools/runtime_registry_cli.py",
+        ):
+            self.assertIn(module, operator_stage)
+        self.assertNotIn("COPY tools/", operator_stage)
+        self.assertIn('*[!0-9a-f]*', operator_stage)
+        self.assertIn('${#PLATFORM_OPERATOR_ROOT_COMMIT}', operator_stage)
+        self.assertNotIn("grep -E", operator_stage)
 
     def test_platform_control_is_only_fixed_loopback_application_port(self) -> None:
         service = self.compose["services"]["platform-control"]
