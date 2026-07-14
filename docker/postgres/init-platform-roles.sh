@@ -279,6 +279,14 @@ DO $authority_guard$
 BEGIN
     IF EXISTS (
         SELECT 1
+        FROM pg_shdepend AS shared_dependency
+        JOIN pg_roles AS fixed_role ON fixed_role.oid = shared_dependency.refobjid
+        WHERE shared_dependency.refclassid = 'pg_authid'::regclass
+          AND shared_dependency.deptype = 'o'
+          AND fixed_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
+        UNION ALL
+        SELECT 1
         FROM pg_database AS database
         JOIN pg_roles AS owner_role ON owner_role.oid = database.datdba
         WHERE owner_role.rolname IN
@@ -421,7 +429,7 @@ BEGIN
             OR namespace.nspname ~ '^pg_'
             OR (relation.relkind IN ('r', 'p', 'v', 'm', 'f')
               AND privilege.privilege_type NOT IN
-                ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'))
+                ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'))
             OR (relation.relkind = 'S'
               AND privilege.privilege_type NOT IN ('USAGE', 'SELECT', 'UPDATE'))
             OR relation.relkind NOT IN ('r', 'p', 'v', 'm', 'f', 'S'))
@@ -438,6 +446,18 @@ BEGIN
             OR namespace.nspname ~ '^pg_'
             OR relation.relkind NOT IN ('r', 'p', 'v', 'm', 'f')
             OR privilege.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES'))
+        UNION ALL
+        SELECT 1
+        FROM pg_proc AS routine
+        JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+        CROSS JOIN LATERAL aclexplode(routine.proacl) AS privilege
+        JOIN pg_roles AS routine_grantee_role
+          ON routine_grantee_role.oid = privilege.grantee
+        WHERE routine_grantee_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
+          AND (namespace.nspname = 'information_schema'
+            OR namespace.nspname ~ '^pg_'
+            OR privilege.privilege_type <> 'EXECUTE')
     ) THEN
         RAISE EXCEPTION 'unsupported_platform_role_authority';
     END IF;
@@ -510,7 +530,7 @@ WHERE namespace.nspname <> 'information_schema'
   AND object_grantee_role.rolname IN
     ('platform_control', 'platform_supervisor', 'platform_operator')
   AND privilege.privilege_type IN
-    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')
+    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')
 ORDER BY object_grantee_role.rolname, namespace.nspname, relation.relname,
     privilege.privilege_type, object_grantor_role.rolname
 \gexec
@@ -576,6 +596,37 @@ ORDER BY
     attribute.attname,
     privilege.privilege_type,
     column_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', routine_grantor_role.rolname) AS routine_set_role,
+    format(
+        'REVOKE EXECUTE ON ROUTINE %I.%I(%s) FROM %I GRANTED BY %I CASCADE',
+        namespace.nspname,
+        routine.proname,
+        pg_get_function_identity_arguments(routine.oid),
+        routine_grantee_role.rolname,
+        routine_grantor_role.rolname
+    ) AS routine_revoke_privilege,
+    'RESET ROLE' AS routine_reset_role
+FROM pg_proc AS routine
+JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+CROSS JOIN LATERAL aclexplode(routine.proacl) AS privilege
+JOIN pg_roles AS routine_grantee_role
+  ON routine_grantee_role.oid = privilege.grantee
+JOIN pg_roles AS routine_grantor_role
+  ON routine_grantor_role.oid = privilege.grantor
+WHERE routine_grantee_role.rolname IN
+  ('platform_control', 'platform_supervisor', 'platform_operator')
+  AND privilege.privilege_type = 'EXECUTE'
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+ORDER BY
+    routine_grantee_role.rolname,
+    namespace.nspname,
+    routine.proname,
+    pg_get_function_identity_arguments(routine.oid),
+    routine_grantor_role.rolname
 \gexec
 
 GRANT CONNECT ON DATABASE platform TO platform_control, platform_supervisor;

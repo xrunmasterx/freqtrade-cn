@@ -54,6 +54,8 @@ class PlatformControlContractTests(unittest.TestCase):
             "none of the fixed roles inherits database DDL or temporary-table authority",
             "Task 7.5 must probe PostgreSQL 17 effective privileges, including authority "
             "inherited through `PUBLIC`",
+            "contaminate fixed roles with routine ownership, direct routine `EXECUTE`, "
+            "and table `MAINTAIN` authority",
         )
         for statement in required:
             self.assertIn(statement, normalized)
@@ -380,7 +382,7 @@ class PlatformControlContractTests(unittest.TestCase):
         for fragment in cleanup_fragments:
             self.assertIn(fragment, compact)
         self.assertGreaterEqual(compact.count("PRIVILEGE.GRANTEE = 0"), 7)
-        self.assertEqual(
+        self.assertGreaterEqual(
             compact.count(
                 "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', "
                 "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')"
@@ -507,13 +509,24 @@ class PlatformControlContractTests(unittest.TestCase):
             ),
             6,
         )
-        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 17)
+        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 18)
         self.assertGreaterEqual(script.count(" CASCADE"), 5)
 
     def test_role_script_fails_closed_on_operator_ownership_and_default_authority(self) -> None:
         script = " ".join(self.role_script().upper().split())
         self.assertNotIn("REASSIGN OWNED", script)
         self.assertNotIn("DROP OWNED", script)
+        ownership_fragments = (
+            "FROM PG_SHDEPEND AS SHARED_DEPENDENCY",
+            "JOIN PG_ROLES AS FIXED_ROLE ON FIXED_ROLE.OID = SHARED_DEPENDENCY.REFOBJID",
+            "SHARED_DEPENDENCY.REFCLASSID = 'PG_AUTHID'::REGCLASS",
+            "SHARED_DEPENDENCY.DEPTYPE = 'O'",
+            "FIXED_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
+            "'PLATFORM_OPERATOR')",
+            "RAISE EXCEPTION 'FIXED_PLATFORM_ROLE_OWNS_OBJECT'",
+        )
+        for fragment in ownership_fragments:
+            self.assertIn(fragment, script)
         self.assertEqual(
             script.count(
                 "OWNER_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
@@ -640,7 +653,7 @@ class PlatformControlContractTests(unittest.TestCase):
             "PRIVILEGE.PRIVILEGE_TYPE IN ('CONNECT', 'CREATE', 'TEMPORARY')",
             "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'CREATE')",
             "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', "
-            "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')",
+            "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')",
             "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'SELECT', 'UPDATE')",
         )
         for fragment in fragments:
@@ -659,6 +672,122 @@ class PlatformControlContractTests(unittest.TestCase):
             script.index("ACLEXPLODE(DATABASE.DATACL)"),
             script.index("GRANT CONNECT ON DATABASE PLATFORM"),
         )
+
+    def test_role_script_reconciles_fixed_role_routine_execute(self) -> None:
+        script = " ".join(self.role_script().upper().split())
+        fragments = (
+            "FROM PG_PROC AS ROUTINE JOIN PG_NAMESPACE AS NAMESPACE ON "
+            "NAMESPACE.OID = ROUTINE.PRONAMESPACE CROSS JOIN LATERAL "
+            "ACLEXPLODE(ROUTINE.PROACL) AS PRIVILEGE JOIN PG_ROLES AS "
+            "ROUTINE_GRANTEE_ROLE ON ROUTINE_GRANTEE_ROLE.OID = PRIVILEGE.GRANTEE",
+            "JOIN PG_ROLES AS ROUTINE_GRANTOR_ROLE ON "
+            "ROUTINE_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR",
+            "ROUTINE_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', "
+            "'PLATFORM_SUPERVISOR', 'PLATFORM_OPERATOR')",
+            "PRIVILEGE.PRIVILEGE_TYPE = 'EXECUTE'",
+            "FORMAT('SET ROLE %I', ROUTINE_GRANTOR_ROLE.ROLNAME) AS ROUTINE_SET_ROLE",
+            "REVOKE EXECUTE ON ROUTINE %I.%I(%S) FROM %I GRANTED BY %I CASCADE",
+            "PG_GET_FUNCTION_IDENTITY_ARGUMENTS(ROUTINE.OID)",
+            "'RESET ROLE' AS ROUTINE_RESET_ROLE",
+        )
+        for fragment in fragments:
+            self.assertIn(fragment, script)
+        self.assertEqual(
+            script.count(
+                "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', "
+                "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')"
+            ),
+            3,
+        )
+        cleanup = script.index("AS ROUTINE_SET_ROLE")
+        first_grant = script.index("GRANT CONNECT ON DATABASE PLATFORM")
+        self.assertLess(cleanup, first_grant)
+
+    def test_role_validator_rejects_routine_authority_mutations(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "missing routine guard": script.replace(
+                "        FROM pg_proc AS routine\n"
+                "        JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace\n"
+                "        CROSS JOIN LATERAL aclexplode(routine.proacl) AS privilege\n"
+                "        JOIN pg_roles AS routine_grantee_role\n"
+                "          ON routine_grantee_role.oid = privilege.grantee\n",
+                "        SELECT 1 WHERE FALSE\n",
+                1,
+            ),
+            "missing routine cleanup": script.replace(
+                "FROM pg_proc AS routine\n"
+                "JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace\n"
+                "CROSS JOIN LATERAL aclexplode(routine.proacl) AS privilege\n"
+                "JOIN pg_roles AS routine_grantee_role\n"
+                "  ON routine_grantee_role.oid = privilege.grantee\n"
+                "JOIN pg_roles AS routine_grantor_role\n"
+                "  ON routine_grantor_role.oid = privilege.grantor\n",
+                "FROM pg_proc AS routine\nWHERE FALSE\n",
+                1,
+            ),
+            "wrong routine grantor": script.replace(
+                "        routine_grantor_role.rolname\n"
+                "    ) AS routine_revoke_privilege",
+                "        routine_grantee_role.rolname\n"
+                "    ) AS routine_revoke_privilege",
+                1,
+            ),
+            "missing maintain cleanup": script.replace(
+                "  AND privilege.privilege_type IN\n"
+                "    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', "
+                "'REFERENCES', 'TRIGGER', 'MAINTAIN')\n"
+                "ORDER BY object_grantee_role.rolname",
+                "  AND privilege.privilege_type IN\n"
+                "    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', "
+                "'REFERENCES', 'TRIGGER')\n"
+                "ORDER BY object_grantee_role.rolname",
+                1,
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, script)
+                errors = self.role_script_errors(mutated)
+                self.assertTrue(
+                    any(
+                        marker in error
+                        for error in errors
+                        for marker in (
+                            "platform role initializer fixed authority guard differs",
+                            "platform role initializer residual object cleanup differs",
+                            "platform role initializer residual routine cleanup differs",
+                        )
+                    ),
+                    errors,
+                )
+
+    def test_role_validator_rejects_generic_ownership_guard_mutations(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "missing shared dependency catalog": script.replace(
+                "FROM pg_shdepend AS shared_dependency",
+                "FROM pg_shdepend AS shared_dependency WHERE FALSE",
+                1,
+            ),
+            "wrong referenced catalog": script.replace(
+                "shared_dependency.refclassid = 'pg_authid'::regclass",
+                "shared_dependency.refclassid = 'pg_database'::regclass",
+                1,
+            ),
+            "missing owner dependency": script.replace(
+                "shared_dependency.deptype = 'o'",
+                "shared_dependency.deptype = 'a'",
+                1,
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, script)
+                self.assertIn(
+                    "platform role initializer ownership guard differs",
+                    self.role_script_errors(mutated),
+                )
 
     def test_role_validator_rejects_object_acl_sweep_mutations(self) -> None:
         script = self.role_script()
@@ -702,9 +831,15 @@ class PlatformControlContractTests(unittest.TestCase):
                 "    'RESET ROLE' AS object_reset_role",
                 1,
             ),
-            "widened table privileges": script.replace(
-                "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')",
-                "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')",
+            "missing maintain cleanup": script.replace(
+                "  AND privilege.privilege_type IN\n"
+                "    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', "
+                "'REFERENCES', 'TRIGGER', 'MAINTAIN')\n"
+                "ORDER BY object_grantee_role.rolname",
+                "  AND privilege.privilege_type IN\n"
+                "    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', "
+                "'REFERENCES', 'TRIGGER')\n"
+                "ORDER BY object_grantee_role.rolname",
                 1,
             ),
             "widened relation kinds": script.replace(

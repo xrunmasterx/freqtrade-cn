@@ -151,6 +151,11 @@ inherited through `PUBLIC`, using each fixed login identity rather than relying 
 named-role ACL rows or administrator `SET ROLE` alone. Its database, schema, table,
 column, sequence, routine, and default-ACL checks must cover both explicit ACLs and
 hard-wired defaults represented by null catalog ACLs.
+Task 7.5 must contaminate fixed roles with routine ownership, direct routine
+`EXECUTE`, and table `MAINTAIN` authority. It must prove that a rerun fails closed
+while a fixed role owns the routine; after an administrator restores ownership, a
+rerun must remove the direct `EXECUTE` and `MAINTAIN` grants and each affected fixed
+login must be denied those operations.
 
 ## CI-only acceptance evidence
 
