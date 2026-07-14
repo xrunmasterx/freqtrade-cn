@@ -103,10 +103,19 @@ password files, preserves all other characters, resets dangerous role
 attributes and memberships, fails closed if a fixed role owns an object or the
 operator owns/receives default authority, removes database/schema/table/sequence/
 column authority with downstream cascades, then applies the exact allowlist. Residual
-column revocation executes as each ACL's recorded original grantor. It also
-revokes `TEMPORARY` and `CREATE` on `platform` from `PUBLIC`, so neither fixed
-fixed role inherits database DDL or temporary-table authority through PostgreSQL's
-default grants.
+ACL revocation executes as each ACL's recorded original grantor, including grants to
+PostgreSQL's `PUBLIC` pseudo-role whose catalog grantee is OID 0. Null ACLs are
+expanded with PostgreSQL 17's hard-wired defaults before reconciliation.
+
+This dedicated cluster revokes `PUBLIC` CONNECT, CREATE, and TEMPORARY authority on
+every database. In `platform`, it also removes `PUBLIC` authority from every
+non-system schema and its relations, sequences, columns, functions, and procedures;
+`pg_*` schemas and `information_schema` are not altered. PostgreSQL defaults for
+future objects created by `postgres` are hardened globally for routines and within
+`public` for tables, sequences, and routines. Remaining `PUBLIC` or operator default
+ACLs fail closed. The initializer then grants only the reviewed `platform`/`public`
+and table allowlists, so none of the fixed roles inherits database DDL or
+temporary-table authority through `PUBLIC`.
 
 ## Least privilege
 
@@ -118,7 +127,7 @@ It cannot update lifecycle state such as `runtime_instances.desired_state`.
 
 `platform_supervisor` receives CONNECT/USAGE, SELECT on the seven tables, and
 INSERT/UPDATE on the six Registry tables. Neither role receives DELETE,
-TRUNCATE, DDL, role-management, database-owner, broad default-table, or
+TRUNCATE, MAINTAIN, DDL, role-management, database-owner, broad default-table, or
 platform-control lifecycle authority. Root Safety checks the effective database
 matrix for both roles as `CONNECT=true`, `CREATE=false`, `TEMP=false`, then
 checks exact schema, table, column, sequence, ownership, membership, grantable,
@@ -130,13 +139,18 @@ SELECT plus INSERT on the seven fixed registration tables:
 `platform_catalog_revisions`, `adapter_template_revisions`, `state_allocations`,
 `secret_references`, `runtime_spec_revisions`, `runtime_instances`, and
 `runtime_audit_events`. It receives no sequence privilege, UPDATE, DELETE,
-TRUNCATE, REFERENCES, TRIGGER, secret-version authority, or lifecycle/Runtime
+TRUNCATE, REFERENCES, TRIGGER, MAINTAIN, secret-version authority, or lifecycle/Runtime
 Access table authority. The initializer skips absent allowlisted tables and is
 rerunnable after Alembic creates them.
 
 Task 7.4 provides structural and mutation-test evidence for this staged role but
 does not change the Root Safety workflow. Actual login probes as
 `platform_operator` are deferred with the operator service and CLI to Task 7.5.
+Task 7.5 must probe PostgreSQL 17 effective privileges, including authority
+inherited through `PUBLIC`, using each fixed login identity rather than relying on
+named-role ACL rows or administrator `SET ROLE` alone. Its database, schema, table,
+column, sequence, routine, and default-ACL checks must cover both explicit ACLs and
+hard-wired defaults represented by null catalog ACLs.
 
 ## CI-only acceptance evidence
 

@@ -121,9 +121,155 @@ JOIN pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
 WHERE granted_role.rolname = 'platform_operator'
 \gexec
 
-REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;
-REVOKE CREATE ON DATABASE platform FROM PUBLIC;
-REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+SELECT
+    format('SET ROLE %I', public_grantor_role.rolname) AS public_set_role,
+    format(
+        'REVOKE %s ON DATABASE %I FROM PUBLIC GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        database.datname,
+        public_grantor_role.rolname
+    ) AS public_revoke_privilege,
+    'RESET ROLE' AS public_reset_role
+FROM pg_database AS database
+CROSS JOIN LATERAL aclexplode(
+    COALESCE(database.datacl, acldefault('d', database.datdba))
+) AS privilege
+JOIN pg_roles AS public_grantor_role ON public_grantor_role.oid = privilege.grantor
+WHERE privilege.grantee = 0
+  AND privilege.privilege_type IN ('CONNECT', 'CREATE', 'TEMPORARY')
+ORDER BY database.datname, privilege.privilege_type, public_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', public_grantor_role.rolname) AS public_set_role,
+    format(
+        'REVOKE %s ON SCHEMA %I FROM PUBLIC GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        namespace.nspname,
+        public_grantor_role.rolname
+    ) AS public_revoke_privilege,
+    'RESET ROLE' AS public_reset_role
+FROM pg_namespace AS namespace
+CROSS JOIN LATERAL aclexplode(
+    COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+) AS privilege
+JOIN pg_roles AS public_grantor_role ON public_grantor_role.oid = privilege.grantor
+WHERE privilege.grantee = 0
+  AND privilege.privilege_type IN ('USAGE', 'CREATE')
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+ORDER BY namespace.nspname, privilege.privilege_type, public_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', public_grantor_role.rolname) AS public_set_role,
+    format(
+        'REVOKE %s ON TABLE %I.%I FROM PUBLIC GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        namespace.nspname,
+        relation.relname,
+        public_grantor_role.rolname
+    ) AS public_revoke_privilege,
+    'RESET ROLE' AS public_reset_role
+FROM pg_class AS relation
+JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+CROSS JOIN LATERAL aclexplode(
+    COALESCE(relation.relacl, acldefault('r', relation.relowner))
+) AS privilege
+JOIN pg_roles AS public_grantor_role ON public_grantor_role.oid = privilege.grantor
+WHERE privilege.grantee = 0
+  AND privilege.privilege_type IN
+    ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+ORDER BY namespace.nspname, relation.relname,
+    privilege.privilege_type, public_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', public_grantor_role.rolname) AS public_set_role,
+    format(
+        'REVOKE %s ON SEQUENCE %I.%I FROM PUBLIC GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        namespace.nspname,
+        relation.relname,
+        public_grantor_role.rolname
+    ) AS public_revoke_privilege,
+    'RESET ROLE' AS public_reset_role
+FROM pg_class AS relation
+JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+CROSS JOIN LATERAL aclexplode(
+    COALESCE(relation.relacl, acldefault('s', relation.relowner))
+) AS privilege
+JOIN pg_roles AS public_grantor_role ON public_grantor_role.oid = privilege.grantor
+WHERE privilege.grantee = 0
+  AND privilege.privilege_type IN ('USAGE', 'SELECT', 'UPDATE')
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+  AND relation.relkind = 'S'
+ORDER BY namespace.nspname, relation.relname,
+    privilege.privilege_type, public_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', public_grantor_role.rolname) AS public_set_role,
+    format(
+        'REVOKE %s (%I) ON TABLE %I.%I FROM PUBLIC GRANTED BY %I CASCADE',
+        privilege.privilege_type,
+        attribute.attname,
+        namespace.nspname,
+        relation.relname,
+        public_grantor_role.rolname
+    ) AS public_revoke_privilege,
+    'RESET ROLE' AS public_reset_role
+FROM pg_attribute AS attribute
+JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+CROSS JOIN LATERAL aclexplode(
+    COALESCE(attribute.attacl, acldefault('c', relation.relowner))
+) AS privilege
+JOIN pg_roles AS public_grantor_role ON public_grantor_role.oid = privilege.grantor
+WHERE privilege.grantee = 0
+  AND privilege.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND attribute.attnum > 0
+  AND NOT attribute.attisdropped
+ORDER BY namespace.nspname, relation.relname, attribute.attname,
+    privilege.privilege_type, public_grantor_role.rolname
+\gexec
+
+SELECT
+    format('SET ROLE %I', public_grantor_role.rolname) AS public_set_role,
+    format(
+        'REVOKE EXECUTE ON ROUTINE %I.%I(%s) FROM PUBLIC GRANTED BY %I CASCADE',
+        namespace.nspname,
+        routine.proname,
+        pg_get_function_identity_arguments(routine.oid),
+        public_grantor_role.rolname
+    ) AS public_revoke_privilege,
+    'RESET ROLE' AS public_reset_role
+FROM pg_proc AS routine
+JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+CROSS JOIN LATERAL aclexplode(
+    COALESCE(routine.proacl, acldefault('f', routine.proowner))
+) AS privilege
+JOIN pg_roles AS public_grantor_role ON public_grantor_role.oid = privilege.grantor
+WHERE privilege.grantee = 0
+  AND privilege.privilege_type = 'EXECUTE'
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname !~ '^pg_'
+ORDER BY namespace.nspname, routine.proname,
+    pg_get_function_identity_arguments(routine.oid), public_grantor_role.rolname
+\gexec
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+
 REVOKE ALL PRIVILEGES ON DATABASE platform FROM platform_control, platform_supervisor, platform_operator CASCADE;
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM platform_control, platform_supervisor, platform_operator CASCADE;
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM platform_control, platform_supervisor, platform_operator CASCADE;
@@ -163,11 +309,85 @@ BEGIN
         SELECT 1
         FROM pg_default_acl AS default_acl
         CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS default_privilege
-        JOIN pg_roles AS default_grantee_role
-          ON default_grantee_role.oid = default_privilege.grantee
-        WHERE default_grantee_role.rolname = 'platform_operator'
+        WHERE default_privilege.grantee = 0
+           OR default_privilege.grantee = (
+                SELECT oid FROM pg_roles WHERE rolname = 'platform_operator'
+            )
     ) THEN
         RAISE EXCEPTION 'unsupported_platform_operator_default_authority';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_database AS database
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(database.datacl, acldefault('d', database.datdba))
+        ) AS privilege
+        WHERE privilege.grantee = 0
+          AND privilege.privilege_type IN ('CONNECT', 'CREATE', 'TEMPORARY')
+        UNION ALL
+        SELECT 1
+        FROM pg_namespace AS namespace
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+        ) AS privilege
+        WHERE privilege.grantee = 0
+          AND privilege.privilege_type IN ('USAGE', 'CREATE')
+          AND namespace.nspname <> 'information_schema'
+          AND namespace.nspname !~ '^pg_'
+        UNION ALL
+        SELECT 1
+        FROM pg_class AS relation
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(relation.relacl, acldefault('r', relation.relowner))
+        ) AS privilege
+        WHERE privilege.grantee = 0
+          AND privilege.privilege_type IN
+            ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')
+          AND namespace.nspname <> 'information_schema'
+          AND namespace.nspname !~ '^pg_'
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+        UNION ALL
+        SELECT 1
+        FROM pg_class AS relation
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(relation.relacl, acldefault('s', relation.relowner))
+        ) AS privilege
+        WHERE privilege.grantee = 0
+          AND privilege.privilege_type IN ('USAGE', 'SELECT', 'UPDATE')
+          AND namespace.nspname <> 'information_schema'
+          AND namespace.nspname !~ '^pg_'
+          AND relation.relkind = 'S'
+        UNION ALL
+        SELECT 1
+        FROM pg_attribute AS attribute
+        JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(attribute.attacl, acldefault('c', relation.relowner))
+        ) AS privilege
+        WHERE privilege.grantee = 0
+          AND privilege.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+          AND namespace.nspname <> 'information_schema'
+          AND namespace.nspname !~ '^pg_'
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+        UNION ALL
+        SELECT 1
+        FROM pg_proc AS routine
+        JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+        CROSS JOIN LATERAL aclexplode(
+            COALESCE(routine.proacl, acldefault('f', routine.proowner))
+        ) AS privilege
+        WHERE privilege.grantee = 0
+          AND privilege.privilege_type = 'EXECUTE'
+          AND namespace.nspname <> 'information_schema'
+          AND namespace.nspname !~ '^pg_'
+    ) THEN
+        RAISE EXCEPTION 'unsupported_public_authority';
     END IF;
 
     IF EXISTS (

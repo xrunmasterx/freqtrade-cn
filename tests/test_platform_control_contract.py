@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +51,9 @@ class PlatformControlContractTests(unittest.TestCase):
             "`platform_operator_db_password`",
             "The operator service, image copy, CLI, and executable PostgreSQL probes arrive "
             "atomically in Task 7.5",
+            "none of the fixed roles inherits database DDL or temporary-table authority",
+            "Task 7.5 must probe PostgreSQL 17 effective privileges, including authority "
+            "inherited through `PUBLIC`",
         )
         for statement in required:
             self.assertIn(statement, normalized)
@@ -335,10 +339,12 @@ class PlatformControlContractTests(unittest.TestCase):
         )
         self.assertIn("pg_read_file", script)
         self.assertIn("format(", script)
-        self.assertIn("REVOKE CREATE ON DATABASE platform FROM PUBLIC", script)
-        self.assertIn("REVOKE CREATE ON SCHEMA public FROM PUBLIC", script)
+        self.assertIn("ACLDEFAULT('D', DATABASE.DATDBA)", script.upper())
+        self.assertIn("PRIVILEGE.GRANTEE = 0", script.upper())
         self.assertIn("UPDATE (status, result_code, completed_at)", script)
-        self.assertNotIn("ALTER DEFAULT PRIVILEGES", script.upper())
+        self.assertEqual(
+            script.upper().count("ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES"), 4
+        )
         self.assertNotIn("GRANT ALL", script.upper())
         self.assertNotIn("GRANT DELETE", script.upper())
         self.assertNotIn("GRANT TRUNCATE", script.upper())
@@ -351,29 +357,130 @@ class PlatformControlContractTests(unittest.TestCase):
         )
         self.assertIn("platform role initializer broadens database authority", errors)
 
-    def test_role_validator_requires_exact_public_temporary_revoke(self) -> None:
+    def test_role_script_closes_public_effective_authority(self) -> None:
         safe_script = self.role_script()
-        self.assertIn(
-            "REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;", safe_script
+        compact = runtime_contract._active_platform_role_script(safe_script)
+        compact = re.sub(r"\(\s+", "(", compact)
+        compact = re.sub(r"\s+\)", ")", compact)
+        cleanup_fragments = (
+            "ACLEXPLODE(COALESCE(DATABASE.DATACL, ACLDEFAULT('D', DATABASE.DATDBA)))",
+            "ACLEXPLODE(COALESCE(NAMESPACE.NSPACL, ACLDEFAULT('N', NAMESPACE.NSPOWNER)))",
+            "ACLEXPLODE(COALESCE(RELATION.RELACL, ACLDEFAULT('R', RELATION.RELOWNER)))",
+            "ACLEXPLODE(COALESCE(RELATION.RELACL, ACLDEFAULT('S', RELATION.RELOWNER)))",
+            "ACLEXPLODE(COALESCE(ATTRIBUTE.ATTACL, ACLDEFAULT('C', RELATION.RELOWNER)))",
+            "ACLEXPLODE(COALESCE(ROUTINE.PROACL, ACLDEFAULT('F', ROUTINE.PROOWNER)))",
+            "REVOKE %S ON DATABASE %I FROM PUBLIC GRANTED BY %I CASCADE",
+            "REVOKE %S ON SCHEMA %I FROM PUBLIC GRANTED BY %I CASCADE",
+            "REVOKE %S ON TABLE %I.%I FROM PUBLIC GRANTED BY %I CASCADE",
+            "REVOKE %S ON SEQUENCE %I.%I FROM PUBLIC GRANTED BY %I CASCADE",
+            "REVOKE %S (%I) ON TABLE %I.%I FROM PUBLIC GRANTED BY %I CASCADE",
+            "REVOKE EXECUTE ON ROUTINE %I.%I(%S) FROM PUBLIC GRANTED BY %I CASCADE",
+            "RAISE EXCEPTION 'UNSUPPORTED_PUBLIC_AUTHORITY'",
         )
+        for fragment in cleanup_fragments:
+            self.assertIn(fragment, compact)
+        self.assertGreaterEqual(compact.count("PRIVILEGE.GRANTEE = 0"), 7)
+        self.assertEqual(
+            compact.count(
+                "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', "
+                "'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')"
+            ),
+            2,
+        )
+        self.assertIn("NAMESPACE.NSPNAME <> 'INFORMATION_SCHEMA'", compact)
+        self.assertIn("NAMESPACE.NSPNAME !~ '^PG_'", compact)
+
+        default_hardening = (
+            "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES REVOKE EXECUTE ON ROUTINES "
+            "FROM PUBLIC;",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES IN SCHEMA PUBLIC REVOKE ALL "
+            "PRIVILEGES ON TABLES FROM PUBLIC;",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES IN SCHEMA PUBLIC REVOKE ALL "
+            "PRIVILEGES ON SEQUENCES FROM PUBLIC;",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES IN SCHEMA PUBLIC REVOKE EXECUTE "
+            "ON ROUTINES FROM PUBLIC;",
+        )
+        for fragment in default_hardening:
+            self.assertEqual(compact.count(fragment), 1)
         self.assertEqual(self.role_script_errors(safe_script), [])
 
         mutations = {
-            "removed": safe_script.replace(
-                "REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;\n", "", 1
+            "database null acl default omitted": safe_script.replace(
+                "COALESCE(database.datacl, acldefault('d', database.datdba))",
+                "database.datacl",
+                1,
             ),
-            "redirected": safe_script.replace(
-                "REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;",
-                "REVOKE TEMPORARY ON DATABASE platform FROM platform_control;",
+            "public oid zero omitted": safe_script.replace(
+                "privilege.grantee = 0",
+                "FALSE",
+                1,
+            ),
+            "database revoke omitted": safe_script.replace(
+                "FROM PUBLIC GRANTED BY %I CASCADE',\n"
+                "        privilege.privilege_type,\n"
+                "        database.datname,",
+                "FROM platform_operator GRANTED BY %I CASCADE',\n"
+                "        privilege.privilege_type,\n"
+                "        database.datname,",
+                1,
+            ),
+            "routine revoke omitted": safe_script.replace(
+                "REVOKE EXECUTE ON ROUTINE %I.%I(%s) FROM PUBLIC",
+                "REVOKE EXECUTE ON ROUTINE %I.%I(%s) FROM platform_operator",
+                1,
+            ),
+            "postgres routine default omitted": safe_script.replace(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres REVOKE EXECUTE ON ROUTINES "
+                "FROM PUBLIC;\n",
+                "",
+                1,
+            ),
+            "default public guard omitted": safe_script.replace(
+                "default_privilege.grantee = 0",
+                "FALSE",
                 1,
             ),
         }
         for name, mutated in mutations.items():
             with self.subTest(name=name):
-                self.assertIn(
-                    "platform role initializer database authority differs",
-                    self.role_script_errors(mutated),
+                self.assertNotEqual(mutated, safe_script)
+                self.assertTrue(
+                    any(
+                        "public authority" in error
+                        or "default privilege" in error
+                        or "default authority" in error
+                        for error in self.role_script_errors(mutated)
+                    )
                 )
+
+    def test_role_validator_rejects_public_grants(self) -> None:
+        grants = (
+            "GRANT UPDATE ON TABLE public.runtime_instances TO PUBLIC;",
+            "GRANT UPDATE (desired_state) ON TABLE public.runtime_instances TO PUBLIC;",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public "
+            "GRANT UPDATE ON TABLES TO PUBLIC;",
+        )
+        for grant in grants:
+            with self.subTest(grant=grant):
+                errors = self.role_script_errors(self.role_script() + "\n" + grant + "\n")
+                self.assertIn("platform role initializer broadens database authority", errors)
+
+    def test_role_validator_rejects_public_default_hardening_reordering(self) -> None:
+        script = self.role_script()
+        default_revoke = (
+            "ALTER DEFAULT PRIVILEGES FOR ROLE postgres REVOKE EXECUTE ON ROUTINES "
+            "FROM PUBLIC;\n"
+        )
+        moved = script.replace(default_revoke, "", 1).replace(
+            "DO $authority_guard$\n",
+            default_revoke + "\nDO $authority_guard$\n",
+            1,
+        )
+        self.assertNotEqual(moved, script)
+        self.assertIn(
+            "platform role initializer public authority order differs",
+            self.role_script_errors(moved),
+        )
 
     def test_role_password_normalization_removes_only_one_terminal_newline(self) -> None:
         script = self.role_script().lower()
@@ -400,7 +507,7 @@ class PlatformControlContractTests(unittest.TestCase):
             ),
             6,
         )
-        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 11)
+        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 17)
         self.assertGreaterEqual(script.count(" CASCADE"), 5)
 
     def test_role_script_fails_closed_on_operator_ownership_and_default_authority(self) -> None:
@@ -419,10 +526,10 @@ class PlatformControlContractTests(unittest.TestCase):
             "JOIN PG_ROLES AS DEFAULT_OWNER_ROLE ON "
             "DEFAULT_OWNER_ROLE.OID = DEFAULT_ACL.DEFACLROLE",
             "CROSS JOIN LATERAL ACLEXPLODE(DEFAULT_ACL.DEFACLACL) AS DEFAULT_PRIVILEGE",
-            "JOIN PG_ROLES AS DEFAULT_GRANTEE_ROLE ON "
-            "DEFAULT_GRANTEE_ROLE.OID = DEFAULT_PRIVILEGE.GRANTEE",
             "DEFAULT_OWNER_ROLE.ROLNAME = 'PLATFORM_OPERATOR'",
-            "DEFAULT_GRANTEE_ROLE.ROLNAME = 'PLATFORM_OPERATOR'",
+            "DEFAULT_PRIVILEGE.GRANTEE = 0",
+            "DEFAULT_PRIVILEGE.GRANTEE = ( SELECT OID FROM PG_ROLES WHERE "
+            "ROLNAME = 'PLATFORM_OPERATOR' )",
             "RAISE EXCEPTION 'UNSUPPORTED_PLATFORM_OPERATOR_DEFAULT_AUTHORITY'",
         )
         for fragment in default_fragments:
@@ -781,7 +888,10 @@ class PlatformControlContractTests(unittest.TestCase):
             "missing default grantee guard": (
                 "platform role initializer default authority guard differs",
                 script.replace(
-                    "default_grantee_role.rolname = 'platform_operator'",
+                    "default_privilege.grantee = (\n"
+                    "                SELECT oid FROM pg_roles WHERE "
+                    "rolname = 'platform_operator'\n"
+                    "            )",
                     "FALSE",
                     1,
                 ),
