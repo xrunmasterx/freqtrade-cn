@@ -10,5 +10,5 @@
   - 7.1 Catalog/provenance correction: complete - backend `21ffad636..48573a58c`, independent review PASS with zero findings
   - 7.2 committed paper-probe artifacts: complete - root `526aed700..9bf9b8f95`, one independent review FAIL/fix round, final re-review PASS with zero findings
   - 7.3 atomic backend registration: complete - backend `48573a58c..c79362adc`, two independent review FAIL/fix rounds, final re-review PASS with zero findings; real PostgreSQL gate remains mandatory in 7.5 Root Safety
-  - 7.4 least-privilege one-shot operator boundary: pending
+  - 7.4 least-privilege operator authority foundation: complete - root `29d4478..3f1754c`, two independent review FAIL/fix rounds, final re-review PASS with zero findings; one-shot service and real PostgreSQL effective-authority gate move atomically with the typed CLI in 7.5
   - 7.5 CLI/Root Safety/gitlink closure: pending
