@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
+
+from tools.committed_git import CommittedGitStore
 
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
@@ -130,152 +131,8 @@ class CommittedTemplate:
     source_commit: str
 
 
-@dataclass(frozen=True, slots=True)
-class _GitContext:
-    root: Path
-    commit: str
-
-
 class _DuplicateJsonKey(ValueError):
     pass
-
-
-def _run_git(root: Path, *arguments: str, error: str = "Git operation failed") -> bytes:
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "--no-replace-objects",
-                "-c",
-                "credential.interactive=never",
-                "-C",
-                str(root),
-                *arguments,
-            ],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError:
-        raise ValueError(error) from None
-    if result.returncode != 0:
-        raise ValueError(error)
-    return result.stdout
-
-
-def _run_git_returncode(root: Path, *arguments: str) -> int:
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "--no-replace-objects",
-                "-c",
-                "credential.interactive=never",
-                "-C",
-                str(root),
-                *arguments,
-            ],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        raise ValueError("Git operation failed") from None
-    return result.returncode
-
-
-def _exact_git_root(root: Path) -> Path:
-    requested = Path(root)
-    try:
-        requested_resolved = requested.resolve(strict=True)
-    except OSError:
-        raise ValueError("root must be the exact Git toplevel") from None
-    output = _run_git(
-        requested,
-        "rev-parse",
-        "--show-toplevel",
-        error="root must be the exact Git toplevel",
-    )
-    try:
-        toplevel = Path(output.decode("utf-8").strip()).resolve(strict=True)
-    except (OSError, UnicodeDecodeError):
-        raise ValueError("root must be the exact Git toplevel") from None
-    if requested_resolved != toplevel:
-        raise ValueError("root must be the exact Git toplevel")
-    return toplevel
-
-
-def _resolve_commit(root: Path, commit: str) -> str:
-    if not isinstance(commit, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
-        raise ValueError("commit must be a full lowercase Git identity")
-    object_type = _run_git(
-        root,
-        "cat-file",
-        "-t",
-        commit,
-        error="commit identity must name a commit object",
-    )
-    if object_type != b"commit\n":
-        raise ValueError("commit identity must name a commit object")
-    resolved_bytes = _run_git(
-        root,
-        "rev-parse",
-        "--verify",
-        commit,
-        error="commit identity must name a commit object",
-    )
-    try:
-        resolved = resolved_bytes.decode("ascii").strip()
-    except UnicodeDecodeError:
-        raise ValueError("commit identity must name a commit object") from None
-    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", resolved):
-        raise ValueError("commit identity must name a commit object")
-    if _run_git_returncode(root, "merge-base", "--is-ancestor", resolved, "HEAD") != 0:
-        raise ValueError("commit must be an ancestor of HEAD")
-    return resolved
-
-
-def _require_clean_trusted_paths(root: Path) -> None:
-    status = _run_git(
-        root,
-        "status",
-        "--porcelain=v1",
-        "-z",
-        "--untracked-files=all",
-        "--ignored=matching",
-        "--ignore-submodules=all",
-        "--",
-        "ops/adapter-templates",
-        "ops/runtime-policies",
-        error="template checkout cleanliness check failed",
-    )
-    if status:
-        raise ValueError("template checkout must be clean")
-    index_entries = _run_git(
-        root,
-        "ls-files",
-        "-v",
-        "-z",
-        "--",
-        "ops/adapter-templates",
-        "ops/runtime-policies",
-        error="template checkout cleanliness check failed",
-    )
-    if any(
-        record[:1] in (b"h", b"S", b"s")
-        for record in index_entries.split(b"\0")
-        if record
-    ):
-        raise ValueError("template checkout must be clean")
-
-
-def _trusted_context(root: Path, commit: str) -> _GitContext:
-    exact_root = _exact_git_root(root)
-    resolved_commit = _resolve_commit(exact_root, commit)
-    _require_clean_trusted_paths(exact_root)
-    return _GitContext(root=exact_root, commit=resolved_commit)
 
 
 def _is_artifact_path(path: str) -> bool:
@@ -289,41 +146,16 @@ def _is_artifact_path(path: str) -> bool:
     return _IDENTIFIER.fullmatch(template_id) is not None
 
 
-def _blob(context: _GitContext, path: str) -> bytes:
-    tree_entry = _run_git(
-        context.root,
-        "ls-tree",
-        "-z",
-        context.commit,
-        "--",
-        path,
-        error="required artifact metadata is unavailable",
-    )
-    records = [record for record in tree_entry.split(b"\0") if record]
-    if len(records) != 1:
-        raise ValueError("required artifact is missing")
-    try:
-        metadata, encoded_path = records[0].split(b"\t", 1)
-        mode, object_type, _object_id = metadata.split(b" ", 2)
-        actual_path = encoded_path.decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        raise ValueError("required artifact metadata is invalid") from None
-    if actual_path != path:
-        raise ValueError("required artifact is missing")
-    if mode != b"100644" or object_type != b"blob":
-        raise ValueError("artifact must be a regular 100644 blob")
-    return _run_git(
-        context.root,
-        "show",
-        f"{context.commit}:{path}",
-        error="required artifact blob is unavailable",
-    )
-
-
 def git_blob(root: Path, commit: str, path: str) -> bytes:
     if not isinstance(path, str) or not _is_artifact_path(path):
         raise ValueError("artifact path is not permitted")
-    return _blob(_trusted_context(root, commit), path)
+    store = CommittedGitStore(root, commit)
+    store.assert_template_checkout_clean()
+    for field, policy_path in _POLICY_PATHS.items():
+        if path == policy_path:
+            return store.read_policy_blob(field)
+    template_id = path[len("ops/adapter-templates/") : -len(".json")]
+    return store.read_template_blob(template_id)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -392,15 +224,17 @@ def _policy_ids(document: bytes) -> frozenset[str]:
     return frozenset(policy_ids)
 
 
-def _load_registry(context: _GitContext) -> ClosedPolicyRegistry:
+def _load_registry(store: CommittedGitStore) -> ClosedPolicyRegistry:
     values = {
-        field: _policy_ids(_blob(context, path)) for field, path in _POLICY_PATHS.items()
+        field: _policy_ids(store.read_policy_blob(field)) for field in _POLICY_PATHS
     }
-    return ClosedPolicyRegistry(**values, source_commit=context.commit)
+    return ClosedPolicyRegistry(**values, source_commit=store.root_commit)
 
 
 def load_closed_policy_registry(root: Path, commit: str) -> ClosedPolicyRegistry:
-    return _load_registry(_trusted_context(root, commit))
+    store = CommittedGitStore(root, commit)
+    store.assert_template_checkout_clean()
+    return _load_registry(store)
 
 
 def _require_string(payload: dict[str, object], field: str) -> str:
@@ -497,11 +331,12 @@ def read_committed_template(
 ) -> CommittedTemplate:
     if not isinstance(template_id, str) or _IDENTIFIER.fullmatch(template_id) is None:
         raise ValueError("template_id must be a valid platform identifier")
-    context = _trusted_context(root, commit)
+    store = CommittedGitStore(root, commit)
+    store.assert_template_checkout_clean()
     source_path = f"ops/adapter-templates/{template_id}.json"
-    document = _blob(context, source_path)
+    document = store.read_template_blob(template_id)
     payload = _canonical_payload(document)
-    registry = _load_registry(context)
+    registry = _load_registry(store)
     validated_payload = validate_template(payload, registry)
     if validated_payload["template_id"] != template_id:
         raise ValueError("template id does not match its source path")
@@ -510,5 +345,5 @@ def read_committed_template(
         canonical_json=document.decode("utf-8"),
         digest=hashlib.sha256(document).hexdigest(),
         source_path=source_path,
-        source_commit=context.commit,
+        source_commit=store.root_commit,
     )

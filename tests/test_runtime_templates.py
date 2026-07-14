@@ -167,6 +167,8 @@ class GitFixture:
 
 
 try:
+    from tools.committed_git import CommittedGitStore
+    import tools.runtime_templates as runtime_templates_module
     from tools.runtime_templates import (
         git_blob,
         load_closed_policy_registry,
@@ -192,6 +194,10 @@ class RuntimeTemplatesAvailabilityTests(unittest.TestCase):
         self.assertTrue(callable(load_closed_policy_registry))
         self.assertTrue(callable(validate_template))
         self.assertTrue(callable(git_blob))
+
+    @unittest.skipIf(RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing")
+    def test_uses_the_shared_committed_git_store(self) -> None:
+        self.assertIs(runtime_templates_module.CommittedGitStore, CommittedGitStore)
 
 
 @unittest.skipIf(RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing")
