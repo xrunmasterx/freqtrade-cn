@@ -142,6 +142,7 @@ services:
   platform-operator:
     profiles: ["platform-operator"]
     image: freqtrade-cn-operator:local
+    pull_policy: never
     restart: "no"
     user: "1000:1000"
     read_only: true

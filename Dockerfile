@@ -89,11 +89,15 @@ RUN case "$PLATFORM_OPERATOR_ROOT_COMMIT" in \
       40|64) ;; \
       *) exit 1 ;; \
     esac \
-  && install -d -o root -g root -m 0555 \
+  && install -d -o ftuser -g ftuser -m 0555 \
+    /opt/platform-operator/repository \
     /opt/platform-operator/repository/.git \
+    /opt/platform-operator/repository/ops \
     /opt/platform-operator/repository/ops/adapter-templates \
     /opt/platform-operator/repository/ops/runtime-policies \
     /opt/platform-operator/repository/ops/config \
+    /opt/platform-operator/repository/ft_userdata \
+    /opt/platform-operator/repository/ft_userdata/user_data \
     /opt/platform-operator/repository/ft_userdata/user_data/strategies \
   && install -o root -g root -m 0444 /dev/null \
     /opt/platform-operator/repository/ft_userdata/user_data/config.example.json \
@@ -103,6 +107,7 @@ RUN case "$PLATFORM_OPERATOR_ROOT_COMMIT" in \
     /opt/platform-operator/repository/ops/config/trading-safety.json \
   && printf '%s\n' "$PLATFORM_OPERATOR_ROOT_COMMIT" \
     > /opt/platform-operator/root-commit \
+  && chown root:root /opt/platform-operator/root-commit \
   && chmod 0444 /opt/platform-operator/root-commit
 
 WORKDIR /opt/platform-operator

@@ -1519,6 +1519,7 @@ def validate_platform_compose(
         "image": "freqtrade-cn-operator:local",
         "init": True,
         "networks": {"platform-db": None},
+        "pull_policy": "never",
         "read_only": True,
         "restart": "no",
         "secrets": [

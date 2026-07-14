@@ -50,6 +50,11 @@ class PlatformControlContractTests(unittest.TestCase):
             "normal recursive checkout",
             "Docker administrators remain platform root",
             "outside the operator service isolation claim",
+            "mounted `.git` and reviewed paths must be readable by UID 1000 and "
+            "ownership-compatible with Git",
+            "`freqtrade-cn-operator:local` is only an alias of a verified image ID",
+            "docker image tag <verified-image-id> freqtrade-cn-operator:local",
+            "must fail rather than pull",
             "`rotate-secrets --service platform-operator` rotates only "
             "`platform_operator_db_password`",
             "none of the fixed roles inherits database DDL or temporary-table authority",
@@ -154,6 +159,7 @@ class PlatformControlContractTests(unittest.TestCase):
         operator = self.compose["services"]["platform-operator"]
         self.assertEqual(operator["profiles"], ["platform-operator"])
         self.assertEqual(operator["image"], "freqtrade-cn-operator:local")
+        self.assertEqual(operator["pull_policy"], "never")
         self.assertEqual(operator["restart"], "no")
         self.assertEqual(operator["user"], "1000:1000")
         self.assertTrue(operator["read_only"])
@@ -267,6 +273,7 @@ class PlatformControlContractTests(unittest.TestCase):
             ("depends_on", {"platform-postgres": {"condition": "service_healthy"}}),
             ("build", {"context": "."}),
             ("container_name", "operator"),
+            ("pull_policy", "always"),
         ):
             mutated = copy.deepcopy(self.compose)
             mutated["services"]["platform-operator"][field] = value
@@ -317,6 +324,20 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertIn('*[!0-9a-f]*', operator_stage)
         self.assertIn('${#PLATFORM_OPERATOR_ROOT_COMMIT}', operator_stage)
         self.assertNotIn("grep -E", operator_stage)
+        checkout_directories = operator_stage.split(
+            "install -d -o ftuser -g ftuser -m 0555", 1
+        )[1].split("&& install -o root -g root -m 0444", 1)[0]
+        for directory in (
+            "/opt/platform-operator/repository",
+            "/opt/platform-operator/repository/.git",
+            "/opt/platform-operator/repository/ops/adapter-templates",
+            "/opt/platform-operator/repository/ops/runtime-policies",
+            "/opt/platform-operator/repository/ops/config",
+            "/opt/platform-operator/repository/ft_userdata/user_data/strategies",
+        ):
+            self.assertIn(directory, checkout_directories)
+        self.assertIn("chown root:root /opt/platform-operator/root-commit", operator_stage)
+        self.assertIn("chmod 0444 /opt/platform-operator/root-commit", operator_stage)
 
     def test_platform_control_is_only_fixed_loopback_application_port(self) -> None:
         service = self.compose["services"]["platform-control"]

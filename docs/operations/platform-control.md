@@ -38,17 +38,26 @@ the full worktree, runtime state, secret roots, trading configuration, Docker
 socket, host ports, and lifecycle authority are absent.
 
 Normal use starts with a normal recursive checkout; linked-worktree `.git`
-indirection is unsupported. PostgreSQL must already be healthy before any
-database-backed command. Build the reviewed carrier with
-`python tools/image_provenance.py build-operator`, then invoke its typed surface,
-for example:
+indirection is unsupported. The mounted `.git` and reviewed paths must be
+readable by UID 1000 and ownership-compatible with Git. CI prepares ownership
+only inside its temporary checkout before running the carrier. PostgreSQL must
+already be healthy before any database-backed command.
+
+First run `python tools/image_provenance.py build-operator --print-image-id` and
+capture its single verified image ID. Only after that command succeeds, create
+the fixed Compose alias and invoke the typed surface:
 
 ```text
+docker image tag <verified-image-id> freqtrade-cn-operator:local
 docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-template validate
 docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-template publish --actor platform-operator
 docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-registry compile --actor platform-operator
 docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-registry status --instance-id phase2-spot-paper-probe
 ```
+
+`freqtrade-cn-operator:local` is only an alias of a verified image ID; it is not
+a trusted provenance identity. The service uses `pull_policy: never`, so a
+missing alias must fail rather than pull an image.
 
 The image owns the reviewed root commit and CLI entrypoint. Docker administrators
 remain platform root: they can replace an image, entrypoint, mount, or environment
