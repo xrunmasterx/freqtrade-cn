@@ -52,13 +52,23 @@ RUNTIME_ROOT_COMMAND = (
     "test_actual_research_profile_paths_resolve_below_read_only_input -v"
 )
 BUILD_IMAGE_STEP = "Build integrated image"
+BUILD_OPERATOR_IMAGE_STEP = "Build platform operator image"
 PLATFORM_CI_STEPS = (
     "Start platform PostgreSQL",
     "Upgrade platform schema",
     "Run platform PostgreSQL integration tests",
-    "Run Phase 2A backend regressions",
+    "Run Phase 2B backend regressions",
     "Verify platform-control least privilege",
     "Clean platform control plane",
+)
+OPERATOR_CI_STEPS = (
+    "Run platform-operator CLI acceptance",
+    "Verify platform-operator least privilege",
+)
+ALL_PLATFORM_CI_STEPS = (
+    *PLATFORM_CI_STEPS[:4],
+    *OPERATOR_CI_STEPS,
+    *PLATFORM_CI_STEPS[4:],
 )
 SECRET_SCAN_STEP = "Scan current committed trees for secrets"
 GITLEAKS_IMAGE = (
@@ -403,6 +413,62 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "--publish 127.0.0.1:55432:5432",
         "docker network connect freqtrade-platform-ci platform-postgres-ci",
     ),
+    OPERATOR_CI_STEPS[0]: (
+        "git clone --no-local --no-checkout",
+        "git checkout --detach",
+        "submodule update --init --recursive",
+        'sudo chown 1000:1000 "${operator_checkout}"',
+        'sudo chown -R 1000:1000 "${operator_checkout}/.git"',
+        "validate_first=",
+        "validate_second=",
+        "publish_first=",
+        "publish_second=",
+        "register_first=",
+        "register_second=",
+        "compile_first=",
+        "compile_second=",
+        "status_first=",
+        "status_second=",
+        "docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci",
+        "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
+        "docker network rm freqtrade-cn_platform-db",
+        "operator_database_networks=",
+        'test "${operator_database_networks}" = "freqtrade-platform-ci"',
+        "sudo rm -rf",
+    ),
+    OPERATOR_CI_STEPS[1]: (
+        "operator_password=",
+        "role_state=",
+        'test "${role_state}" = "t|f|f|f|f|f|f"',
+        "database_schema_state=",
+        'test "${database_schema_state}" = "t|f|f|t|f"',
+        "operator_table_state=",
+        'test "${operator_table_state}" = "0"',
+        "direct_operator_table_acl=",
+        'test "${direct_operator_table_acl}" = "14|14|0"',
+        "direct_column_acl_count=",
+        'test "${direct_column_acl_count}" = "0"',
+        'expect_operator_denied temp "CREATE TEMP TABLE',
+        'expect_operator_denied create "CREATE SCHEMA',
+        'expect_operator_denied update "UPDATE runtime_instances',
+        'expect_operator_denied delete "DELETE FROM runtime_instances"',
+        'expect_operator_denied truncate "TRUNCATE TABLE runtime_instances"',
+        'expect_operator_denied secret-version "SELECT * FROM secret_version_metadata"',
+        'expect_operator_denied lifecycle "SELECT * FROM runtime_lifecycle_jobs"',
+        "owner_reconcile_status=$?",
+        'test "${owner_reconcile_status}" -ne 0',
+        "null_acl_effective=",
+        'test "${null_acl_effective}" = "t|t"',
+        "residual_operator_authority=",
+        'test "${residual_operator_authority}" = "f|f|f|f|f|f"',
+        "public_default_acl_count=",
+        'test "${public_default_acl_count}" = "0"',
+        "public_effective_acl_count=",
+        'test "${public_effective_acl_count}" = "0"',
+        "expect_operator_denied sequence",
+        "expect_operator_denied routine",
+        'expect_operator_denied maintain "VACUUM public.runtime_instances"',
+    ),
     PLATFORM_CI_STEPS[4]: (
         "docker network disconnect bridge platform-postgres-ci",
         "database_networks=\"$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')\"",
@@ -472,7 +538,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "docker rm -f platform-control-ci platform-postgres-ci",
         "docker network rm freqtrade-platform-ci",
         "docker network rm freqtrade-platform-ingress-ci",
-        "docker ps --all --quiet --filter",
+        "docker ps --all --quiet --filter name='^/platform-control-ci$' --filter name='^/platform-postgres-ci$'",
         "docker network inspect freqtrade-platform-ci",
         "docker network inspect freqtrade-platform-ingress-ci",
         "comm -13",
@@ -480,6 +546,11 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after"',
         'rm -rf "${platform_ci_dir}"',
         'test ! -e "${platform_ci_dir}"',
+        "--format '{{range .RepoTags}}{{println .}}{{end}}'",
+        'docker image rm "${operator_tag}"',
+        'docker image rm --force "${reviewed_operator_image_id}"',
+        "docker image inspect freqtrade-cn-operator:local",
+        'docker image inspect "${reviewed_operator_image_id}"',
         'exit "${cleanup_status}"',
     ),
     SECRET_SCAN_STEP: (
@@ -523,7 +594,7 @@ def executable_statement_position(statements: list[str], fragment: str) -> int:
 def validate_root_safety_workflow(workflow: str) -> list[str]:
     errors: list[str] = []
     scripts: dict[str, str] = {}
-    for step_name in (*PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
+    for step_name in (*ALL_PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
         try:
             scripts[step_name] = step_run_script(workflow, step_name)
         except AssertionError as error:
@@ -630,6 +701,55 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     )
     if active_shell.count(sentinel_matcher) != 1:
         errors.append("least-privilege query sentinel matcher differs")
+
+    operator_privilege = scripts.get(OPERATOR_CI_STEPS[1], "")
+    operator_sql_payload = "\n".join(executable_sql_payloads(operator_privilege))
+    for fragment in (
+        "CREATE FUNCTION public.platform_operator_owned_probe()",
+        "OWNER TO platform_operator",
+        "GRANT EXECUTE ON FUNCTION public.platform_operator_owned_probe()",
+        "GRANT MAINTAIN ON TABLE public.runtime_instances TO platform_operator",
+        "GRANT TEMPORARY, CREATE ON DATABASE platform TO PUBLIC",
+        "GRANT CREATE ON SCHEMA public TO PUBLIC",
+        "GRANT SELECT ON TABLE public.runtime_instances TO PUBLIC",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE postgres",
+    ):
+        if fragment not in operator_sql_payload:
+            errors.append(f"operator least-privilege SQL payload missing: {fragment}")
+    operator_psql_bodies = active_shell_function_bodies(
+        operator_privilege, "operator_psql"
+    )
+    if len(operator_psql_bodies) != 1 or any(
+        fragment not in operator_psql_bodies[0]
+        for fragment in (
+            'PGPASSWORD="${operator_password}"',
+            "--host 127.0.0.1",
+            "--username platform_operator",
+            "--dbname platform",
+        )
+    ):
+        errors.append("operator login helper differs")
+    operator_denial_bodies = active_shell_function_bodies(
+        operator_privilege, "expect_operator_denied"
+    )
+    if len(operator_denial_bodies) != 1 or any(
+        fragment not in operator_denial_bodies[0]
+        for fragment in (
+            "operator_psql --command",
+            "denied_status=$?",
+            'test "${denied_status}" -ne 0',
+            "permission denied|must be owner of",
+        )
+    ):
+        errors.append("operator denial helper differs")
+    default_acl = operator_sql_payload.find(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE postgres"
+    )
+    null_probe = operator_sql_payload.find(
+        "CREATE FUNCTION public.platform_operator_public_null_probe()"
+    )
+    if default_acl < 0 or null_probe < 0 or default_acl >= null_probe:
+        errors.append("operator null ACL contamination order differs")
 
     denial_bodies = active_shell_function_bodies(least_privilege, "expect_role_denied")
     if len(denial_bodies) != 1:
@@ -741,6 +861,10 @@ def run_cleanup_with_stubbed_volumes(
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     cleanup_script = step_run_script(workflow, PLATFORM_CI_STEPS[5])
+    cleanup_script = cleanup_script.replace(
+        "${{ steps.reviewed-operator-image.outputs.image_id }}",
+        "reviewed-operator-image-id",
+    )
 
     def inventory(names: tuple[str, ...]) -> str:
         return "".join(f"{name}\n" for name in names)
@@ -1545,7 +1669,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
     def test_reviewed_run_scripts_pass_bash_syntax_validation(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        for step_name in (*PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
+        for step_name in (*ALL_PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
             script = step_run_script(workflow, step_name)
             expanded = re.sub(r"\$\{\{.*?\}\}", "reviewed-ci-value", script)
             with self.subTest(step=step_name):
@@ -1887,6 +2011,206 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         mutated = workflow.replace(step, mutated_step, 1)
         mutated += f"\n      - name: Unrelated platform text\n        run: echo '{marker}'\n"
         self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_operator_image_is_built_from_reviewed_provenance_and_alias_verified(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP))
+        for fragment in (
+            "id: reviewed-operator-image",
+            "python tools/image_provenance.py build-operator --print-image-id",
+            'echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"',
+            'docker tag "${image_id}" freqtrade-cn-operator:local',
+            "docker image inspect --format '{{.Id}}' freqtrade-cn-operator:local",
+            'test "${alias_id}" = "${image_id}"',
+        ):
+            self.assertIn(fragment, step)
+        self.assertNotIn("docker pull", step)
+        self.assertLess(
+            workflow.index(f"      - name: {BUILD_IMAGE_STEP}"),
+            workflow.index(f"      - name: {BUILD_OPERATOR_IMAGE_STEP}"),
+        )
+
+    def test_operator_steps_have_fixed_order_after_phase2b_regressions(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        positions = [
+            workflow.index(f"      - name: {name}")
+            for name in ALL_PLATFORM_CI_STEPS
+        ]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_postgres_provisions_operator_secret_and_runs_zero_skip_selectors(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        start = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[0]))
+        self.assertIn("platform_operator_db_password \\", start)
+        self.assertIn(
+            '--mount type=bind,src="${platform_ci_dir}/platform_operator_db_password",dst=/run/secrets/platform_operator_db_password,readonly',
+            start,
+        )
+        postgres = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[2]))
+        for selector in (
+            "tests/platform/test_template_repository_postgres.py",
+            "tests/platform/test_runtime_registration_repository_postgres.py",
+        ):
+            self.assertIn(selector, postgres)
+        self.assertIn("if skipped:", postgres)
+        self.assertIn("platform PostgreSQL selectors skipped tests", postgres)
+
+    def test_operator_acceptance_uses_normal_local_checkout_and_repeats_typed_commands(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        required = (
+            'operator_root="${RUNNER_TEMP}/platform-operator"',
+            'operator_checkout="${operator_root}/freqtrade-cn"',
+            'git clone --no-local --no-checkout "${GITHUB_WORKSPACE}" "${operator_checkout}"',
+            'git checkout --detach "${GITHUB_SHA}"',
+            "protocol.file.allow=always",
+            "submodule update --init --recursive",
+            'test -z "$(git status --porcelain --untracked-files=no)"',
+            'sudo chown 1000:1000 "${operator_checkout}"',
+            'sudo chown -R 1000:1000 "${operator_checkout}/.git"',
+            'sudo chown -R 1000:1000 "${operator_checkout}/ops/adapter-templates"',
+            'sudo chown -R 1000:1000 "${operator_checkout}/ops/runtime-policies"',
+            "docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-template validate",
+            "docker network inspect --format '{{.Internal}}' freqtrade-cn_platform-db",
+            "docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci",
+            "runtime-template publish --actor platform-operator",
+            "runtime-registry register-paper-probe --actor platform-operator",
+            "runtime-registry compile --actor platform-operator",
+            "runtime-registry status --instance-id phase2-spot-paper-probe",
+            "runtime-registry status --image forbidden",
+            'test "${invalid_status}" -eq 2',
+            'test "${invalid_output}" = "invalid_arguments"',
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        for prefix in ("validate", "publish", "register", "compile", "status"):
+            self.assertIn(
+                f'test "${{{prefix}_first}}" = "${{{prefix}_second}}"',
+                step,
+            )
+        self.assertNotIn('chown -R 1000:1000 "${GITHUB_WORKSPACE}"', step)
+        self.assertNotIn('chown -R 1000:1000 "${operator_root}"', step)
+        self.assertNotIn('"${operator_root}/validate.json"', step)
+        self.assertNotIn("--project-directory", step)
+        self.assertNotIn("COMPOSE_FILE=", step)
+        self.assertNotIn("git@", step)
+        self.assertNotIn("https://", step)
+
+    def test_operator_cleanup_restores_postgres_topology_and_removes_temp_resources(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        acceptance = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        for fragment in (
+            "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
+            "docker network rm freqtrade-cn_platform-db",
+            'rm -rf "${operator_root}"',
+            'test ! -e "${operator_root}"',
+        ):
+            self.assertIn(fragment, acceptance)
+        cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
+        for fragment in (
+            "docker ps --all --quiet --filter label=com.docker.compose.service=platform-operator",
+            "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
+            "docker network rm freqtrade-cn_platform-db",
+            'operator_root="${RUNNER_TEMP}/platform-operator"',
+            'sudo rm -rf "${operator_root}"',
+            "docker image rm freqtrade-cn-operator:local",
+        ):
+            self.assertIn(fragment, cleanup)
+
+    def test_operator_privilege_gate_uses_real_login_and_reconciles_contamination(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        for fragment in (
+            'PGPASSWORD="${operator_password}"',
+            "--host 127.0.0.1 --username platform_operator --dbname platform",
+            "adapter_template_revisions",
+            "state_allocations",
+            "secret_references",
+            "runtime_spec_revisions",
+            "runtime_audit_events",
+            "has_table_privilege(",
+            "'MAINTAIN'",
+            "CREATE FUNCTION public.platform_operator_owned_probe()",
+            "OWNER TO platform_operator",
+            'test "${owner_reconcile_status}" -ne 0',
+            "ALTER FUNCTION public.platform_operator_owned_probe() OWNER TO postgres",
+            "CREATE FUNCTION public.platform_operator_public_null_probe()",
+            "GRANT EXECUTE ON FUNCTION public.platform_operator_owned_probe()",
+            "GRANT MAINTAIN ON TABLE public.runtime_instances TO platform_operator",
+            "GRANT TEMPORARY, CREATE ON DATABASE platform TO PUBLIC",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE postgres",
+            "direct_operator_table_acl=",
+            "direct_column_acl_count=",
+            "public_effective_acl_count=",
+            'test "${null_acl_effective}" = "t|t"',
+            'test "${residual_operator_authority}" = "f|f|f|f|f|f"',
+            'test "${public_default_acl_count}" = "0"',
+            'expect_operator_denied maintain "VACUUM public.runtime_instances"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        self.assertNotIn("SET ROLE platform_operator", step)
+        self.assertNotIn("does not exist", step)
+        self.assertNotIn("FROM secret_versions", step)
+        self.assertIn("SELECT * FROM secret_version_metadata", step)
+        self.assertIn("direct_operator_table_acl=", step)
+        self.assertIn('test "${direct_operator_table_acl}" = "14|14|0"', step)
+        self.assertIn('test "${direct_column_acl_count}" = "0"', step)
+        self.assertIn("public_effective_acl_count=", step)
+        self.assertIn('test "${public_effective_acl_count}" = "0"', step)
+        self.assertLess(
+            step.index("ALTER DEFAULT PRIVILEGES FOR ROLE postgres"),
+            step.index("CREATE FUNCTION public.platform_operator_public_null_probe()"),
+        )
+
+    def test_operator_cleanup_removes_all_reviewed_image_tags_and_asserts_absence(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
+        for fragment in (
+            'reviewed_operator_image_id="${{ steps.reviewed-operator-image.outputs.image_id }}"',
+            "--format '{{range .RepoTags}}{{println .}}{{end}}'",
+            "grep --extended-regexp '^freqtrade-cn-operator:'",
+            'docker image rm "${operator_tag}"',
+            'docker image rm --force "${reviewed_operator_image_id}"',
+            "docker image inspect freqtrade-cn-operator:local",
+            'docker image inspect "${reviewed_operator_image_id}"',
+        ):
+            self.assertIn(fragment, cleanup)
+
+    def test_operator_contract_rejects_missing_executable_and_sql_evidence(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        fragments = (
+            *WORKFLOW_EXECUTABLE_CONTRACT[OPERATOR_CI_STEPS[0]],
+            *WORKFLOW_EXECUTABLE_CONTRACT[OPERATOR_CI_STEPS[1]],
+            "CREATE FUNCTION public.platform_operator_owned_probe()",
+            "GRANT MAINTAIN ON TABLE public.runtime_instances TO platform_operator",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE postgres",
+        )
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                mutated = workflow.replace(fragment, "removed-operator-contract", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_operator_contract_rejects_comment_and_dead_branch_substitution(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        marker = "docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci"
+        step = named_workflow_step(workflow, OPERATOR_CI_STEPS[0])
+        commented_step = step.replace(marker, f"# {marker}", 1)
+        commented = workflow.replace(step, commented_step, 1)
+        self.assertTrue(validate_root_safety_workflow(commented))
+
+        removed = workflow.replace(marker, "removed-operator-network-connect", 1)
+        dead = removed.replace(
+            '          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"',
+            '          if false; then\n'
+            f'            {marker}\n'
+            '          fi\n'
+            '          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"',
+            1,
+        )
+        self.assertTrue(validate_root_safety_workflow(dead))
 
     def test_platform_runbook_keeps_production_start_fail_closed(self) -> None:
         self.assertTrue(PLATFORM_RUNBOOK_PATH.is_file())

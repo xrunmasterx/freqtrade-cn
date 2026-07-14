@@ -157,6 +157,17 @@ jobs:
           echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
           docker tag "${image_id}" freqtrade-cn:local
 
+      - name: Build platform operator image
+        id: reviewed-operator-image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(python tools/image_provenance.py build-operator --print-image-id)"
+          echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
+          docker tag "${image_id}" freqtrade-cn-operator:local
+          alias_id="$(docker image inspect --format '{{.Id}}' freqtrade-cn-operator:local)"
+          test "${alias_id}" = "${image_id}"
+
       - name: Start platform PostgreSQL
         shell: bash
         run: |
@@ -169,6 +180,7 @@ jobs:
             postgres_admin_password \
             platform_control_db_password \
             platform_supervisor_db_password \
+            platform_operator_db_password \
             api_password \
             jwt_secret_key
           do
@@ -208,6 +220,7 @@ jobs:
             --mount type=bind,src="${platform_ci_dir}/postgres_admin_password",dst=/run/secrets/postgres_admin_password,readonly \
             --mount type=bind,src="${platform_ci_dir}/platform_control_db_password",dst=/run/secrets/platform_control_db_password,readonly \
             --mount type=bind,src="${platform_ci_dir}/platform_supervisor_db_password",dst=/run/secrets/platform_supervisor_db_password,readonly \
+            --mount type=bind,src="${platform_ci_dir}/platform_operator_db_password",dst=/run/secrets/platform_operator_db_password,readonly \
             --mount type=bind,src="${GITHUB_WORKSPACE}/docker/postgres/init-platform-roles.sh",dst=/docker-entrypoint-initdb.d/init-platform-roles.sh,readonly \
             postgres:17.10-alpine
           docker network connect freqtrade-platform-ci platform-postgres-ci
@@ -282,6 +295,8 @@ jobs:
           python -m pytest \
             tests/platform/test_platform_migrations.py \
             tests/platform/test_runtime_repository.py \
+            tests/platform/test_template_repository_postgres.py \
+            tests/platform/test_runtime_registration_repository_postgres.py \
             -q -p no:cacheprovider \
             --junitxml="${RUNNER_TEMP}/platform-control-ci/postgres-tests.xml"
           python - "${RUNNER_TEMP}/platform-control-ci/postgres-tests.xml" <<'PY'
@@ -295,7 +310,7 @@ jobs:
               raise SystemExit("platform PostgreSQL selectors skipped tests")
           PY
 
-      - name: Run Phase 2A backend regressions
+      - name: Run Phase 2B backend regressions
         shell: bash
         working-directory: freqtrade
         run: |
@@ -316,6 +331,412 @@ jobs:
             tests/markets \
             tests/platform \
             tests/platform_control
+
+      - name: Run platform-operator CLI acceptance
+        shell: bash
+        env:
+          REVIEWED_OPERATOR_IMAGE_ID: ${{ steps.reviewed-operator-image.outputs.image_id }}
+        run: |
+          set -euo pipefail
+          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+          operator_root="${RUNNER_TEMP}/platform-operator"
+          operator_checkout="${operator_root}/freqtrade-cn"
+          rm -rf "${operator_root}"
+          install -d -m 0700 "${operator_root}"
+          git clone --no-local --no-checkout "${GITHUB_WORKSPACE}" "${operator_checkout}"
+          (
+            cd "${operator_checkout}"
+            git checkout --detach "${GITHUB_SHA}"
+            git \
+              -c protocol.file.allow=always \
+              -c submodule.freqtrade.url="${GITHUB_WORKSPACE}/freqtrade" \
+              -c submodule.frequi.url="${GITHUB_WORKSPACE}/frequi" \
+              -c submodule.freqtrade-strategies.url="${GITHUB_WORKSPACE}/freqtrade-strategies" \
+              submodule update --init --recursive
+            test -z "$(git status --porcelain --untracked-files=no)"
+            test -z "$(git submodule foreach --quiet --recursive 'git status --porcelain --untracked-files=no')"
+            install -d -m 0700 ft_userdata/secrets/platform
+            install -m 0444 \
+              "${platform_ci_dir}/platform_operator_db_password" \
+              ft_userdata/secrets/platform/platform_operator_db_password
+            git check-ignore --quiet ft_userdata/secrets/platform/platform_operator_db_password
+          )
+          sudo chown 1000:1000 "${operator_checkout}"
+          sudo chown -R 1000:1000 "${operator_checkout}/.git"
+          sudo chown 1000:1000 \
+            "${operator_checkout}/ops" \
+            "${operator_checkout}/ops/config" \
+            "${operator_checkout}/ft_userdata" \
+            "${operator_checkout}/ft_userdata/user_data" \
+            "${operator_checkout}/ft_userdata/user_data/strategies"
+          sudo chown -R 1000:1000 "${operator_checkout}/ops/adapter-templates"
+          sudo chown -R 1000:1000 "${operator_checkout}/ops/runtime-policies"
+          sudo chown 1000:1000 \
+            "${operator_checkout}/ft_userdata/user_data/config.example.json" \
+            "${operator_checkout}/ft_userdata/user_data/strategies/sample_strategy.py" \
+            "${operator_checkout}/ops/config/trading-safety.json"
+
+          (
+            cd "${operator_checkout}"
+            validate_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-template validate)"
+            validate_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-template validate)"
+            test "${validate_first}" = "${validate_second}"
+            printf '%s\n' "${validate_first}" > "${platform_ci_dir}/operator-validate.json"
+          )
+          test "$(docker network inspect --format '{{.Internal}}' freqtrade-cn_platform-db)" = "true"
+          docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci
+
+          (
+            cd "${operator_checkout}"
+            publish_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-template publish --actor platform-operator)"
+            publish_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-template publish --actor platform-operator)"
+            test "${publish_first}" = "${publish_second}"
+            printf '%s\n' "${publish_first}" > "${platform_ci_dir}/operator-publish.json"
+
+            register_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry register-paper-probe --actor platform-operator)"
+            register_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry register-paper-probe --actor platform-operator)"
+            test "${register_first}" = "${register_second}"
+            printf '%s\n' "${register_first}" > "${platform_ci_dir}/operator-register.json"
+
+            compile_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry compile --actor platform-operator)"
+            compile_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry compile --actor platform-operator)"
+            test "${compile_first}" = "${compile_second}"
+            printf '%s\n' "${compile_first}" > "${platform_ci_dir}/operator-compile.json"
+
+            status_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"
+            status_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"
+            test "${status_first}" = "${status_second}"
+            printf '%s\n' "${status_first}" > "${platform_ci_dir}/operator-status.json"
+
+            for invalid_arguments in \
+              "runtime-registry status --image forbidden" \
+              "runtime-registry compile --environment live" \
+              "runtime-registry start"
+            do
+              set +e
+              invalid_output="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator ${invalid_arguments} 2>&1)"
+              invalid_status=$?
+              set -e
+              test "${invalid_status}" -eq 2
+              test "${invalid_output}" = "invalid_arguments"
+            done
+          )
+
+          python - \
+            "${platform_ci_dir}/operator-validate.json" \
+            "${platform_ci_dir}/operator-publish.json" \
+            "${platform_ci_dir}/operator-register.json" \
+            "${platform_ci_dir}/operator-compile.json" \
+            "${platform_ci_dir}/operator-status.json" \
+            "${GITHUB_SHA}" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          paths = [Path(value) for value in sys.argv[1:6]]
+          root_commit = sys.argv[6]
+          documents = []
+          for path in paths:
+              raw = path.read_text(encoding="utf-8")
+              document = json.loads(raw)
+              canonical = json.dumps(
+                  document, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+              ) + "\n"
+              if raw != canonical:
+                  raise SystemExit("operator output is not canonical JSON")
+              if re.search(r"timestamp|created_at|updated_at|dsn|password|secret_value|/opt/|/run/", raw, re.I):
+                  raise SystemExit("operator output exposes forbidden data")
+              documents.append(document)
+
+          validate, publish, register, compile_result, status = documents
+          if validate["root_commit"] != root_commit or publish["root_commit"] != root_commit:
+              raise SystemExit("operator output root commit differs")
+          if validate["status"] != "valid" or publish["status"] != "active":
+              raise SystemExit("operator output status differs")
+          if validate["template_id"] != "freqtrade-paper-probe-v1":
+              raise SystemExit("operator template identity differs")
+          if register != compile_result or register != status:
+              raise SystemExit("operator registration outputs differ")
+          if register["instance_id"] != "phase2-spot-paper-probe":
+              raise SystemExit("operator instance identity differs")
+          if register["desired_state"] != "stopped" or register["lifecycle_status"] != "registered":
+              raise SystemExit("operator registration state differs")
+          if len(register["secret_reference_ids"]) != 3:
+              raise SystemExit("operator secret reference count differs")
+          for key, value in {**validate, **publish}.items():
+              if key.endswith("digest") and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                  raise SystemExit("operator digest differs")
+          PY
+
+          alias_id="$(docker image inspect --format '{{.Id}}' freqtrade-cn-operator:local)"
+          test "${alias_id}" = "${REVIEWED_OPERATOR_IMAGE_ID}"
+          test -z "$(docker ps --all --quiet --filter label=com.docker.compose.service=platform-operator)"
+          test -z "$(docker ps --all --quiet --filter publish=1-65535 --filter label=com.docker.compose.service=platform-operator)"
+          docker network disconnect freqtrade-cn_platform-db platform-postgres-ci
+          docker network rm freqtrade-cn_platform-db
+          operator_database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
+          test "${operator_database_networks}" = "freqtrade-platform-ci"
+          sudo rm -rf "${operator_root}"
+          test ! -e "${operator_root}"
+
+      - name: Verify platform-operator least privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+          operator_password="$(tr -d '\r\n' < "${platform_ci_dir}/platform_operator_db_password")"
+
+          operator_psql() {
+            docker exec --env PGPASSWORD="${operator_password}" platform-postgres-ci \
+              psql --host 127.0.0.1 --username platform_operator --dbname platform \
+              --set ON_ERROR_STOP=on "$@"
+          }
+          expect_operator_denied() {
+            probe_name="$1"
+            statement="$2"
+            set +e
+            operator_psql --command "${statement}" \
+              >"${platform_ci_dir}/operator-denied-${probe_name}.log" 2>&1
+            denied_status=$?
+            set -e
+            test "${denied_status}" -ne 0
+            grep --extended-regexp --quiet \
+              "permission denied|must be owner of" \
+              "${platform_ci_dir}/operator-denied-${probe_name}.log"
+          }
+
+          role_state="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
+                     rolinherit, rolreplication, rolbypassrls
+              FROM pg_roles WHERE rolname = 'platform_operator'")"
+          test "${role_state}" = "t|f|f|f|f|f|f"
+
+          database_schema_state="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT has_database_privilege('platform_operator', 'platform', 'CONNECT'),
+                     has_database_privilege('platform_operator', 'platform', 'CREATE'),
+                     has_database_privilege('platform_operator', 'platform', 'TEMPORARY'),
+                     has_schema_privilege('platform_operator', 'public', 'USAGE'),
+                     has_schema_privilege('platform_operator', 'public', 'CREATE')")"
+          test "${database_schema_state}" = "t|f|f|t|f"
+
+          operator_table_state="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH expected(table_name) AS (
+                VALUES
+                  ('platform_catalog_revisions'),
+                  ('adapter_template_revisions'),
+                  ('state_allocations'),
+                  ('secret_references'),
+                  ('runtime_spec_revisions'),
+                  ('runtime_instances'),
+                  ('runtime_audit_events')
+              )
+              SELECT count(*)
+              FROM expected
+              WHERE NOT has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'SELECT')
+                 OR NOT has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'INSERT')
+                 OR has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'UPDATE')
+                 OR has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'DELETE')
+                 OR has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'TRUNCATE')
+                 OR has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'REFERENCES')
+                 OR has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'TRIGGER')
+                 OR has_table_privilege(
+                    'platform_operator', format('public.%I', table_name), 'MAINTAIN')")"
+          test "${operator_table_state}" = "0"
+          direct_operator_table_acl="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              WITH expected(table_name, privilege_type) AS (
+                SELECT table_name, privilege_type
+                FROM (VALUES
+                  ('platform_catalog_revisions'),
+                  ('adapter_template_revisions'),
+                  ('state_allocations'),
+                  ('secret_references'),
+                  ('runtime_spec_revisions'),
+                  ('runtime_instances'),
+                  ('runtime_audit_events')
+                ) AS tables(table_name)
+                CROSS JOIN (VALUES ('SELECT'), ('INSERT')) AS privileges(privilege_type)
+              ), actual AS (
+                SELECT relation.relname AS table_name,
+                       privilege.privilege_type,
+                       privilege.is_grantable
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
+                JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+                WHERE namespace.nspname = 'public'
+                  AND grantee.rolname = 'platform_operator'
+              )
+              SELECT count(*),
+                     count(*) FILTER (WHERE (table_name, privilege_type) IN (
+                       SELECT table_name, privilege_type FROM expected
+                     )),
+                     count(*) FILTER (WHERE is_grantable)
+              FROM actual")"
+          test "${direct_operator_table_acl}" = "14|14|0"
+          direct_column_acl_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_attribute AS attribute
+              JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+              JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+              CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+              LEFT JOIN pg_roles AS grantee ON grantee.oid = privilege.grantee
+              WHERE namespace.nspname <> 'information_schema'
+                AND namespace.nspname !~ '^pg_'
+                AND (privilege.grantee = 0
+                  OR grantee.rolname = 'platform_operator')")"
+          test "${direct_column_acl_count}" = "0"
+
+          operator_psql --tuples-only --no-align \
+            --command "SELECT current_user, count(*) >= 0 FROM runtime_instances" \
+            | grep --fixed-strings --quiet "platform_operator|t"
+          expect_operator_denied temp "CREATE TEMP TABLE operator_forbidden (id integer)"
+          expect_operator_denied create "CREATE SCHEMA operator_forbidden"
+          expect_operator_denied update "UPDATE runtime_instances SET desired_state = 'running'"
+          expect_operator_denied delete "DELETE FROM runtime_instances"
+          expect_operator_denied truncate "TRUNCATE TABLE runtime_instances"
+          expect_operator_denied secret-version "SELECT * FROM secret_version_metadata"
+          expect_operator_denied lifecycle "SELECT * FROM runtime_lifecycle_jobs"
+
+          docker exec --interactive platform-postgres-ci \
+            psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          CREATE SEQUENCE public.platform_operator_forbidden_sequence;
+          CREATE FUNCTION public.platform_operator_owned_probe()
+            RETURNS integer LANGUAGE sql AS 'SELECT 1';
+          ALTER FUNCTION public.platform_operator_owned_probe()
+            OWNER TO platform_operator;
+          SQL
+          set +e
+          docker exec platform-postgres-ci \
+            sh /docker-entrypoint-initdb.d/init-platform-roles.sh \
+            >"${platform_ci_dir}/operator-owner-reconcile.log" 2>&1
+          owner_reconcile_status=$?
+          set -e
+          test "${owner_reconcile_status}" -ne 0
+
+          docker exec --interactive platform-postgres-ci \
+            psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          ALTER FUNCTION public.platform_operator_owned_probe() OWNER TO postgres;
+          ALTER DEFAULT PRIVILEGES FOR ROLE postgres
+            GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
+          CREATE FUNCTION public.platform_operator_public_null_probe()
+            RETURNS integer LANGUAGE sql AS 'SELECT 1';
+          GRANT EXECUTE ON FUNCTION public.platform_operator_owned_probe()
+            TO platform_operator;
+          GRANT MAINTAIN ON TABLE public.runtime_instances TO platform_operator;
+          GRANT TEMPORARY, CREATE ON DATABASE platform TO PUBLIC;
+          GRANT CREATE ON SCHEMA public TO PUBLIC;
+          GRANT SELECT ON TABLE public.runtime_instances TO PUBLIC;
+          SQL
+          null_acl_effective="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT proacl IS NULL,
+                     has_function_privilege(
+                       'platform_operator',
+                       'public.platform_operator_public_null_probe()',
+                       'EXECUTE')
+              FROM pg_proc
+              WHERE oid = 'public.platform_operator_public_null_probe()'::regprocedure")"
+          test "${null_acl_effective}" = "t|t"
+
+          docker exec platform-postgres-ci \
+            sh /docker-entrypoint-initdb.d/init-platform-roles.sh
+
+          residual_operator_authority="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT has_function_privilege(
+                       'platform_operator',
+                       'public.platform_operator_owned_probe()',
+                       'EXECUTE'),
+                     has_function_privilege(
+                       'platform_operator',
+                       'public.platform_operator_public_null_probe()',
+                       'EXECUTE'),
+                     has_table_privilege(
+                       'platform_operator', 'public.runtime_instances', 'MAINTAIN'),
+                     has_database_privilege('platform_operator', 'platform', 'TEMPORARY'),
+                     has_database_privilege('platform_operator', 'platform', 'CREATE'),
+                     has_schema_privilege('platform_operator', 'public', 'CREATE')")"
+          test "${residual_operator_authority}" = "f|f|f|f|f|f"
+          public_default_acl_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM pg_default_acl
+              CROSS JOIN LATERAL aclexplode(defaclacl) AS privilege
+              WHERE privilege.grantee = 0")"
+          test "${public_default_acl_count}" = "0"
+          public_effective_acl_count="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT count(*)
+              FROM (
+                SELECT privilege.grantee
+                FROM pg_database AS database
+                CROSS JOIN LATERAL aclexplode(
+                  COALESCE(database.datacl, acldefault('d', database.datdba))
+                ) AS privilege
+                WHERE database.datname = 'platform'
+                UNION ALL
+                SELECT privilege.grantee
+                FROM pg_namespace AS namespace
+                CROSS JOIN LATERAL aclexplode(
+                  COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+                ) AS privilege
+                WHERE namespace.nspname = 'public'
+                UNION ALL
+                SELECT privilege.grantee
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN LATERAL aclexplode(
+                  COALESCE(
+                    relation.relacl,
+                    acldefault(
+                      CASE WHEN relation.relkind = 'S' THEN 'S'::\"char\" ELSE 'r'::\"char\" END,
+                      relation.relowner
+                    )
+                  )
+                ) AS privilege
+                WHERE namespace.nspname = 'public'
+                  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+                UNION ALL
+                SELECT privilege.grantee
+                FROM pg_proc AS routine
+                JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+                CROSS JOIN LATERAL aclexplode(
+                  COALESCE(routine.proacl, acldefault('f', routine.proowner))
+                ) AS privilege
+                WHERE namespace.nspname = 'public'
+              ) AS effective_acl
+              WHERE grantee = 0")"
+          test "${public_effective_acl_count}" = "0"
+
+          expect_operator_denied sequence \
+            "SELECT nextval('public.platform_operator_forbidden_sequence')"
+          expect_operator_denied routine \
+            "SELECT public.platform_operator_owned_probe()"
+          expect_operator_denied maintain "VACUUM public.runtime_instances"
+          expect_operator_denied secret-version-after "SELECT * FROM secret_version_metadata"
+          expect_operator_denied lifecycle-after "SELECT * FROM runtime_lifecycle_jobs"
 
       - name: Verify platform-control least privilege
         shell: bash
@@ -1024,11 +1445,21 @@ jobs:
         run: |
           set -euo pipefail
           platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+          operator_root="${RUNNER_TEMP}/platform-operator"
+          reviewed_operator_image_id="${{ steps.reviewed-operator-image.outputs.image_id }}"
           cleanup_status=0
+          operator_containers="$(docker ps --all --quiet --filter label=com.docker.compose.service=platform-operator)"
+          if test -n "${operator_containers}"; then
+            docker rm -f ${operator_containers} >/dev/null 2>&1 || cleanup_status=1
+          fi
+          docker network disconnect freqtrade-cn_platform-db platform-postgres-ci >/dev/null 2>&1 || true
           docker rm -f platform-control-ci platform-postgres-ci >/dev/null 2>&1 || true
+          docker network rm freqtrade-cn_platform-db >/dev/null 2>&1 || true
           docker network rm freqtrade-platform-ci >/dev/null 2>&1 || true
           docker network rm freqtrade-platform-ingress-ci >/dev/null 2>&1 || true
+          test -z "$(docker ps --all --quiet --filter label=com.docker.compose.service=platform-operator)" || cleanup_status=1
           test -z "$(docker ps --all --quiet --filter name='^/platform-control-ci$' --filter name='^/platform-postgres-ci$')" || cleanup_status=1
+          docker network inspect freqtrade-cn_platform-db >/dev/null 2>&1 && cleanup_status=1 || true
           docker network inspect freqtrade-platform-ci >/dev/null 2>&1 && cleanup_status=1 || true
           docker network inspect freqtrade-platform-ingress-ci >/dev/null 2>&1 && cleanup_status=1 || true
           if test -d "${platform_ci_dir}"; then
@@ -1048,6 +1479,27 @@ jobs:
             fi
             rm -rf "${platform_ci_dir}"
             test ! -e "${platform_ci_dir}" || cleanup_status=1
+          fi
+          if test -e "${operator_root}"; then
+            sudo rm -rf "${operator_root}"
+          fi
+          test ! -e "${operator_root}" || cleanup_status=1
+          if test -n "${reviewed_operator_image_id}"; then
+            mapfile -t operator_tags < <(
+              docker image inspect \
+                --format '{{range .RepoTags}}{{println .}}{{end}}' \
+                "${reviewed_operator_image_id}" 2>/dev/null \
+                | grep --extended-regexp '^freqtrade-cn-operator:' || true
+            )
+            for operator_tag in "${operator_tags[@]}"; do
+              docker image rm "${operator_tag}" >/dev/null 2>&1 || cleanup_status=1
+            done
+            docker image rm --force "${reviewed_operator_image_id}" >/dev/null 2>&1 || true
+          fi
+          docker image rm freqtrade-cn-operator:local >/dev/null 2>&1 || true
+          docker image inspect freqtrade-cn-operator:local >/dev/null 2>&1 && cleanup_status=1 || true
+          if test -n "${reviewed_operator_image_id}"; then
+            docker image inspect "${reviewed_operator_image_id}" >/dev/null 2>&1 && cleanup_status=1 || true
           fi
           exit "${cleanup_status}"
 
