@@ -17,7 +17,7 @@ Runtime Access proxying, or start, stop, retry, or retire HTTP operations.
 
 ## Architecture and trust boundaries
 
-The control plane has two fixed services. `platform-postgres` is reachable only
+The control plane has two fixed runnable services. `platform-postgres` is reachable only
 on the internal `platform-db` network. `platform-control` joins that database
 network plus the dedicated `platform-ingress` bridge, connects as the
 least-privileged `platform_control` database role, binds inside its container in
@@ -28,6 +28,13 @@ network. Platform-control runs as UID/GID 1000 with a read-only root filesystem,
 all capabilities dropped, and `no-new-privileges`. It receives no Docker socket,
 repository root, runtime state, Bot configuration, strategy, research data,
 trading secret, or general secret-root mount.
+
+Task 7.4 establishes only the `platform_operator` database authority and its
+root-managed credential. `platform-operator` is not a Compose service in Task
+7.4, and the `platform` profile still contains only `platform-postgres` and
+`platform-control`. The operator service, image copy, CLI, and executable
+PostgreSQL probes arrive atomically in Task 7.5. Until then, no supported command
+carrier can log in as this role.
 
 `platform-ingress` is a non-internal bridge, not a one-way ingress ACL. The
 loopback publication restricts host-side inbound access, but the bridge also
@@ -55,20 +62,27 @@ global uniqueness. The platform inventory is exactly:
 - `ft_userdata/secrets/platform/postgres_admin_password`
 - `ft_userdata/secrets/platform/platform_control_db_password`
 - `ft_userdata/secrets/platform/platform_supervisor_db_password`
+- `ft_userdata/secrets/platform/platform_operator_db_password`
 - `ft_userdata/secrets/platform/api_password`
 - `ft_userdata/secrets/platform/jwt_secret_key`
 
 Secret values are consumed through files. They must not be copied into ordinary
 environment variables, DSNs, command arguments, logs, or artifacts. The admin
 password is reserved for database administration and migration. The control and
-supervisor database passwords belong only to their fixed roles. The API password
-and JWT key belong only to platform-control authentication.
+supervisor database passwords belong only to their fixed roles. The operator
+database password belongs only to the staged `platform_operator` role and is
+mounted read-only into `platform-postgres` for role reconciliation; no
+long-running service receives it. The API password and JWT key belong only to
+platform-control authentication.
 
 Database-role password rotation is deliberately deferred in Phase 2A because it
 requires a coordinated database transaction and service handoff. Do not add the
-platform inventory to the legacy `rotate-secrets` route. A reviewed Supervisor
-or infrastructure launcher must define rotation, restart, verification, and
-rollback as one operation before production use.
+platform inventory to the legacy `rotate-secrets` route. The one narrow staging
+exception is fixed: `rotate-secrets --service platform-operator` rotates only
+`platform_operator_db_password`. This selector names one credential group; it
+does not imply that an operator Compose service or CLI exists in Task 7.4. A
+reviewed Supervisor or infrastructure launcher must define rotation, restart,
+verification, and rollback as one operation before production use.
 
 ## Migration and reconciliation contract
 
@@ -80,17 +94,18 @@ Credentials must never be rendered in output. After the upgrade:
 1. Verify the database revision equals the unique Alembic head.
 2. Rerun `docker/postgres/init-platform-roles.sh` as the bootstrap superuser so
    grants are applied after all migrated tables exist.
-3. Verify both fixed roles have the exact negative role attributes, no inbound
+3. Verify all three fixed roles have the exact negative role attributes, no inbound
    or outbound memberships, and no residual delegated column ACLs.
 4. Verify effective privileges and actual allowed and denied SQL operations.
 
 The initializer is idempotent. It removes at most one terminal LF or CRLF from
 password files, preserves all other characters, resets dangerous role
-attributes and memberships, removes database/schema/table/sequence/column
-authority with downstream cascades, then applies the exact allowlist. Residual
+attributes and memberships, fails closed if a fixed role owns an object or the
+operator owns/receives default authority, removes database/schema/table/sequence/
+column authority with downstream cascades, then applies the exact allowlist. Residual
 column revocation executes as each ACL's recorded original grantor. It also
 revokes `TEMPORARY` and `CREATE` on `platform` from `PUBLIC`, so neither fixed
-role inherits database DDL or temporary-table authority through PostgreSQL's
+fixed role inherits database DDL or temporary-table authority through PostgreSQL's
 default grants.
 
 ## Least privilege
@@ -109,6 +124,19 @@ matrix for both roles as `CONNECT=true`, `CREATE=false`, `TEMP=false`, then
 checks exact schema, table, column, sequence, ownership, membership, grantable,
 and residual-ACL inventories. Positive and negative SQL probes connect as each
 fixed identity; administrator `SET ROLE` is not acceptance evidence.
+
+`platform_operator` receives only CONNECT on `platform`, USAGE on `public`, and
+SELECT plus INSERT on the seven fixed registration tables:
+`platform_catalog_revisions`, `adapter_template_revisions`, `state_allocations`,
+`secret_references`, `runtime_spec_revisions`, `runtime_instances`, and
+`runtime_audit_events`. It receives no sequence privilege, UPDATE, DELETE,
+TRUNCATE, REFERENCES, TRIGGER, secret-version authority, or lifecycle/Runtime
+Access table authority. The initializer skips absent allowlisted tables and is
+rerunnable after Alembic creates them.
+
+Task 7.4 provides structural and mutation-test evidence for this staged role but
+does not change the Root Safety workflow. Actual login probes as
+`platform_operator` are deferred with the operator service and CLI to Task 7.5.
 
 ## CI-only acceptance evidence
 

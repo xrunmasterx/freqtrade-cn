@@ -24,6 +24,8 @@ secrets:
     file: ./ft_userdata/secrets/platform/platform_control_db_password
   platform_supervisor_db_password:
     file: ./ft_userdata/secrets/platform/platform_supervisor_db_password
+  platform_operator_db_password:
+    file: ./ft_userdata/secrets/platform/platform_operator_db_password
   platform_control_api_password:
     file: ./ft_userdata/secrets/platform/api_password
   platform_control_jwt_secret:
@@ -72,6 +74,8 @@ services:
         target: platform_control_db_password
       - source: platform_supervisor_db_password
         target: platform_supervisor_db_password
+      - source: platform_operator_db_password
+        target: platform_operator_db_password
     volumes:
       - type: volume
         source: platform-postgres-data

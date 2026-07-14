@@ -28,10 +28,12 @@ PLATFORM_SECRET_SPECS = {
     "postgres_admin_password": 32,
     "platform_control_db_password": 32,
     "platform_supervisor_db_password": 32,
+    "platform_operator_db_password": 32,
     "api_password": 32,
     "jwt_secret_key": 48,
 }
 PLATFORM_SECRET_ROOT = Path("ft_userdata/secrets/platform")
+PLATFORM_OPERATOR_ROTATION_SERVICE = "platform-operator"
 MANAGED_STATE_ROOT = Path("ft_userdata/runtime/instances")
 RESEARCH_PATH_MIGRATIONS = (
     (
@@ -532,16 +534,30 @@ def _existing_secret_value(path: Path) -> str:
     return path.read_text(encoding="utf-8").rstrip("\r\n")
 
 
+def _require_regular_secret_file(path: Path, message: str) -> os.stat_result:
+    try:
+        status = os.lstat(path)
+    except OSError as error:
+        raise ValueError(message) from error
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    if (
+        stat.S_ISLNK(status.st_mode)
+        or bool(getattr(status, "st_file_attributes", 0) & reparse_flag)
+        or not stat.S_ISREG(status.st_mode)
+    ):
+        raise ValueError(message)
+    return status
+
+
 def _init_secret_file(
     path: Path,
     entropy_bytes: int,
     used_values: set[str],
 ) -> None:
-    if not path.exists():
+    if not os.path.lexists(path):
         write_new_secret(path, entropy_bytes, used_values)
         return
-    if not path.is_file() or path.is_symlink():
-        raise ValueError("invalid runtime secret file")
+    _require_regular_secret_file(path, "invalid runtime secret file")
     _harden_secret_permissions(path)
     value = _existing_secret_value(path)
     if value in used_values:
@@ -655,17 +671,31 @@ def rotate_secrets(
     service_names: set[str],
 ) -> None:
     known = {service["name"] for service in manifest["services"]}
+    known.add(PLATFORM_OPERATOR_ROTATION_SERVICE)
     unknown = service_names - known
     if unknown:
         raise ValueError(f"unknown runtime service: {', '.join(sorted(unknown))}")
     for service_name in sorted(service_names):
-        secret_root = root / "ft_userdata" / "secrets" / service_name
-        for filename, entropy_bytes in SECRET_SPECS.items():
+        if service_name == PLATFORM_OPERATOR_ROTATION_SERVICE:
+            secret_root = root / PLATFORM_SECRET_ROOT
+            specs = {
+                "platform_operator_db_password": PLATFORM_SECRET_SPECS[
+                    "platform_operator_db_password"
+                ]
+            }
+        else:
+            secret_root = root / "ft_userdata" / "secrets" / service_name
+            specs = SECRET_SPECS
+        for filename, entropy_bytes in specs.items():
             destination = secret_root / filename
+            _require_regular_secret_file(destination, "invalid runtime secret file")
             temporary = secret_root / f".{filename}.{secrets.token_hex(8)}.tmp"
-            write_new_secret(temporary, entropy_bytes)
-            os.replace(temporary, destination)
-            _harden_secret_permissions(destination)
+            try:
+                write_new_secret(temporary, entropy_bytes)
+                os.replace(temporary, destination)
+                _harden_secret_permissions(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
 
 
 def verify_runtime(
@@ -739,8 +769,10 @@ def verify_runtime(
         platform_root = root / PLATFORM_SECRET_ROOT
         for filename in PLATFORM_SECRET_SPECS:
             path = platform_root / filename
-            if not path.is_file() or path.is_symlink():
-                raise ValueError("missing platform runtime secret file")
+            _require_regular_secret_file(
+                path,
+                "missing platform runtime secret file",
+            )
             _verify_secret_permissions(path, runtime_uid)
             content = path.read_text(encoding="utf-8")
             value = content.rstrip("\r\n")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 import stat
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1082,6 +1084,17 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         platform_root = self.root / "ft_userdata/secrets/platform"
         self.assertEqual(
+            bootstrap_runtime.PLATFORM_SECRET_SPECS,
+            {
+                "postgres_admin_password": 32,
+                "platform_control_db_password": 32,
+                "platform_supervisor_db_password": 32,
+                "platform_operator_db_password": 32,
+                "api_password": 32,
+                "jwt_secret_key": 48,
+            },
+        )
+        self.assertEqual(
             {path.name for path in platform_root.iterdir()},
             set(bootstrap_runtime.PLATFORM_SECRET_SPECS),
         )
@@ -1096,6 +1109,102 @@ class BootstrapRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(len(platform_values), len(set(platform_values)))
         self.assertFalse(set(platform_values) & set(legacy_values))
+
+    def test_operator_secret_init_and_verify_use_shared_hardening_without_output(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                bootstrap_runtime,
+                "_harden_secret_permissions",
+                wraps=bootstrap_runtime._harden_secret_permissions,
+            ) as harden,
+            redirect_stdout(output),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        operator_secret = (
+            self.root
+            / "ft_userdata/secrets/platform/platform_operator_db_password"
+        )
+        value = operator_secret.read_text(encoding="utf-8").rstrip("\n")
+        self.assertGreaterEqual(len(value), 32)
+        self.assertEqual(operator_secret.read_text(encoding="utf-8"), value + "\n")
+        harden.assert_any_call(operator_secret)
+
+        with (
+            mock.patch.object(
+                bootstrap_runtime,
+                "_verify_secret_permissions",
+                wraps=bootstrap_runtime._verify_secret_permissions,
+            ) as verify_permissions,
+            redirect_stdout(output),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+        verify_permissions.assert_any_call(
+            operator_secret,
+            bootstrap_runtime._expected_runtime_identity()["FREQTRADE_RUNTIME_UID"],
+        )
+        self.assertNotIn(value, output.getvalue())
+
+    def test_operator_secret_init_and_verify_reject_reparse_points(self) -> None:
+        operator_secret = (
+            self.root
+            / "ft_userdata/secrets/platform/platform_operator_db_password"
+        )
+        operator_secret.parent.mkdir(parents=True)
+        operator_secret.write_text("existing-operator-secret-value-long-enough\n", encoding="utf-8")
+        real_lstat = os.lstat
+
+        def reparse_operator(path: Path) -> os.stat_result:
+            status = real_lstat(path)
+            if Path(path) != operator_secret:
+                return status
+            return mock.Mock(
+                st_mode=status.st_mode,
+                st_uid=getattr(status, "st_uid", 0),
+                st_nlink=status.st_nlink,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x0400,
+                ),
+            )
+
+        with (
+            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_operator),
+            self.assertRaisesRegex(ValueError, "invalid runtime secret file"),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        operator_secret.unlink()
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        with (
+            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_operator),
+            self.assertRaisesRegex(ValueError, "platform runtime secret"),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+    def test_operator_secret_init_and_verify_reject_symlinks(self) -> None:
+        outside = self.root / "outside-operator-secret"
+        outside.write_text("outside-operator-secret-value-long-enough\n", encoding="utf-8")
+        operator_secret = (
+            self.root
+            / "ft_userdata/secrets/platform/platform_operator_db_password"
+        )
+        operator_secret.parent.mkdir(parents=True)
+        try:
+            operator_secret.symlink_to(outside)
+        except OSError as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+
+        with self.assertRaisesRegex(ValueError, "invalid runtime secret file"):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+        with self.assertRaisesRegex(ValueError, "platform runtime secret"):
+            bootstrap_runtime.verify_runtime(
+                self.root,
+                self.manifest,
+                verify_platform_secrets=True,
+            )
 
     def test_init_hardens_but_never_overwrites_existing_platform_secret(self) -> None:
         path = self.root / "ft_userdata/secrets/platform/api_password"
@@ -1138,6 +1247,39 @@ class BootstrapRuntimeTests(unittest.TestCase):
         bootstrap_runtime.init_runtime(self.root, self.manifest)
         with self.assertRaisesRegex(ValueError, "unknown runtime service"):
             bootstrap_runtime.rotate_secrets(self.root, self.manifest, {"platform"})
+
+    def test_rotate_platform_operator_changes_only_operator_database_secret(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        platform_root = self.root / "ft_userdata/secrets/platform"
+        before = {
+            filename: (platform_root / filename).read_bytes()
+            for filename in bootstrap_runtime.PLATFORM_SECRET_SPECS
+        }
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            bootstrap_runtime.rotate_secrets(
+                self.root,
+                self.manifest,
+                {"platform-operator"},
+            )
+
+        after = {
+            filename: (platform_root / filename).read_bytes()
+            for filename in bootstrap_runtime.PLATFORM_SECRET_SPECS
+        }
+        self.assertNotEqual(
+            before["platform_operator_db_password"],
+            after["platform_operator_db_password"],
+        )
+        self.assertEqual(
+            {key: value for key, value in before.items() if key != "platform_operator_db_password"},
+            {key: value for key, value in after.items() if key != "platform_operator_db_password"},
+        )
+        self.assertTrue(after["platform_operator_db_password"].endswith(b"\n"))
+        value = after["platform_operator_db_password"].rstrip(b"\n")
+        self.assertGreaterEqual(len(value), 32)
+        self.assertNotIn(value.decode("ascii"), output.getvalue())
 
 
 if __name__ == "__main__":

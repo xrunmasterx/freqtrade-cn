@@ -36,6 +36,24 @@ class PlatformControlContractTests(unittest.TestCase):
             path.write_text(script, encoding="utf-8", newline="")
             return runtime_contract._validate_platform_role_script(root)
 
+    def test_documentation_keeps_operator_runtime_deferred_to_task_7_5(self) -> None:
+        document = (REPO_ROOT / "docs/operations/platform-control.md").read_text(
+            encoding="utf-8"
+        )
+        normalized = " ".join(document.split())
+        required = (
+            "Task 7.4 establishes only the `platform_operator` database authority",
+            "`platform-operator` is not a Compose service in Task 7.4",
+            "the `platform` profile still contains only `platform-postgres` and "
+            "`platform-control`",
+            "`rotate-secrets --service platform-operator` rotates only "
+            "`platform_operator_db_password`",
+            "The operator service, image copy, CLI, and executable PostgreSQL probes arrive "
+            "atomically in Task 7.5",
+        )
+        for statement in required:
+            self.assertIn(statement, normalized)
+
     def test_platform_compose_has_exact_isolated_inventory(self) -> None:
         self.assertEqual(set(self.compose["services"]), {"platform-postgres", "platform-control"})
         self.assertEqual(
@@ -62,11 +80,104 @@ class PlatformControlContractTests(unittest.TestCase):
                 "platform_postgres_admin_password",
                 "platform_control_db_password",
                 "platform_supervisor_db_password",
+                "platform_operator_db_password",
                 "platform_control_api_password",
                 "platform_control_jwt_secret",
             },
         )
         self.assertEqual(self.errors(), [])
+
+    def test_operator_database_secret_is_mounted_only_into_postgres(self) -> None:
+        definition = self.compose["secrets"]["platform_operator_db_password"]
+        self.assertEqual(
+            definition,
+            {
+                "name": "freqtrade-cn_platform_operator_db_password",
+                "file": str(
+                    (
+                        REPO_ROOT
+                        / "ft_userdata/secrets/platform/platform_operator_db_password"
+                    ).resolve()
+                ),
+            },
+        )
+        postgres = self.compose["services"]["platform-postgres"]
+        self.assertEqual(
+            postgres["secrets"],
+            [
+                {
+                    "source": "platform_postgres_admin_password",
+                    "target": "postgres_admin_password",
+                },
+                {
+                    "source": "platform_control_db_password",
+                    "target": "platform_control_db_password",
+                },
+                {
+                    "source": "platform_supervisor_db_password",
+                    "target": "platform_supervisor_db_password",
+                },
+                {
+                    "source": "platform_operator_db_password",
+                    "target": "platform_operator_db_password",
+                },
+            ],
+        )
+        self.assertNotIn(
+            "platform_operator_db_password",
+            {
+                secret["source"]
+                for secret in self.compose["services"]["platform-control"]["secrets"]
+            },
+        )
+
+    def test_operator_database_secret_mutations_fail_closed(self) -> None:
+        mutations: list[tuple[str, dict[str, object]]] = []
+
+        missing = copy.deepcopy(self.compose)
+        missing["secrets"].pop("platform_operator_db_password")
+        mutations.append(("platform Compose secrets differ", missing))
+
+        changed_file = copy.deepcopy(self.compose)
+        changed_file["secrets"]["platform_operator_db_password"]["file"] = (
+            "private-operator-path"
+        )
+        mutations.append(("platform Compose secret definition differs", changed_file))
+
+        changed_target = copy.deepcopy(self.compose)
+        changed_target["services"]["platform-postgres"]["secrets"][-1]["target"] = (
+            "alternate_operator_password"
+        )
+        mutations.append(("platform-postgres secrets differs", changed_target))
+
+        writable_mode = copy.deepcopy(self.compose)
+        writable_mode["services"]["platform-postgres"]["secrets"][-1]["mode"] = 0o666
+        mutations.append(("platform-postgres secrets differs", writable_mode))
+
+        control_mount = copy.deepcopy(self.compose)
+        control_mount["services"]["platform-control"]["secrets"].append(
+            {
+                "source": "platform_operator_db_password",
+                "target": "operator_database_password",
+            }
+        )
+        mutations.append(("platform-control secret allocation differs", control_mount))
+
+        direct_value = copy.deepcopy(self.compose)
+        direct_value["services"]["platform-control"]["environment"][
+            "PLATFORM_OPERATOR_DATABASE_PASSWORD"
+        ] = "private-operator-value"
+        mutations.append(("platform-control direct secret environment", direct_value))
+
+        extra_service = copy.deepcopy(self.compose)
+        extra_service["services"]["platform-operator"] = {}
+        mutations.append(("platform Compose services differ", extra_service))
+
+        for expected, compose in mutations:
+            with self.subTest(expected=expected):
+                text = "\n".join(self.errors(compose))
+                self.assertIn(expected, text)
+                self.assertNotIn("private-operator", text)
 
     def test_platform_control_is_only_fixed_loopback_application_port(self) -> None:
         service = self.compose["services"]["platform-control"]
@@ -267,10 +378,10 @@ class PlatformControlContractTests(unittest.TestCase):
     def test_role_password_normalization_removes_only_one_terminal_newline(self) -> None:
         script = self.role_script().lower()
         self.assertNotRegex(script, r"\b(?:btrim|trim)\s*\(")
-        self.assertEqual(script.count("right(secret_value, 2) = e'\\r\\n'"), 2)
-        self.assertEqual(script.count("left(secret_value, -2)"), 2)
-        self.assertEqual(script.count("right(secret_value, 1) = e'\\n'"), 2)
-        self.assertEqual(script.count("left(secret_value, -1)"), 2)
+        self.assertEqual(script.count("right(secret_value, 2) = e'\\r\\n'"), 3)
+        self.assertEqual(script.count("left(secret_value, -2)"), 3)
+        self.assertEqual(script.count("right(secret_value, 1) = e'\\n'"), 3)
+        self.assertEqual(script.count("left(secret_value, -1)"), 3)
 
     def test_role_script_resets_exact_attributes_and_both_membership_directions(self) -> None:
         script = " ".join(self.role_script().upper().split())
@@ -278,19 +389,97 @@ class PlatformControlContractTests(unittest.TestCase):
             "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
             "NOREPLICATION NOBYPASSRLS PASSWORD %L"
         )
-        self.assertEqual(script.count(attributes), 2)
-        for role in ("PLATFORM_CONTROL", "PLATFORM_SUPERVISOR"):
+        self.assertEqual(script.count(attributes), 3)
+        for role in ("PLATFORM_CONTROL", "PLATFORM_SUPERVISOR", "PLATFORM_OPERATOR"):
             self.assertIn(f"MEMBER_ROLE.ROLNAME = '{role}'", script)
             self.assertIn(f"GRANTED_ROLE.ROLNAME = '{role}'", script)
-        self.assertGreaterEqual(script.count("PG_AUTH_MEMBERS"), 4)
+        self.assertGreaterEqual(script.count("PG_AUTH_MEMBERS"), 6)
         self.assertEqual(
             script.count(
                 "JOIN PG_ROLES AS GRANTOR_ROLE ON GRANTOR_ROLE.OID = MEMBERSHIP.GRANTOR"
             ),
-            4,
+            6,
         )
-        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 9)
+        self.assertEqual(script.count("GRANTED BY %I CASCADE"), 11)
         self.assertGreaterEqual(script.count(" CASCADE"), 5)
+
+    def test_role_script_fails_closed_on_operator_ownership_and_default_authority(self) -> None:
+        script = " ".join(self.role_script().upper().split())
+        self.assertNotIn("REASSIGN OWNED", script)
+        self.assertNotIn("DROP OWNED", script)
+        self.assertEqual(
+            script.count(
+                "OWNER_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
+                "'PLATFORM_OPERATOR')"
+            ),
+            3,
+        )
+        default_fragments = (
+            "FROM PG_DEFAULT_ACL AS DEFAULT_ACL",
+            "JOIN PG_ROLES AS DEFAULT_OWNER_ROLE ON "
+            "DEFAULT_OWNER_ROLE.OID = DEFAULT_ACL.DEFACLROLE",
+            "CROSS JOIN LATERAL ACLEXPLODE(DEFAULT_ACL.DEFACLACL) AS DEFAULT_PRIVILEGE",
+            "JOIN PG_ROLES AS DEFAULT_GRANTEE_ROLE ON "
+            "DEFAULT_GRANTEE_ROLE.OID = DEFAULT_PRIVILEGE.GRANTEE",
+            "DEFAULT_OWNER_ROLE.ROLNAME = 'PLATFORM_OPERATOR'",
+            "DEFAULT_GRANTEE_ROLE.ROLNAME = 'PLATFORM_OPERATOR'",
+            "RAISE EXCEPTION 'UNSUPPORTED_PLATFORM_OPERATOR_DEFAULT_AUTHORITY'",
+        )
+        for fragment in default_fragments:
+            self.assertIn(fragment, script)
+
+    def test_role_script_grants_exact_operator_table_allowlist(self) -> None:
+        script = runtime_contract._active_platform_role_script(self.role_script())
+        compact = " ".join(script.split())
+        self.assertEqual(
+            runtime_contract._role_table_inventory(compact, "OPERATOR_TABLES"),
+            [
+                "PLATFORM_CATALOG_REVISIONS",
+                "ADAPTER_TEMPLATE_REVISIONS",
+                "STATE_ALLOCATIONS",
+                "SECRET_REFERENCES",
+                "RUNTIME_SPEC_REVISIONS",
+                "RUNTIME_INSTANCES",
+                "RUNTIME_AUDIT_EVENTS",
+            ],
+        )
+        self.assertEqual(
+            compact.count(
+                "GRANT SELECT, INSERT ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR"
+            ),
+            1,
+        )
+        self.assertEqual(
+            compact.count("GRANT CONNECT ON DATABASE PLATFORM TO PLATFORM_OPERATOR;"),
+            1,
+        )
+        self.assertEqual(
+            compact.count("GRANT USAGE ON SCHEMA PUBLIC TO PLATFORM_OPERATOR;"),
+            1,
+        )
+        operator_tables = set(
+            runtime_contract._role_table_inventory(compact, "OPERATOR_TABLES") or []
+        )
+        self.assertTrue(
+            operator_tables.isdisjoint(
+                {
+                    "SECRET_VERSION_METADATA",
+                    "RUNTIME_ATTEMPTS",
+                    "RUNTIME_LIFECYCLE_JOBS",
+                    "RUNTIME_ENDPOINTS",
+                    "RUNTIME_ACCESS_REQUESTS",
+                }
+            )
+        )
+        for forbidden in (
+            "GRANT UPDATE ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
+            "GRANT DELETE ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
+            "GRANT TRUNCATE ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
+            "GRANT REFERENCES ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
+            "GRANT TRIGGER ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
+            "GRANT USAGE ON SEQUENCE PUBLIC.%I TO PLATFORM_OPERATOR",
+        ):
+            self.assertNotIn(forbidden, compact)
 
     def test_role_script_clears_residual_column_privileges_before_regrant(self) -> None:
         script = " ".join(self.role_script().upper().split())
@@ -322,7 +511,8 @@ class PlatformControlContractTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            "COLUMN_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
+            "COLUMN_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
+            "'PLATFORM_OPERATOR')",
             script,
         )
         cleanup = script.index("CROSS JOIN LATERAL ACLEXPLODE(ATTRIBUTE.ATTACL)")
@@ -351,6 +541,13 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertEqual(script.count("AS OBJECT_SET_ROLE"), 4)
         self.assertEqual(script.count("AS OBJECT_REVOKE_PRIVILEGE"), 4)
         self.assertEqual(script.count("AS OBJECT_RESET_ROLE"), 4)
+        self.assertEqual(
+            script.count(
+                "OBJECT_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', "
+                "'PLATFORM_SUPERVISOR', 'PLATFORM_OPERATOR')"
+            ),
+            4,
+        )
         self.assertLess(
             script.index("ACLEXPLODE(DATABASE.DATACL)"),
             script.index("GRANT CONNECT ON DATABASE PLATFORM"),
@@ -562,6 +759,76 @@ class PlatformControlContractTests(unittest.TestCase):
                 errors = self.role_script_errors(mutated)
                 self.assertIn("platform role initializer grant inventory differs", errors)
 
+    def test_role_validator_rejects_operator_guard_and_allowlist_mutations(self) -> None:
+        script = self.role_script()
+        mutations = {
+            "missing ownership guard": (
+                "platform role initializer ownership guard differs",
+                script.replace(
+                    "('platform_control', 'platform_supervisor', 'platform_operator')",
+                    "('platform_control', 'platform_supervisor')",
+                    1,
+                ),
+            ),
+            "missing default owner guard": (
+                "platform role initializer default authority guard differs",
+                script.replace(
+                    "default_owner_role.rolname = 'platform_operator'",
+                    "FALSE",
+                    1,
+                ),
+            ),
+            "missing default grantee guard": (
+                "platform role initializer default authority guard differs",
+                script.replace(
+                    "default_grantee_role.rolname = 'platform_operator'",
+                    "FALSE",
+                    1,
+                ),
+            ),
+            "widened update": (
+                "platform role initializer grant inventory differs",
+                script.replace(
+                    "GRANT SELECT, INSERT ON TABLE public.%I TO platform_operator",
+                    "GRANT SELECT, INSERT, UPDATE ON TABLE public.%I TO platform_operator",
+                    1,
+                ),
+            ),
+            "forbidden lifecycle table": (
+                "platform role initializer grant inventory differs",
+                script.replace(
+                    "    ('runtime_audit_events')\n) AS operator_tables(table_name)",
+                    "    ('runtime_audit_events'),\n"
+                    "    ('runtime_lifecycle_jobs')\n"
+                    ") AS operator_tables(table_name)",
+                    1,
+                ),
+            ),
+            "missing operator column sweep": (
+                "platform role initializer residual column cleanup differs",
+                script.replace(
+                    "WHERE column_grantee_role.rolname IN\n"
+                    "  ('platform_control', 'platform_supervisor', 'platform_operator')",
+                    "WHERE column_grantee_role.rolname IN\n"
+                    "  ('platform_control', 'platform_supervisor')",
+                    1,
+                ),
+            ),
+        }
+        for name, (expected, mutated) in mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(mutated, script)
+                self.assertIn(expected, self.role_script_errors(mutated))
+
+    def test_role_validator_rejects_destructive_owned_commands(self) -> None:
+        for command in (
+            "REASSIGN OWNED BY platform_operator TO postgres;",
+            "DROP OWNED BY platform_operator;",
+        ):
+            with self.subTest(command=command):
+                errors = self.role_script_errors(self.role_script() + "\n" + command + "\n")
+                self.assertIn("platform role initializer broadens database authority", errors)
+
     def test_role_validator_rejects_missing_reconciliation_clauses(self) -> None:
         script = self.role_script()
         mutations = {
@@ -581,6 +848,14 @@ class PlatformControlContractTests(unittest.TestCase):
                     "ALTER ROLE platform_supervisor WITH LOGIN PASSWORD %L",
                 ),
             ),
+            "operator hardening": (
+                "platform role initializer role hardening differs",
+                script.replace(
+                    "ALTER ROLE platform_operator WITH LOGIN NOSUPERUSER NOCREATEDB "
+                    "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
+                    "ALTER ROLE platform_operator WITH LOGIN PASSWORD %L",
+                ),
+            ),
             "inbound membership": (
                 "platform role initializer membership cleanup differs",
                 script.replace("member_role.rolname = 'platform_control'", "FALSE", 1),
@@ -597,6 +872,14 @@ class PlatformControlContractTests(unittest.TestCase):
                 "platform role initializer membership cleanup differs",
                 script.replace("granted_role.rolname = 'platform_supervisor'", "FALSE", 1),
             ),
+            "operator inbound membership": (
+                "platform role initializer membership cleanup differs",
+                script.replace("member_role.rolname = 'platform_operator'", "FALSE", 1),
+            ),
+            "operator outbound membership": (
+                "platform role initializer membership cleanup differs",
+                script.replace("granted_role.rolname = 'platform_operator'", "FALSE", 1),
+            ),
             "column cleanup": (
                 "platform role initializer residual column cleanup differs",
                 script.replace(
@@ -608,7 +891,7 @@ class PlatformControlContractTests(unittest.TestCase):
                 "platform role initializer revocation inventory differs",
                 script.replace(
                     "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public "
-                    "FROM platform_control, platform_supervisor CASCADE;",
+                    "FROM platform_control, platform_supervisor, platform_operator CASCADE;",
                     "",
                 ),
             ),

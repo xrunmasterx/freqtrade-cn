@@ -36,6 +36,22 @@ FROM (
 ) AS secret
 \gexec
 
+SELECT 'CREATE ROLE platform_operator'
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platform_operator')
+\gexec
+SELECT format(
+    'ALTER ROLE platform_operator WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L',
+    CASE
+        WHEN right(secret_value, 2) = E'\r\n' THEN left(secret_value, -2)
+        WHEN right(secret_value, 1) = E'\n' THEN left(secret_value, -1)
+        ELSE secret_value
+    END
+)
+FROM (
+    SELECT pg_read_file('/run/secrets/platform_operator_db_password') AS secret_value
+) AS secret
+\gexec
+
 SELECT format(
     'REVOKE %I FROM platform_control GRANTED BY %I CASCADE',
     granted_role.rolname,
@@ -82,13 +98,36 @@ JOIN pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
 WHERE granted_role.rolname = 'platform_supervisor'
 \gexec
 
+SELECT format(
+    'REVOKE %I FROM platform_operator GRANTED BY %I CASCADE',
+    granted_role.rolname,
+    grantor_role.rolname
+)
+FROM pg_auth_members AS membership
+JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid
+JOIN pg_roles AS member_role ON member_role.oid = membership.member
+JOIN pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
+WHERE member_role.rolname = 'platform_operator'
+\gexec
+SELECT format(
+    'REVOKE platform_operator FROM %I GRANTED BY %I CASCADE',
+    member_role.rolname,
+    grantor_role.rolname
+)
+FROM pg_auth_members AS membership
+JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid
+JOIN pg_roles AS member_role ON member_role.oid = membership.member
+JOIN pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
+WHERE granted_role.rolname = 'platform_operator'
+\gexec
+
 REVOKE TEMPORARY ON DATABASE platform FROM PUBLIC;
 REVOKE CREATE ON DATABASE platform FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON DATABASE platform FROM platform_control, platform_supervisor CASCADE;
-REVOKE ALL PRIVILEGES ON SCHEMA public FROM platform_control, platform_supervisor CASCADE;
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM platform_control, platform_supervisor CASCADE;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM platform_control, platform_supervisor CASCADE;
+REVOKE ALL PRIVILEGES ON DATABASE platform FROM platform_control, platform_supervisor, platform_operator CASCADE;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM platform_control, platform_supervisor, platform_operator CASCADE;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM platform_control, platform_supervisor, platform_operator CASCADE;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM platform_control, platform_supervisor, platform_operator CASCADE;
 
 DO $authority_guard$
 BEGIN
@@ -96,19 +135,39 @@ BEGIN
         SELECT 1
         FROM pg_database AS database
         JOIN pg_roles AS owner_role ON owner_role.oid = database.datdba
-        WHERE owner_role.rolname IN ('platform_control', 'platform_supervisor')
+        WHERE owner_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
         UNION ALL
         SELECT 1
         FROM pg_namespace AS namespace
         JOIN pg_roles AS owner_role ON owner_role.oid = namespace.nspowner
-        WHERE owner_role.rolname IN ('platform_control', 'platform_supervisor')
+        WHERE owner_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
         UNION ALL
         SELECT 1
         FROM pg_class AS relation
         JOIN pg_roles AS owner_role ON owner_role.oid = relation.relowner
-        WHERE owner_role.rolname IN ('platform_control', 'platform_supervisor')
+        WHERE owner_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
     ) THEN
         RAISE EXCEPTION 'fixed_platform_role_owns_object';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_default_acl AS default_acl
+        JOIN pg_roles AS default_owner_role
+          ON default_owner_role.oid = default_acl.defaclrole
+        WHERE default_owner_role.rolname = 'platform_operator'
+        UNION ALL
+        SELECT 1
+        FROM pg_default_acl AS default_acl
+        CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS default_privilege
+        JOIN pg_roles AS default_grantee_role
+          ON default_grantee_role.oid = default_privilege.grantee
+        WHERE default_grantee_role.rolname = 'platform_operator'
+    ) THEN
+        RAISE EXCEPTION 'unsupported_platform_operator_default_authority';
     END IF;
 
     IF EXISTS (
@@ -116,7 +175,8 @@ BEGIN
         FROM pg_database AS database
         CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
         JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
-        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+        WHERE grantee_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
           AND (database.datname <> 'platform'
             OR privilege.privilege_type NOT IN ('CONNECT', 'CREATE', 'TEMPORARY'))
         UNION ALL
@@ -124,7 +184,8 @@ BEGIN
         FROM pg_namespace AS namespace
         CROSS JOIN LATERAL aclexplode(namespace.nspacl) AS privilege
         JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
-        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+        WHERE grantee_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
           AND (namespace.nspname = 'information_schema'
             OR namespace.nspname ~ '^pg_'
             OR privilege.privilege_type NOT IN ('USAGE', 'CREATE'))
@@ -134,7 +195,8 @@ BEGIN
         JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
         CROSS JOIN LATERAL aclexplode(relation.relacl) AS privilege
         JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
-        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+        WHERE grantee_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
           AND (namespace.nspname = 'information_schema'
             OR namespace.nspname ~ '^pg_'
             OR (relation.relkind IN ('r', 'p', 'v', 'm', 'f')
@@ -150,7 +212,8 @@ BEGIN
         JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
         CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
         JOIN pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
-        WHERE grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+        WHERE grantee_role.rolname IN
+            ('platform_control', 'platform_supervisor', 'platform_operator')
           AND (namespace.nspname = 'information_schema'
             OR namespace.nspname ~ '^pg_'
             OR relation.relkind NOT IN ('r', 'p', 'v', 'm', 'f')
@@ -176,7 +239,8 @@ CROSS JOIN LATERAL aclexplode(database.datacl) AS privilege
 JOIN pg_roles AS object_grantee_role ON object_grantee_role.oid = privilege.grantee
 JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.grantor
 WHERE database.datname = 'platform'
-  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND object_grantee_role.rolname IN
+    ('platform_control', 'platform_supervisor', 'platform_operator')
   AND privilege.privilege_type IN ('CONNECT', 'CREATE', 'TEMPORARY')
 ORDER BY object_grantee_role.rolname, privilege.privilege_type, object_grantor_role.rolname
 \gexec
@@ -197,7 +261,8 @@ JOIN pg_roles AS object_grantee_role ON object_grantee_role.oid = privilege.gran
 JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.grantor
 WHERE namespace.nspname <> 'information_schema'
   AND namespace.nspname !~ '^pg_'
-  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND object_grantee_role.rolname IN
+    ('platform_control', 'platform_supervisor', 'platform_operator')
   AND privilege.privilege_type IN ('USAGE', 'CREATE')
 ORDER BY object_grantee_role.rolname, namespace.nspname,
     privilege.privilege_type, object_grantor_role.rolname
@@ -222,7 +287,8 @@ JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.gran
 WHERE namespace.nspname <> 'information_schema'
   AND namespace.nspname !~ '^pg_'
   AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
-  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND object_grantee_role.rolname IN
+    ('platform_control', 'platform_supervisor', 'platform_operator')
   AND privilege.privilege_type IN
     ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')
 ORDER BY object_grantee_role.rolname, namespace.nspname, relation.relname,
@@ -248,7 +314,8 @@ JOIN pg_roles AS object_grantor_role ON object_grantor_role.oid = privilege.gran
 WHERE namespace.nspname <> 'information_schema'
   AND namespace.nspname !~ '^pg_'
   AND relation.relkind = 'S'
-  AND object_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+  AND object_grantee_role.rolname IN
+    ('platform_control', 'platform_supervisor', 'platform_operator')
   AND privilege.privilege_type IN ('USAGE', 'SELECT', 'UPDATE')
 ORDER BY object_grantee_role.rolname, namespace.nspname, relation.relname,
     privilege.privilege_type, object_grantor_role.rolname
@@ -274,7 +341,8 @@ JOIN pg_roles AS column_grantee_role
   ON column_grantee_role.oid = privilege.grantee
 JOIN pg_roles AS column_grantor_role
   ON column_grantor_role.oid = privilege.grantor
-WHERE column_grantee_role.rolname IN ('platform_control', 'platform_supervisor')
+WHERE column_grantee_role.rolname IN
+  ('platform_control', 'platform_supervisor', 'platform_operator')
   AND privilege.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
   AND namespace.nspname <> 'information_schema'
   AND namespace.nspname !~ '^pg_'
@@ -292,6 +360,24 @@ ORDER BY
 
 GRANT CONNECT ON DATABASE platform TO platform_control, platform_supervisor;
 GRANT USAGE ON SCHEMA public TO platform_control, platform_supervisor;
+GRANT CONNECT ON DATABASE platform TO platform_operator;
+GRANT USAGE ON SCHEMA public TO platform_operator;
+
+SELECT format(
+    'GRANT SELECT, INSERT ON TABLE public.%I TO platform_operator',
+    table_name
+)
+FROM (VALUES
+    ('platform_catalog_revisions'),
+    ('adapter_template_revisions'),
+    ('state_allocations'),
+    ('secret_references'),
+    ('runtime_spec_revisions'),
+    ('runtime_instances'),
+    ('runtime_audit_events')
+) AS operator_tables(table_name)
+WHERE to_regclass(format('public.%I', table_name)) IS NOT NULL
+\gexec
 
 SELECT format(
     'GRANT SELECT ON TABLE public.%I TO platform_control, platform_supervisor',
