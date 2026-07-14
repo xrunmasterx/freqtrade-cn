@@ -2315,7 +2315,17 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             build.index("python tools/image_provenance.py build-operator"),
         )
         for fragment in (
+            'operator_image_baseline_tmp="${operator_image_baseline}.tmp"',
+            'operator_image_ids_baseline_tmp="${operator_image_ids_baseline}.tmp"',
+            "platform-operator-images.ready",
+            'mv "${operator_image_baseline_tmp}" "${operator_image_baseline}"',
+            'mv "${operator_image_ids_baseline_tmp}" "${operator_image_ids_baseline}"',
+            'mv "${operator_image_baseline_ready_tmp}" "${operator_image_baseline_ready}"',
+        ):
+            self.assertIn(fragment, build)
+        for fragment in (
             baseline,
+            "platform-operator-images.ready",
             "platform-operator-images.current",
             "platform-operator-images.created",
             "platform-operator-image-ids.created",
@@ -2325,9 +2335,61 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "cmp",
         ):
             self.assertIn(fragment, cleanup)
-        baseline_branch = cleanup.index('if test -f "${operator_image_baseline}"; then')
+        baseline_branch = cleanup.index('if test -f "${operator_image_baseline}"')
+        self.assertIn('test -f "${operator_image_ids_baseline}"', cleanup)
+        self.assertIn('test -f "${operator_image_baseline_ready}"', cleanup)
         output_branch = cleanup.index('if test -n "${reviewed_operator_image_id}"')
         self.assertLess(baseline_branch, output_branch)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_cleanup_ignores_incomplete_baseline(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cleanup = step_run_script(workflow, PLATFORM_CI_STEPS[-1]).replace(
+            "${{ steps.reviewed-operator-image.outputs.image_id }}", ""
+        )
+        stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+trap 'rm -rf "${RUNNER_TEMP}"' EXIT
+baseline_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+printf 'freqtrade-cn-operator:preexisting|%s\n' "${baseline_id}" \
+  > "${RUNNER_TEMP}/platform-operator-images.before"
+image_mutations="${RUNNER_TEMP}/image-mutations"
+: > "${image_mutations}"
+
+docker() {
+  if test "$1" = "ps"; then return 0; fi
+  if test "$1" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then return 1; fi
+  if test "$1" = "image" && test "$2" = "ls"; then
+    printf '%s\n' 'freqtrade-cn-operator:preexisting'
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    printf '%s\n' "${baseline_id}"
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "rm"; then
+    printf 'image-rm:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  if test "$1" = "tag"; then
+    printf 'tag:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  return 99
+}
+'''
+        result = subprocess.run(
+            [shutil.which("bash") or "bash", "-s"],
+            cwd=REPO_ROOT,
+            input=(stub + cleanup + 'test ! -s "${image_mutations}"\n').encode(),
+            capture_output=True,
+            check=False,
+        )
+        output = (result.stdout + result.stderr).decode(errors="replace")
+        self.assertEqual(result.returncode, 0, output)
 
     def test_operator_contract_rejects_missing_executable_and_sql_evidence(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

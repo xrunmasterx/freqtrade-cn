@@ -164,7 +164,18 @@ jobs:
           set -euo pipefail
           operator_image_baseline="${RUNNER_TEMP}/platform-operator-images.before"
           operator_image_ids_baseline="${RUNNER_TEMP}/platform-operator-image-ids.before"
-          : > "${operator_image_baseline}"
+          operator_image_baseline_ready="${RUNNER_TEMP}/platform-operator-images.ready"
+          operator_image_baseline_tmp="${operator_image_baseline}.tmp"
+          operator_image_ids_baseline_tmp="${operator_image_ids_baseline}.tmp"
+          operator_image_baseline_ready_tmp="${operator_image_baseline_ready}.tmp"
+          rm -f \
+            "${operator_image_baseline}" \
+            "${operator_image_ids_baseline}" \
+            "${operator_image_baseline_ready}" \
+            "${operator_image_baseline_tmp}" \
+            "${operator_image_ids_baseline_tmp}" \
+            "${operator_image_baseline_ready_tmp}"
+          : > "${operator_image_baseline_tmp}"
           while IFS= read -r operator_tag; do
             test -n "${operator_tag}" || continue
             operator_id="$(docker image inspect --format '{{.Id}}' "${operator_tag}")"
@@ -173,9 +184,13 @@ jobs:
             docker image ls --format '{{.Repository}}:{{.Tag}}' \
               | grep --extended-regexp '^freqtrade-cn-operator:' \
               | sort --unique || true
-          ) | sort > "${operator_image_baseline}"
+          ) | sort > "${operator_image_baseline_tmp}"
           docker image ls --all --no-trunc --quiet \
-            | sort --unique > "${operator_image_ids_baseline}"
+            | sort --unique > "${operator_image_ids_baseline_tmp}"
+          mv "${operator_image_baseline_tmp}" "${operator_image_baseline}"
+          mv "${operator_image_ids_baseline_tmp}" "${operator_image_ids_baseline}"
+          printf 'ready\n' > "${operator_image_baseline_ready_tmp}"
+          mv "${operator_image_baseline_ready_tmp}" "${operator_image_baseline_ready}"
           image_id="$(python tools/image_provenance.py build-operator --print-image-id)"
           echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
           docker tag "${image_id}" freqtrade-cn-operator:local
@@ -1697,10 +1712,13 @@ jobs:
           test ! -e "${operator_root}" || cleanup_status=1
           operator_image_baseline="${RUNNER_TEMP}/platform-operator-images.before"
           operator_image_ids_baseline="${RUNNER_TEMP}/platform-operator-image-ids.before"
+          operator_image_baseline_ready="${RUNNER_TEMP}/platform-operator-images.ready"
           operator_image_current="${RUNNER_TEMP}/platform-operator-images.current"
           operator_image_created="${RUNNER_TEMP}/platform-operator-images.created"
           operator_image_created_ids="${RUNNER_TEMP}/platform-operator-image-ids.created"
-          if test -f "${operator_image_baseline}"; then
+          if test -f "${operator_image_baseline}" \
+            && test -f "${operator_image_ids_baseline}" \
+            && test -f "${operator_image_baseline_ready}"; then
             docker image ls --format '{{.Repository}}:{{.Tag}}' \
               | grep --extended-regexp '^freqtrade-cn-operator:' \
               | sort --unique > "${operator_image_current}" || true
