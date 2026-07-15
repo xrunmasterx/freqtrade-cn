@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -193,6 +195,93 @@ def step_run_script(workflow: str, step_name: str) -> str:
             break
         script_lines.append(line[10:] if line.startswith("          ") else "")
     return "\n".join(script_lines) + "\n"
+
+
+def operator_output_validator_script(workflow: str) -> str:
+    script = step_run_script(workflow, OPERATOR_CI_STEPS[0])
+    start_marker = '  "${GITHUB_SHA}" <<\'PY\'\n'
+    if script.count(start_marker) != 1:
+        raise AssertionError("expected exactly one operator output validator")
+    validator = script.split(start_marker, 1)[1]
+    end_marker = "\nPY\n"
+    if end_marker not in validator:
+        raise AssertionError("operator output validator is not terminated")
+    return validator.split(end_marker, 1)[0] + "\n"
+
+
+def canonical_operator_documents() -> tuple[str, list[dict[str, object]]]:
+    root_commit = "a" * 40
+    component_commit = "b" * 40
+    digest = "c" * 64
+    template_revision = f"template-{digest}"
+    registration: dict[str, object] = {
+        "adapter_template_revision_id": template_revision,
+        "catalog_revision_id": "builtin-market-catalog-v2",
+        "desired_state": "stopped",
+        "instance_id": "phase2-spot-paper-probe",
+        "lifecycle_status": "registered",
+        "runtime_spec_revision_id": f"runtime-spec-{digest}",
+        "secret_reference_ids": [
+            "secret-phase2-spot-paper-probe-api-password-v1",
+            "secret-phase2-spot-paper-probe-jwt-secret-v1",
+            "secret-phase2-spot-paper-probe-ws-token-v1",
+        ],
+        "state_allocation_id": "state-phase2-spot-paper-probe-v1",
+    }
+    validate: dict[str, object] = {
+        "backend_commit": component_commit,
+        "config_blob_digest": digest,
+        "frontend_commit": component_commit,
+        "root_commit": root_commit,
+        "safety_policy_digest": digest,
+        "status": "valid",
+        "strategies_commit": component_commit,
+        "strategy_class_name": "SampleStrategy",
+        "strategy_digest": digest,
+        "template_id": "freqtrade-paper-probe-v1",
+        "template_payload_digest": digest,
+    }
+    publish: dict[str, object] = {
+        "adapter_template_revision_id": template_revision,
+        "backend_commit": component_commit,
+        "frontend_commit": component_commit,
+        "root_commit": root_commit,
+        "status": "active",
+        "strategies_commit": component_commit,
+        "template_id": "freqtrade-paper-probe-v1",
+        "template_payload_digest": digest,
+    }
+    return root_commit, [validate, publish, registration, registration, registration]
+
+
+def run_operator_output_validator(
+    documents: list[dict[str, object]], root_commit: str
+) -> subprocess.CompletedProcess[str]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    validator = operator_output_validator_script(workflow)
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        paths = []
+        for index, document in enumerate(documents):
+            path = Path(temporary_directory) / f"operator-{index}.json"
+            path.write_text(
+                json.dumps(
+                    document,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            paths.append(str(path))
+        return subprocess.run(
+            [sys.executable, "-", *paths, root_commit],
+            cwd=REPO_ROOT,
+            input=validator,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
 
 def split_shell_compound(command: str) -> list[str]:
@@ -585,6 +674,11 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
 }
 
 OPERATOR_OUTPUT_CONTRACT = (
+    "forbidden_field_names = {",
+    "def exposes_forbidden_data(value):",
+    "key.casefold() in forbidden_field_names",
+    're.search(r"/(?:opt|run)/", value, re.I)',
+    "if exposes_forbidden_data(document):",
     "validate_keys = {",
     "publish_keys = {",
     "registration_keys = {",
@@ -3072,6 +3166,57 @@ sleep() {
                 mutated = workflow.replace(fragment, "removed-output-contract", 1)
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_operator_output_validator_accepts_canonical_public_metadata(self) -> None:
+        root_commit, documents = canonical_operator_documents()
+
+        result = run_operator_output_validator(documents, root_commit)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_operator_output_validator_rejects_sensitive_fields_and_paths_without_reflection(
+        self,
+    ) -> None:
+        root_commit, canonical_documents = canonical_operator_documents()
+        forbidden_fields = (
+            "password",
+            "secret_value",
+            "dsn",
+            "timestamp",
+            "created_at",
+            "updated_at",
+        )
+        for forbidden_field in forbidden_fields:
+            with self.subTest(forbidden_field=forbidden_field):
+                documents = json.loads(json.dumps(canonical_documents))
+                documents[0]["nested"] = {forbidden_field: "private-sentinel"}
+
+                result = run_operator_output_validator(documents, root_commit)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr,
+                    "operator output exposes forbidden data\n",
+                )
+                self.assertNotIn("private-sentinel", result.stderr)
+
+        for forbidden_path in ("/opt/private-sentinel", "/run/private-sentinel"):
+            with self.subTest(forbidden_path=forbidden_path):
+                documents = json.loads(json.dumps(canonical_documents))
+                documents[0]["nested"] = [{"safe_key": forbidden_path}]
+
+                result = run_operator_output_validator(documents, root_commit)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr,
+                    "operator output exposes forbidden data\n",
+                )
+                self.assertNotIn("private-sentinel", result.stderr)
 
     def test_operator_status_gate_has_fixed_safe_diagnostics(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

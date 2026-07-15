@@ -546,6 +546,24 @@ jobs:
 
           paths = [Path(value) for value in sys.argv[1:6]]
           root_commit = sys.argv[6]
+          forbidden_field_names = {
+              "created_at", "dsn", "password", "secret_value", "timestamp", "updated_at",
+          }
+
+          def exposes_forbidden_data(value):
+              if isinstance(value, dict):
+                  return any(
+                      key.casefold() in forbidden_field_names
+                      or exposes_forbidden_data(nested_value)
+                      for key, nested_value in value.items()
+                  )
+              if isinstance(value, list):
+                  return any(exposes_forbidden_data(item) for item in value)
+              return (
+                  isinstance(value, str)
+                  and re.search(r"/(?:opt|run)/", value, re.I) is not None
+              )
+
           documents = []
           for path in paths:
               raw = path.read_text(encoding="utf-8")
@@ -555,7 +573,7 @@ jobs:
               ) + "\n"
               if raw != canonical:
                   raise SystemExit("operator output is not canonical JSON")
-              if re.search(r"timestamp|created_at|updated_at|dsn|password|secret_value|/opt/|/run/", raw, re.I):
+              if exposes_forbidden_data(document):
                   raise SystemExit("operator output exposes forbidden data")
               documents.append(document)
 
