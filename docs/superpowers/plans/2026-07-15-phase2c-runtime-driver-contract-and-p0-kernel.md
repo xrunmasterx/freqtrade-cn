@@ -695,6 +695,22 @@ class LaunchSnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             LaunchSnapshot.model_validate(payload)
 
+    def test_snapshot_rejects_raw_nested_values_and_boolean_limits(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            ResourceLimits,
+        )
+
+        payload = self.valid_snapshot_payload()
+        payload["identity"] = dataclasses.asdict(payload["identity"])
+        with self.assertRaises(DriverValidationError) as raised:
+            LaunchSnapshot.model_validate(payload)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
+
+        with self.assertRaises(DriverValidationError):
+            ResourceLimits(True, 536870912, 256)
+
     def test_protocol_has_exact_driver_neutral_methods(self) -> None:
         from tools.runtime_driver import RuntimeDriver
 
@@ -796,7 +812,7 @@ Implement explicit `__post_init__` validation with these exact rules:
 - Environment entries are sorted uniquely by name.
 - Read-only and secret mounts are sorted uniquely by string target.
 - Internal ports are a sorted unique tuple of integers in `1..65535`; an empty tuple is allowed.
-- Every nested top-level value is already an instance of its declared type. `model_validate` does not accept raw nested dicts and must fail with `invalid nested value`; this avoids building a second general validation framework.
+- Every nested top-level value is already an instance of its declared type. `model_validate` does not accept raw nested dicts and raises `DriverValidationError` whose fixed public string is `driver_validation_error`; this avoids building a second general validation framework or leaking internal validation detail.
 - Boolean values are rejected anywhere the contract requires an integer (`exit_code`, health counts/bounds, UID/GID, resource limits, and ports).
 
 Add the exact four-method protocol after all DTO definitions:
