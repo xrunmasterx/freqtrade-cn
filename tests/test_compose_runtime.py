@@ -167,6 +167,81 @@ class ComposeRuntimeTests(unittest.TestCase):
             COMMIT_IDENTITY,
         )
 
+    def test_legacy_launch_delegates_to_extracted_snapshot_kernel(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(compose_runtime, "verify_runtime", return_value=IDENTITY),
+            mock.patch.object(
+                compose_runtime,
+                "_run_validated_snapshot_launch",
+                return_value=completed,
+            ) as kernel,
+        ):
+            result = compose_runtime._launch_inspected_image(
+                "freqtrade",
+                self.root,
+                MANIFEST,
+                INSPECTED_IMAGE.image_id,
+                COMMIT_IDENTITY,
+            )
+
+        self.assertIs(result, completed)
+        arguments = kernel.call_args.kwargs
+        self.assertEqual(arguments["service"], "freqtrade")
+        self.assertEqual(arguments["root"], self.root)
+        self.assertEqual(arguments["manifest"], MANIFEST)
+        self.assertEqual(arguments["image_id"], INSPECTED_IMAGE.image_id)
+        self.assertEqual(arguments["commit_identity"], COMMIT_IDENTITY)
+        self.assertIn("services:", arguments["override"])
+
+    def test_extracted_kernel_validates_before_fixed_action_and_cleans_snapshot(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        events: list[str] = []
+        snapshot_path: Path | None = None
+
+        def validate(
+            root,
+            manifest,
+            command_prefix,
+            override,
+            environment,
+            service,
+            image_id,
+            snapshot,
+            commit_identity,
+        ) -> None:
+            nonlocal snapshot_path
+            snapshot_path = snapshot
+            events.append("validate")
+            snapshot_path.write_text('{"services":{}}\n', encoding="utf-8")
+
+        def run(command, **kwargs):
+            events.append("action")
+            self.assertIn("--no-build", command)
+            self.assertIn("--no-deps", command)
+            self.assertEqual(command[-1], "freqtrade")
+            return completed
+
+        with (
+            mock.patch.object(compose_runtime, "_validate_launch", side_effect=validate),
+            mock.patch.object(compose_runtime.subprocess, "run", side_effect=run),
+        ):
+            result = compose_runtime._run_validated_snapshot_launch(
+                service="freqtrade",
+                root=self.root,
+                manifest=MANIFEST,
+                image_id=INSPECTED_IMAGE.image_id,
+                commit_identity=COMMIT_IDENTITY,
+                override="services: {}\n",
+            )
+
+        self.assertIs(result, completed)
+        self.assertEqual(events, ["validate", "action"])
+        self.assertIsNotNone(snapshot_path)
+        self.assertFalse(snapshot_path.exists())
+
     def test_up_rejects_identity_change_during_build_before_preflight(self) -> None:
         with (
             mock.patch.object(

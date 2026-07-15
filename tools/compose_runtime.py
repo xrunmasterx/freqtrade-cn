@@ -376,18 +376,24 @@ def _launch_override(
     return "\n".join(lines) + "\n"
 
 
-def _launch_inspected_image(
+def _run_validated_snapshot_launch(
+    *,
     service: str,
     root: Path,
     manifest: dict[str, Any],
     image_id: str,
     commit_identity: CommitIdentity,
+    override: str,
 ) -> subprocess.CompletedProcess[str]:
-    identity = verify_runtime(root, manifest, verify_platform_secrets=False)
-    override = _launch_override(manifest, identity, service, image_id)
     render_command = [
-        "docker", "compose", "--project-name", "freqtrade-cn",
-        "-f", str(root / "docker-compose.yml"), "-f", "-",
+        "docker",
+        "compose",
+        "--project-name",
+        "freqtrade-cn",
+        "-f",
+        str(root / "docker-compose.yml"),
+        "-f",
+        "-",
     ]
     environment = {
         key: value
@@ -432,6 +438,25 @@ def _launch_inspected_image(
             capture_output=False,
             check=False,
         )
+
+
+def _launch_inspected_image(
+    service: str,
+    root: Path,
+    manifest: dict[str, Any],
+    image_id: str,
+    commit_identity: CommitIdentity,
+) -> subprocess.CompletedProcess[str]:
+    identity = verify_runtime(root, manifest, verify_platform_secrets=False)
+    override = _launch_override(manifest, identity, service, image_id)
+    return _run_validated_snapshot_launch(
+        service=service,
+        root=root,
+        manifest=manifest,
+        image_id=image_id,
+        commit_identity=commit_identity,
+        override=override,
+    )
 
 
 def launch_reviewed_service(service: str, root: Path) -> subprocess.CompletedProcess[str]:
