@@ -2560,11 +2560,12 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         for fragment in required:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, step)
-        for prefix in ("validate", "publish", "register", "compile", "status"):
+        for prefix in ("validate", "publish", "register", "compile"):
             self.assertIn(
                 f'test "${{{prefix}_first}}" = "${{{prefix}_second}}"',
                 step,
             )
+        self.assertIn('if test "${status_first}" != "${status_second}"; then', step)
         self.assertNotIn('chown -R 1000:1000 "${GITHUB_WORKSPACE}"', step)
         self.assertNotIn('chown -R 1000:1000 "${operator_root}"', step)
         self.assertNotIn('"${operator_root}/validate.json"', step)
@@ -2748,6 +2749,28 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 mutated = workflow.replace(fragment, "removed-output-contract", 1)
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_operator_status_determinism_gate_has_fixed_safe_diagnostic(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+
+        diagnostic = "operator_status_output_not_deterministic"
+        guard = "\n".join(
+            (
+                'if test "${status_first}" != "${status_second}"; then',
+                f"printf '%s\\n' '{diagnostic}' >&2",
+                "exit 1",
+                "fi",
+            )
+        )
+        self.assertEqual(step.count(diagnostic), 1)
+        self.assertIn(guard, "\n".join(line.strip() for line in step.splitlines()))
+        diagnostic_line = next(
+            line for line in step.splitlines() if diagnostic in line
+        )
+        self.assertEqual(diagnostic_line.strip(), f"printf '%s\\n' '{diagnostic}' >&2")
+        self.assertNotIn("${status_first}", diagnostic_line)
+        self.assertNotIn("${status_second}", diagnostic_line)
 
     def test_operator_cleanup_removes_all_reviewed_image_tags_and_asserts_absence(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

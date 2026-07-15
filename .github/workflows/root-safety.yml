@@ -452,7 +452,10 @@ jobs:
 
             status_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"
             status_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"
-            test "${status_first}" = "${status_second}"
+            if test "${status_first}" != "${status_second}"; then
+              printf '%s\n' 'operator_status_output_not_deterministic' >&2
+              exit 1
+            fi
             printf '%s\n' "${status_first}" > "${platform_ci_dir}/operator-status.json"
 
             for invalid_arguments in \
