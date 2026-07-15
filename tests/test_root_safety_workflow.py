@@ -2662,6 +2662,32 @@ sleep() {
         for forbidden in ("docker.sock", "ft_userdata/runtime", "docker compose"):
             self.assertNotIn(forbidden, step)
 
+    def test_least_privilege_fixture_reuses_registered_runtime_foreign_keys(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+
+        for fixture_id in ("'ci-instance'", "'ci-attempt'"):
+            self.assertIn(fixture_id, step)
+        for obsolete_id in (
+            "'ci-runtime-spec'",
+            "'ci-state-allocation'",
+            "'ci-adapter-template'",
+        ):
+            self.assertNotIn(obsolete_id, step)
+        self.assertIn(
+            "FROM runtime_instances AS registered_instance\n"
+            "          WHERE registered_instance.instance_id = "
+            "'phase2-spot-paper-probe'",
+            step,
+        )
+        self.assertIn(
+            "JOIN runtime_spec_revisions AS registered_spec\n"
+            "            ON registered_spec.runtime_spec_revision_id = "
+            "registered_instance.runtime_spec_revision_id",
+            step,
+        )
+        self.assertEqual(step.count("FROM runtime_attempts AS fixture_attempt"), 2)
+
     def test_contamination_preserves_production_owners_and_postgres_grantor(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))

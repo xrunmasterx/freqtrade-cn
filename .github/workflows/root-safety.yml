@@ -1549,23 +1549,29 @@ jobs:
             management_mode, runtime_spec_revision_id, environment,
             state_allocation_id, desired_state, lifecycle_status, failure_latched,
             optimistic_version, created_at, retired_at
-          ) VALUES (
+          ) SELECT
             'ci-instance', 'execution_worker', 'paper_probe', 'ci-owner', 'ci-owner-revision',
-            'supervisor', 'ci-runtime-spec', 'paper', 'ci-state-allocation',
+            'supervisor', registered_instance.runtime_spec_revision_id, 'paper',
+            registered_instance.state_allocation_id,
             'stopped', 'registered', false, 0, now(), NULL
-          );
+          FROM runtime_instances AS registered_instance
+          WHERE registered_instance.instance_id = 'phase2-spot-paper-probe';
           INSERT INTO runtime_attempts (
             attempt_id, instance_id, attempt_number, runtime_spec_revision_id,
             adapter_template_revision_id, resolved_secret_versions, image_id,
             root_commit, backend_commit, frontend_commit, strategies_commit,
             project_identity, container_identity, status, health_result,
             started_at, stopped_at, exit_code, failure_code
-          ) VALUES (
-            'ci-attempt', 'ci-instance', 1, 'ci-runtime-spec', 'ci-adapter-template',
+          ) SELECT
+            'ci-attempt', 'ci-instance', 1, registered_instance.runtime_spec_revision_id,
+            registered_spec.adapter_template_revision_id,
             '{}'::json, 'sha256:ci-image', repeat('1', 40), repeat('2', 40),
             repeat('3', 40), repeat('4', 40), 'ci-project', 'ci-container',
             'healthy', '{}'::json, now(), NULL, NULL, NULL
-          );
+          FROM runtime_instances AS registered_instance
+          JOIN runtime_spec_revisions AS registered_spec
+            ON registered_spec.runtime_spec_revision_id = registered_instance.runtime_spec_revision_id
+          WHERE registered_instance.instance_id = 'ci-instance';
           SQL
 
           docker exec --interactive platform-postgres-ci \
@@ -1584,12 +1590,14 @@ jobs:
             owner_id, owner_revision, instance_id, runtime_spec_revision_id,
             adapter_template_revision_id, action, previous_state, next_state,
             result_code, occurred_at, provenance
-          ) VALUES (
+          ) SELECT
             'ci-audit', 'platform_control', 'ci-request', 'ci-idempotency',
             'paper_probe', 'ci-owner', 'ci-owner-revision', 'ci-instance',
-            'ci-runtime-spec', 'ci-adapter-template', 'start', NULL,
+            fixture_attempt.runtime_spec_revision_id,
+            fixture_attempt.adapter_template_revision_id, 'start', NULL,
             '{"desired_state":"stopped"}'::json, 'accepted', now(), '{}'::json
-          );
+          FROM runtime_attempts AS fixture_attempt
+          WHERE fixture_attempt.attempt_id = 'ci-attempt';
           UPDATE runtime_access_requests
           SET status = 'completed', result_code = 'ok', completed_at = now()
           WHERE request_id = 'ci-request';
@@ -1615,12 +1623,14 @@ jobs:
             owner_id, owner_revision, instance_id, runtime_spec_revision_id,
             adapter_template_revision_id, action, previous_state, next_state,
             result_code, occurred_at, provenance
-          ) VALUES (
+          ) SELECT
             'ci-supervisor-audit', 'platform_supervisor', 'ci-supervisor-request', 'ci-supervisor-idempotency',
             'paper_probe', 'ci-owner', 'ci-owner-revision', 'ci-instance',
-            'ci-runtime-spec', 'ci-adapter-template', 'start', NULL,
+            fixture_attempt.runtime_spec_revision_id,
+            fixture_attempt.adapter_template_revision_id, 'start', NULL,
             '{"lifecycle_status":"registered"}'::json, 'accepted', now(), '{}'::json
-          );
+          FROM runtime_attempts AS fixture_attempt
+          WHERE fixture_attempt.attempt_id = 'ci-attempt';
           ROLLBACK;
           SQL
 
