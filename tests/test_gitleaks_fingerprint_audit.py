@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.gitleaks_fingerprint_audit import audit_fingerprint_files, main
+from tools.gitleaks_fingerprint_audit import (
+    audit_fingerprint_files,
+    expected_fingerprint_counts,
+    main,
+)
 
 
 class GitleaksFingerprintAuditTests(unittest.TestCase):
@@ -101,6 +105,18 @@ class GitleaksFingerprintAuditTests(unittest.TestCase):
                 self.findings_path.write_text(payload, encoding="utf-8")
                 with self.assertRaises((ValueError, json.JSONDecodeError)):
                     main(arguments)
+
+    def test_reviewed_platform_migration_fingerprints_track_current_tree(self) -> None:
+        ignore_path = Path(__file__).resolve().parents[1] / ".gitleaksignore"
+        fingerprints = expected_fingerprint_counts(
+            ignore_path.read_text(encoding="utf-8").splitlines()
+        )
+        prefix = "freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:"
+
+        for line in (508, 1210, 1215, 1226):
+            self.assertEqual(fingerprints[f"{prefix}{line}"], 1)
+        for line in (402, 1100, 1105, 1116):
+            self.assertEqual(fingerprints[f"{prefix}{line}"], 0)
 
 
 if __name__ == "__main__":
