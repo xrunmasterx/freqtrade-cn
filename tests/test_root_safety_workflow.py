@@ -1374,6 +1374,74 @@ docker() {
     return result, [line for line in stdout.splitlines() if line in {"build", "ready"}]
 
 
+def run_operator_status_with_stubbed_docker(
+    scenario: str,
+) -> subprocess.CompletedProcess[str]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    script = step_run_script(workflow, OPERATOR_CI_STEPS[0])
+    lines = script.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.lstrip().startswith("status_first=")
+        or line.lstrip().startswith("if ! status_first=")
+    )
+    end = next(
+        index
+        for index, line in enumerate(lines[start:], start)
+        if 'operator-status.json"' in line
+    )
+    status_script = "\n".join(lines[start : end + 1])
+    setup = f"export STUB_STATUS_SCENARIO={shlex.quote(scenario)}\n" + r'''
+set -euo pipefail
+RUNNER_TEMP="$(mktemp -d)"
+trap 'rm -rf "${RUNNER_TEMP}"' EXIT
+platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+mkdir -p "${platform_ci_dir}"
+status_call_count="${RUNNER_TEMP}/status-call-count"
+printf '0\n' > "${status_call_count}"
+
+docker() {
+  call_count="$(( $(cat "${status_call_count}") + 1 ))"
+  printf '%s\n' "${call_count}" > "${status_call_count}"
+  printf 'upstream-status-call-%s\n' "${call_count}" >&2
+  case "${STUB_STATUS_SCENARIO}:${call_count}" in
+    first-fail:1|second-fail:2)
+      printf '%s\n' 'SENSITIVE_STATUS_SENTINEL'
+      return 7
+      ;;
+    mismatch:1)
+      printf '%s\n' '{"state":"first"}'
+      ;;
+    mismatch:2)
+      printf '%s\n' '{"state":"second"}'
+      ;;
+    *)
+      printf '%s\n' '{"state":"stable"}'
+      ;;
+  esac
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        input=(
+            setup
+            + status_script
+            + "\nprintf 'STUB_ARTIFACT:'\n"
+            + 'cat "${platform_ci_dir}/operator-status.json"\n'
+        ).encode(),
+        capture_output=True,
+        check=False,
+    )
+    return subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        raw_result.stdout.decode(errors="replace"),
+        raw_result.stderr.decode(errors="replace"),
+    )
+
+
 class RootSafetyWorkflowTests(unittest.TestCase):
     def test_github_expression_run_blocks_stay_below_service_limit(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -2750,27 +2818,106 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_operator_status_determinism_gate_has_fixed_safe_diagnostic(self) -> None:
+    def test_operator_status_gate_has_fixed_safe_diagnostics(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
 
-        diagnostic = "operator_status_output_not_deterministic"
-        guard = "\n".join(
+        normalized_step = "\n".join(line.strip() for line in step.splitlines())
+        guards = (
+            (
+                'if ! status_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"; then',
+                "operator_status_first_query_failed",
+            ),
+            (
+                'if ! status_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"; then',
+                "operator_status_second_query_failed",
+            ),
             (
                 'if test "${status_first}" != "${status_second}"; then',
-                f"printf '%s\\n' '{diagnostic}' >&2",
-                "exit 1",
-                "fi",
-            )
+                "operator_status_output_not_deterministic",
+            ),
         )
-        self.assertEqual(step.count(diagnostic), 1)
-        self.assertIn(guard, "\n".join(line.strip() for line in step.splitlines()))
-        diagnostic_line = next(
-            line for line in step.splitlines() if diagnostic in line
+        for guard_line, diagnostic in guards:
+            with self.subTest(diagnostic=diagnostic):
+                guard = "\n".join(
+                    (
+                        guard_line,
+                        f"printf '%s\\n' '{diagnostic}' >&2",
+                        "exit 1",
+                        "fi",
+                    )
+                )
+                self.assertEqual(step.count(diagnostic), 1)
+                self.assertIn(guard, normalized_step)
+                diagnostic_line = next(
+                    line for line in step.splitlines() if diagnostic in line
+                )
+                self.assertEqual(
+                    diagnostic_line.strip(),
+                    f"printf '%s\\n' '{diagnostic}' >&2",
+                )
+                self.assertNotIn("${", diagnostic_line)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_status_gate_classifies_failures_without_reflecting_output(
+        self,
+    ) -> None:
+        scenarios = (
+            (
+                "first-fail",
+                1,
+                "operator_status_first_query_failed",
+                ("upstream-status-call-1",),
+            ),
+            (
+                "second-fail",
+                1,
+                "operator_status_second_query_failed",
+                ("upstream-status-call-1", "upstream-status-call-2"),
+            ),
+            (
+                "mismatch",
+                1,
+                "operator_status_output_not_deterministic",
+                ("upstream-status-call-1", "upstream-status-call-2"),
+            ),
         )
-        self.assertEqual(diagnostic_line.strip(), f"printf '%s\\n' '{diagnostic}' >&2")
-        self.assertNotIn("${status_first}", diagnostic_line)
-        self.assertNotIn("${status_second}", diagnostic_line)
+        diagnostics = {
+            "operator_status_first_query_failed",
+            "operator_status_second_query_failed",
+            "operator_status_output_not_deterministic",
+        }
+        for scenario, returncode, diagnostic, upstream_lines in scenarios:
+            with self.subTest(scenario=scenario):
+                result = run_operator_status_with_stubbed_docker(scenario)
+                self.assertEqual(result.returncode, returncode)
+                self.assertNotIn("SENSITIVE_STATUS_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_STATUS_SENTINEL", result.stderr)
+                stderr_lines = result.stderr.splitlines()
+                self.assertEqual(
+                    [line for line in stderr_lines if line in diagnostics],
+                    [diagnostic],
+                )
+                self.assertEqual(
+                    [line for line in stderr_lines if line.startswith("upstream-")],
+                    list(upstream_lines),
+                )
+
+        success = run_operator_status_with_stubbed_docker("success")
+        self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+        self.assertEqual(
+            success.stdout,
+            'STUB_ARTIFACT:{"state":"stable"}\n',
+        )
+        self.assertFalse(diagnostics.intersection(success.stderr.splitlines()))
+        self.assertEqual(
+            [
+                line
+                for line in success.stderr.splitlines()
+                if line.startswith("upstream-")
+            ],
+            ["upstream-status-call-1", "upstream-status-call-2"],
+        )
 
     def test_operator_cleanup_removes_all_reviewed_image_tags_and_asserts_absence(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

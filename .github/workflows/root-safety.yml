@@ -450,8 +450,14 @@ jobs:
             test "${compile_first}" = "${compile_second}"
             printf '%s\n' "${compile_first}" > "${platform_ci_dir}/operator-compile.json"
 
-            status_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"
-            status_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"
+            if ! status_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"; then
+              printf '%s\n' 'operator_status_first_query_failed' >&2
+              exit 1
+            fi
+            if ! status_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"; then
+              printf '%s\n' 'operator_status_second_query_failed' >&2
+              exit 1
+            fi
             if test "${status_first}" != "${status_second}"; then
               printf '%s\n' 'operator_status_output_not_deterministic' >&2
               exit 1
