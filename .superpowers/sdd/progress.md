@@ -13,8 +13,11 @@
   - 7.4 least-privilege operator authority foundation: complete - root `29d4478..3f1754c`, two independent review FAIL/fix rounds, final re-review PASS with zero findings; one-shot service and real PostgreSQL effective-authority gate move atomically with the typed CLI in 7.5
   - 7.5 CLI/Root Safety/gitlink closure: complete - backend gitlink pinned to independently reviewed `3bfcb49f3`; exact root implementation SHA `38cc1b537` passed GitHub Root Safety run `29400133575` with steps 1-35 successful and 100 PostgreSQL integration tests with zero skips; whole-Task-7 architecture, security/operations, and code-quality reviews passed with zero findings; closure evidence is recorded in `docs/superpowers/reports/2026-07-15-runtime-registry-v2-phase2b-closure-acceptance.md`
 
-# Phase 2C RuntimeDriver Contract and P0 Kernel
+# Phase 2C Task 1 - RuntimeDriver Contract and P0 Kernel
 
-- Task 1: complete (commits `6f03819..04dae04`, one Important validation finding fixed, re-review spec compliant and task quality approved)
-- Task 2: complete (commits `7db9bf0..92e3da0`, Architecture Resolution A applied; structural fixes and Task 4 trust gates re-reviewed spec compliant and task quality approved)
-- Task 3: complete (commits `b983ce9..6270a58`, review spec compliant and task quality approved with zero findings)
+- Master-plan Task 1: implementation, review, local merge, GitHub publication, and Root Safety acceptance complete; closure evidence is recorded in `docs/superpowers/reports/2026-07-16-runtime-registry-v2-phase2c-task1-closure-acceptance.md`.
+  - Task 1A contract, identity slice: complete (commits `6f03819..04dae04`; one Important validation finding fixed; re-review spec compliant and task quality approved).
+  - Task 1A contract, immutable snapshot slice: complete (commits `7db9bf0..92e3da0`; Architecture Resolution A applied; structural fixes and future Task 4 trust gates re-reviewed spec compliant and task quality approved).
+  - Task 1B P0 launch-kernel extraction: complete (commits `b983ce9..6270a58`; review spec compliant and task quality approved with zero findings).
+  - Whole-Task-1 closure: accepted root implementation SHA `6a0a7b0c2`; focused suite 75/75, full root suite 534 with 8 declared skips, import-purity and diff gates passed, whole-branch review found zero Critical, Important, or Minor findings, and GitHub Root Safety run `29436630894` completed successfully with functional steps 1-35 successful.
+- Master-plan Tasks 2-7: not implemented by this Task 1 slice. The next implementation task is Task 2, Supervisor repository attempt/job transactions.
