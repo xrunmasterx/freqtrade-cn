@@ -1,0 +1,2 @@
+ops/runtime-policies/*.json text eol=lf
+ops/adapter-templates/*.json text eol=lf
