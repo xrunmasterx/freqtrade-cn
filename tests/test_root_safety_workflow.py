@@ -1442,6 +1442,83 @@ docker() {
     )
 
 
+def run_operator_invalid_probe_with_stubbed_docker(
+    scenario: str,
+) -> subprocess.CompletedProcess[str]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    script = step_run_script(workflow, OPERATOR_CI_STEPS[0])
+    lines = script.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.lstrip().startswith("status_first=")
+        or line.lstrip().startswith("if ! status_first=")
+    )
+    loop_start = next(
+        index
+        for index, line in enumerate(lines[start:], start)
+        if line.lstrip().startswith("for invalid_arguments in")
+    )
+    end = next(
+        index
+        for index, line in enumerate(lines[loop_start:], loop_start)
+        if "operator_invalid_arguments_phase_complete" in line
+    )
+    probe_script = "\n".join(lines[start : end + 1])
+    setup = f"export STUB_INVALID_SCENARIO={shlex.quote(scenario)}\n" + r'''
+set -euo pipefail
+RUNNER_TEMP="$(mktemp -d)"
+trap 'rm -rf "${RUNNER_TEMP}"' EXIT
+platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+mkdir -p "${platform_ci_dir}"
+docker_call_count="${RUNNER_TEMP}/docker-call-count"
+printf '0\n' > "${docker_call_count}"
+
+docker() {
+  call_count="$(( $(cat "${docker_call_count}") + 1 ))"
+  printf '%s\n' "${call_count}" > "${docker_call_count}"
+  if test "${call_count}" -le 2; then
+    printf '%s\n' '{"state":"stable"}'
+    return 0
+  fi
+  case "${STUB_INVALID_SCENARIO}" in
+    wrong-status)
+      printf '%s\n' 'SENSITIVE_INVALID_SENTINEL'
+      return 7
+      ;;
+    contaminated-output)
+      printf '%s\n' 'SENSITIVE_INVALID_SENTINEL'
+      printf '%s\n' 'invalid_arguments'
+      return 2
+      ;;
+    exact-output)
+      printf '%s\n' 'invalid_arguments'
+      return 2
+      ;;
+  esac
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        input=(
+            setup
+            + probe_script
+            + "\nprintf '%s\\n' 'STUB_CONTINUED'\n"
+            + "printf 'STUB_CALLS:'\n"
+            + 'cat "${docker_call_count}"\n'
+        ).encode(),
+        capture_output=True,
+        check=False,
+    )
+    return subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        raw_result.stdout.decode(errors="replace"),
+        raw_result.stderr.decode(errors="replace"),
+    )
+
+
 class RootSafetyWorkflowTests(unittest.TestCase):
     def test_github_expression_run_blocks_stay_below_service_limit(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -2857,6 +2934,130 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                     f"printf '%s\\n' '{diagnostic}' >&2",
                 )
                 self.assertNotIn("${", diagnostic_line)
+
+    def test_operator_invalid_probe_gate_has_fixed_safe_diagnostics(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        normalized_step = "\n".join(line.strip() for line in step.splitlines())
+
+        tokens = (
+            "operator_status_phase_complete",
+            "operator_invalid_arguments_exit_status_failed",
+            "operator_invalid_arguments_output_contract_failed",
+            "operator_invalid_arguments_phase_complete",
+        )
+        for token in tokens:
+            with self.subTest(token=token):
+                self.assertEqual(step.count(token), 1)
+                diagnostic_line = next(
+                    line for line in step.splitlines() if token in line
+                )
+                self.assertEqual(
+                    diagnostic_line.strip(),
+                    f"printf '%s\\n' '{token}' >&2",
+                )
+                self.assertNotIn("${", diagnostic_line)
+
+        self.assertIn(
+            "\n".join(
+                (
+                    'if ! test "${invalid_status}" -eq 2; then',
+                    "printf '%s\\n' 'operator_invalid_arguments_exit_status_failed' >&2",
+                    "exit 1",
+                    "fi",
+                )
+            ),
+            normalized_step,
+        )
+        self.assertIn(
+            "\n".join(
+                (
+                    'if ! test "${invalid_output}" = "invalid_arguments"; then',
+                    "printf '%s\\n' 'operator_invalid_arguments_output_contract_failed' >&2",
+                    "exit 1",
+                    "fi",
+                )
+            ),
+            normalized_step,
+        )
+        self.assertLess(
+            step.index('operator-status.json"'),
+            step.index("operator_status_phase_complete"),
+        )
+        self.assertLess(
+            step.index("operator_status_phase_complete"),
+            step.index("for invalid_arguments in"),
+        )
+        self.assertLess(
+            step.index("operator_invalid_arguments_exit_status_failed"),
+            step.index("operator_invalid_arguments_output_contract_failed"),
+        )
+        self.assertLess(
+            step.index("operator_invalid_arguments_output_contract_failed"),
+            step.index("operator_invalid_arguments_phase_complete"),
+        )
+        self.assertLess(
+            step.index("operator_invalid_arguments_phase_complete"),
+            step.index("python - "),
+        )
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_invalid_probe_gate_classifies_failures_without_reflection(
+        self,
+    ) -> None:
+        scenarios = (
+            (
+                "wrong-status",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_exit_status_failed",
+                ),
+            ),
+            (
+                "contaminated-output",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_output_contract_failed",
+                ),
+            ),
+            (
+                "exact-output",
+                0,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_phase_complete",
+                ),
+            ),
+        )
+        all_tokens = {
+            "operator_status_phase_complete",
+            "operator_invalid_arguments_exit_status_failed",
+            "operator_invalid_arguments_output_contract_failed",
+            "operator_invalid_arguments_phase_complete",
+        }
+        for scenario, returncode, expected_stderr in scenarios:
+            with self.subTest(scenario=scenario):
+                result = run_operator_invalid_probe_with_stubbed_docker(scenario)
+                self.assertEqual(
+                    result.returncode,
+                    returncode,
+                    result.stdout + result.stderr,
+                )
+                self.assertNotIn("SENSITIVE_INVALID_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_INVALID_SENTINEL", result.stderr)
+                self.assertEqual(
+                    tuple(
+                        line
+                        for line in result.stderr.splitlines()
+                        if line in all_tokens
+                    ),
+                    expected_stderr,
+                )
+                self.assertEqual("STUB_CONTINUED" in result.stdout, returncode == 0)
+                if returncode == 0:
+                    self.assertIn("STUB_CALLS:5\n", result.stdout)
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
     def test_operator_status_gate_classifies_failures_without_reflecting_output(

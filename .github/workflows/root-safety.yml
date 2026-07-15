@@ -463,6 +463,7 @@ jobs:
               exit 1
             fi
             printf '%s\n' "${status_first}" > "${platform_ci_dir}/operator-status.json"
+            printf '%s\n' 'operator_status_phase_complete' >&2
 
             for invalid_arguments in \
               "runtime-registry status --image forbidden" \
@@ -473,9 +474,16 @@ jobs:
               invalid_output="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator ${invalid_arguments} 2>&1)"
               invalid_status=$?
               set -e
-              test "${invalid_status}" -eq 2
-              test "${invalid_output}" = "invalid_arguments"
+              if ! test "${invalid_status}" -eq 2; then
+                printf '%s\n' 'operator_invalid_arguments_exit_status_failed' >&2
+                exit 1
+              fi
+              if ! test "${invalid_output}" = "invalid_arguments"; then
+                printf '%s\n' 'operator_invalid_arguments_output_contract_failed' >&2
+                exit 1
+              fi
             done
+            printf '%s\n' 'operator_invalid_arguments_phase_complete' >&2
           )
 
           python - \
