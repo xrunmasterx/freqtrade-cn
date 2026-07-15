@@ -202,7 +202,7 @@ The inspection does not contain:
 | `start_period_seconds` | `int` | Non-negative |
 | `interval_seconds` | `int` | Positive |
 | `timeout_seconds` | `int` | Positive and not greater than interval |
-| `retries` | `int` | Positive bounded count |
+| `retries` | `int` | Positive; the closed committed policy supplies the upper bound |
 
 `HealthObservation` contains only:
 
