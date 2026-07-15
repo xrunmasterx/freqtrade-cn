@@ -273,7 +273,7 @@ provenance.
 - [ ] **Step 1: Write RED security mutation tests**
 
 ```python
-MUTATIONS = (
+RENDERED_SNAPSHOT_CONTAINER_POLICY_MUTATIONS = (
     ("restart", "unless-stopped"),
     ("privileged", True),
     ("network_mode", "host"),
@@ -286,6 +286,9 @@ MUTATIONS = (
     ("shell_argv", ("sh", "-c", "caller command")),
     ("raw_credential_argv", ("freqtrade", "--password", "private")),
     ("non_allowlisted_environment", ("CALLER_VALUE", "raw-secret")),
+)
+
+DRIVER_EXECUTION_CONTEXT_MUTATIONS = (
     ("poisoned_path", {"PATH": "attacker-bin"}),
     ("remote_docker_host", {"DOCKER_HOST": "tcp://attacker:2375"}),
     ("unapproved_docker_context", {"DOCKER_CONTEXT": "attacker"}),
@@ -293,10 +296,39 @@ MUTATIONS = (
     ("poisoned_docker_tls", {"DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "attacker"}),
 )
 
-def test_snapshot_validator_rejects_escape_mutations() -> None:
-    for key, value in MUTATIONS:
+def test_rendered_snapshot_validator_rejects_container_policy_mutations() -> None:
+    for key, value in RENDERED_SNAPSHOT_CONTAINER_POLICY_MUTATIONS:
         with pytest.raises(SnapshotPolicyError):
             validate_rendered_snapshot(mutated_render(key, value))
+
+def test_driver_execution_context_is_rejected_before_render_or_action() -> None:
+    for mutation_name, poisoned_host_environment in DRIVER_EXECUTION_CONTEXT_MUTATIONS:
+        render_subprocess = mock.Mock()
+        action_subprocess = mock.Mock()
+        runtime_mutation = mock.Mock()
+        driver = future_safe_compose_driver(
+            host_environment=poisoned_host_environment,
+            render_subprocess=render_subprocess,
+            action_subprocess=action_subprocess,
+            runtime_mutation=runtime_mutation,
+        )
+        with pytest.raises(DriverPolicyError, match="^driver_policy_error$"):
+            driver.launch(valid_snapshot())
+        render_subprocess.assert_not_called()
+        action_subprocess.assert_not_called()
+        runtime_mutation.assert_not_called()
+
+def test_legacy_p0_helper_preserves_current_ambient_docker_behavior() -> None:
+    ambient = {"PATH": "legacy-path", "DOCKER_HOST": "legacy-endpoint"}
+    subprocess_run = mock.Mock(return_value=completed_process(returncode=0))
+    with mock.patch.dict(os.environ, ambient, clear=False), mock.patch(
+        "tools.compose_runtime.subprocess.run",
+        subprocess_run,
+    ):
+        call_legacy_p0_launch_helper()
+    assert subprocess_run.called
+    assert subprocess_run.call_args.kwargs["env"]["PATH"] == "legacy-path"
+    assert subprocess_run.call_args.kwargs["env"]["DOCKER_HOST"] == "legacy-endpoint"
 ```
 
 - [ ] **Step 2: Run RED**
@@ -326,13 +358,22 @@ Snapshot service has:
 Validate the compiled snapshot and rendered JSON before and immediately before action. The
 acceptance tests independently cover parent-directory Docker socket exposure,
 `ReadOnlyMount` secret-role bypass, source-root and symlink/junction/reparse escape, shell
-argv, raw credential argv, non-allowlisted/raw-secret environment, and poisoned Docker
-executable/environment/endpoint inputs with pre-mutation rejection and zero action.
+argv, raw credential argv, and non-allowlisted/raw-secret environment through the rendered-
+snapshot validator only. Separately, the future `SafeComposeRuntimeDriver` host pre-action
+validation gate rejects poisoned Docker executable/environment/endpoint/context inputs
+before rendering or action. Render subprocess, action subprocess, and runtime-mutation
+boundaries are mocked independently; every execution-context mutation must raise the fixed
+`DriverPolicyError`, make zero render subprocess calls, make zero action subprocess calls,
+and perform zero runtime mutation. Driver execution-context mutations must never be passed
+to `mutated_render()` or `validate_rendered_snapshot()`.
 Boundary-specific tests reject mapping input at the public API DTO,
 repository/PostgreSQL loader, RuntimeSpec/compiler input, Supervisor assembly, and concrete-
 driver launch, and assert none calls mapping deserialization. Temporary files are opened
 with exclusive permissions and removed in `finally`. Create `SafeComposeRuntimeDriver` only
 after all of these tests pass; it must call the final validator immediately before mutation.
+An explicit compatibility test must also prove the legacy P0 helper retains its current
+ambient Docker executable/environment behavior; the new host-context gate applies only to
+the future driver.
 
 - [ ] **Step 4: Run GREEN and commit**
 
