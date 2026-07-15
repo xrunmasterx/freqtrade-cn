@@ -59,7 +59,7 @@ class RuntimeDriverTests(unittest.TestCase):
     def test_launch_snapshot_validation_accepts_only_existing_snapshot(self) -> None:
         payload = valid_snapshot_payload()
         snapshot = LaunchSnapshot(**payload)
-        assert LaunchSnapshot.model_validate(snapshot) is snapshot
+        self.assertIs(LaunchSnapshot.model_validate(snapshot), snapshot)
         for external in (payload, {**payload, "compose": {"services": {}}}):
             with self.assertRaisesRegex(DriverValidationError, "driver_validation_error"):
                 LaunchSnapshot.model_validate(external)
@@ -78,7 +78,7 @@ python -S -m unittest tests.test_runtime_driver tests.test_compose_runtime -v
 
 Expected: missing `runtime_driver`.
 
-- [ ] **Step 3: Implement protocol and adapter**
+- [ ] **Step 3: Implement protocol and extract the shared kernel**
 
 ```python
 class RuntimeDriver(Protocol):
@@ -108,10 +108,12 @@ rejected with zero probe execution.
 ```powershell
 python -S -m unittest tests.test_runtime_driver tests.test_compose_runtime tests.test_committed_build tests.test_image_provenance -v
 git add tools/runtime_driver.py tools/compose_runtime.py tests/test_runtime_driver.py tests/test_compose_runtime.py
-git commit -m "refactor(runtime): expose verified compose driver"
+git commit -m "refactor(runtime): expose verified compose kernel"
 ```
 
 Expected: existing P0 tests and new driver tests pass with no behavior change to current services.
+`tests.test_committed_build` and `tests.test_image_provenance` are unchanged prerequisite
+regression gates; Task 1 neither owns nor stages their files.
 
 ---
 
@@ -142,6 +144,11 @@ def test_failed_attempt_latches_without_queuing_retry(repository, running_job) -
     assert instance.failure_latched is True
     assert repository.pending_jobs(attempt.instance_id) == ()
 ```
+
+Task 2 intentionally uses the backend pytest suite rather than the dependency-free root
+unittest suite. `tests/platform/test_runtime_repository.py` and
+`tests/platform/test_runtime_service.py` are unchanged prerequisite regression gates and are
+not Task 2 outputs or staging inputs.
 
 - [ ] **Step 2: Run RED**
 
@@ -193,13 +200,31 @@ CASES = (
     ("unknown_present", "fail_latched"),
 )
 
-def test_reconciliation_matrix() -> None:
-    for observed, expected in CASES:
-        with subTest(observed=observed):
-            assert decide_reconciliation(expected_identity(), inspection(observed)).value == expected
+
+class RuntimeSupervisorReconcilerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.driver = fake_runtime_driver()
+
+    def test_reconciliation_matrix(self) -> None:
+        for observed, expected in CASES:
+            with self.subTest(observed=observed):
+                decision = decide_reconciliation(
+                    expected_identity(),
+                    inspection(observed),
+                )
+                self.assertEqual(decision.value, expected)
+
+    def test_identity_mismatch_and_unknown_state_never_mutate(self) -> None:
+        for observed in ("healthy_wrong_spec", "unknown_present"):
+            with self.subTest(observed=observed):
+                reconcile_once(self.driver, inspection(observed))
+                self.driver.launch.assert_not_called()
+                self.driver.stop.assert_not_called()
+                self.driver.restart.assert_not_called()
+                self.driver.delete.assert_not_called()
 ```
 
-Add tests proving `identity_mismatch` and `DriverState.UNKNOWN` never invoke driver
+These tests prove `identity_mismatch` and `DriverState.UNKNOWN` never invoke driver
 launch/stop/restart/delete. `UNKNOWN` represents paused, restarting, removing, dead, and any
 future present state that cannot be safely normalized; it retains observed identity,
 requires `container_id`, forbids `exit_code`, and always latches/no-ops.
@@ -299,30 +324,38 @@ class RuntimeSnapshotSecurityTests(unittest.TestCase):
                 validate_rendered_snapshot(mutated_render(key, value))
 
     def test_compiler_constructs_internal_snapshot_without_mapping_deserialization(self) -> None:
-        mapping_deserializer = mock.Mock()
-        snapshot = compile_launch_snapshot(
-            **valid_typed_compiler_inputs(),
-            mapping_deserializer=mapping_deserializer,
-        )
+        with mock.patch.object(
+            LaunchSnapshot,
+            "model_validate",
+            wraps=LaunchSnapshot.model_validate,
+        ) as mapping_guard:
+            snapshot = compile_launch_snapshot(
+                spec=valid_runtime_spec(),
+                template=committed_adapter_template(),
+                policies=committed_runtime_policies(),
+                state=managed_state_allocation(),
+                secrets=resolved_secret_references(),
+                identity=expected_identity(),
+            )
+        mapping_guard.assert_not_called()
         self.assertIsInstance(snapshot, LaunchSnapshot)
-        self.assertIs(LaunchSnapshot.model_validate(snapshot), snapshot)
-        mapping_deserializer.assert_not_called()
 
 
 class LaunchSnapshotIngressBoundaryTests(unittest.TestCase):
     def test_external_mappings_are_rejected_before_deserialization(self) -> None:
         for boundary_name, boundary in EXTERNAL_SNAPSHOT_MAPPING_BOUNDARIES:
             with self.subTest(boundary=boundary_name):
-                mapping_deserializer = mock.Mock()
-                with self.assertRaisesRegex(
-                    DriverValidationError,
-                    "^driver_validation_error$",
-                ):
-                    boundary(
-                        valid_looking_snapshot_mapping(),
-                        mapping_deserializer=mapping_deserializer,
-                    )
-                mapping_deserializer.assert_not_called()
+                with mock.patch.object(
+                    LaunchSnapshot,
+                    "model_validate",
+                    wraps=LaunchSnapshot.model_validate,
+                ) as mapping_guard:
+                    with self.assertRaisesRegex(
+                        DriverValidationError,
+                        "^driver_validation_error$",
+                    ):
+                        boundary(valid_looking_snapshot_mapping())
+                mapping_guard.assert_not_called()
 ```
 
 - [ ] **Step 2: Run Task 4A RED**
@@ -353,6 +386,8 @@ git commit -m "feat(runtime): compile safe launch snapshots"
 
 Expected: the module command discovers both TestCase classes and all Task 4A security and
 ingress methods; `tools/runtime_driver.py` is unchanged and remains dependency-free.
+`tests.test_runtime_driver` is an unchanged prerequisite contract gate; Task 4A owns and
+stages only its compiler and compiler-test files.
 
 ---
 
@@ -360,7 +395,9 @@ ingress methods; `tools/runtime_driver.py` is unchanged and remains dependency-f
 
 **Files:**
 - Create: `tools/safe_compose_driver.py`
+- Modify: `tools/compose_runtime.py`
 - Test: `tests/test_safe_compose_driver.py`
+- Test: `tests/test_compose_runtime.py`
 
 **Interfaces:**
 - Consumes the pure `RuntimeDriver` DTO/protocol contract, Task 4A compiler/final validator,
@@ -370,13 +407,23 @@ ingress methods; `tools/runtime_driver.py` is unchanged and remains dependency-f
   explicitly approved local engine endpoint/context.
 - Adds no mutation authority to `tools/runtime_driver.py` and does not alter the legacy P0
   compatibility helper's ambient Docker behavior.
+- Minimally parameterizes the one extracted low-level validated launch kernel in
+  `tools/compose_runtime.py` to accept an already-approved `docker_executable` and a complete
+  `environment`; the kernel does not resolve `PATH`, read ambient Docker variables, or
+  construct an alternative execution context.
+
+There remains exactly one render/validate/action kernel. The legacy P0 wrapper keeps its
+current ambient-derived filtering and passes `docker_executable="docker"` plus that complete
+filtered environment. `SafeComposeRuntimeDriver` validates and passes a trusted absolute
+Docker executable, driver-owned minimal environment, and explicitly approved local
+endpoint/context. Neither caller duplicates, bypasses, or partially reimplements the
+kernel.
 
 - [ ] **Step 1: Write discoverable RED driver security and lifecycle tests**
 
 In `tests/test_safe_compose_driver.py`, use only standard-library `unittest`:
 
 ```python
-import os
 import unittest
 from unittest import mock
 
@@ -420,17 +467,34 @@ class SafeComposeDriverPreActionSecurityTests(unittest.TestCase):
                 runtime_mutation.assert_not_called()
 
     def test_concrete_driver_rejects_external_snapshot_mapping_at_ingress(self) -> None:
-        mapping_deserializer = mock.Mock()
-        driver = safe_driver_fixture(mapping_deserializer=mapping_deserializer)
+        driver = safe_driver_fixture()
         with self.assertRaisesRegex(
             DriverValidationError,
             "^driver_validation_error$",
         ):
             driver.launch(valid_looking_snapshot_mapping())
-        mapping_deserializer.assert_not_called()
         driver.render_subprocess.assert_not_called()
         driver.action_subprocess.assert_not_called()
         driver.runtime_mutation.assert_not_called()
+
+    def test_approved_context_calls_the_single_shared_kernel(self) -> None:
+        launch_kernel = mock.Mock(return_value=completed_process(returncode=0))
+        approved_environment = approved_driver_minimal_environment()
+        driver = safe_driver_fixture(
+            docker_executable=trusted_absolute_docker_executable(),
+            environment=approved_environment,
+            launch_kernel=launch_kernel,
+        )
+        driver.launch(valid_snapshot())
+        launch_kernel.assert_called_once()
+        self.assertEqual(
+            launch_kernel.call_args.kwargs["docker_executable"],
+            trusted_absolute_docker_executable(),
+        )
+        self.assertEqual(
+            launch_kernel.call_args.kwargs["environment"],
+            approved_environment,
+        )
 
     def test_probe_rejects_uncommitted_or_mismatched_catalog_profiles(self) -> None:
         for mutation in INVALID_PROBE_CATALOG_MUTATIONS:
@@ -446,25 +510,6 @@ class SafeComposeDriverPreActionSecurityTests(unittest.TestCase):
                 ):
                     driver.probe(expected_identity(), "freqtrade-ping-v1")
                 probe_executor.assert_not_called()
-
-    def test_legacy_p0_helper_preserves_current_ambient_docker_behavior(self) -> None:
-        ambient = {"PATH": "legacy-path", "DOCKER_HOST": "legacy-endpoint"}
-        subprocess_run = mock.Mock(return_value=completed_process(returncode=0))
-        with mock.patch.dict(os.environ, ambient, clear=False), mock.patch(
-            "tools.compose_runtime.subprocess.run",
-            subprocess_run,
-        ):
-            call_legacy_p0_launch_helper()
-        self.assertTrue(subprocess_run.called)
-        self.assertEqual(
-            subprocess_run.call_args.kwargs["env"]["PATH"],
-            "legacy-path",
-        )
-        self.assertEqual(
-            subprocess_run.call_args.kwargs["env"]["DOCKER_HOST"],
-            "legacy-endpoint",
-        )
-
 
 class SafeComposeDriverLifecycleTests(unittest.TestCase):
     def test_occupied_locator_rejects_launch_without_mutation(self) -> None:
@@ -522,42 +567,82 @@ class SafeComposeDriverLifecycleTests(unittest.TestCase):
         self.assertFalse(driver.retry_attempted)
 ```
 
+In `tests/test_compose_runtime.py`, pin the existing P0 wrapper-to-kernel behavior:
+
+```python
+import os
+import unittest
+from unittest import mock
+
+
+class ComposeKernelCompatibilityTests(unittest.TestCase):
+    def test_legacy_wrapper_passes_relative_docker_and_current_filtered_environment(self) -> None:
+        ambient = {"PATH": "legacy-path", "DOCKER_HOST": "legacy-endpoint"}
+        launch_kernel = mock.Mock(return_value=completed_process(returncode=0))
+        with mock.patch.dict(os.environ, ambient, clear=False), mock.patch(
+            "tools.compose_runtime._run_validated_snapshot_launch",
+            launch_kernel,
+        ):
+            call_legacy_p0_launch_helper()
+        launch_kernel.assert_called_once()
+        self.assertEqual(
+            launch_kernel.call_args.kwargs["docker_executable"],
+            "docker",
+        )
+        self.assertEqual(
+            launch_kernel.call_args.kwargs["environment"],
+            current_legacy_filtered_environment(ambient),
+        )
+```
+
 These TestCase methods cover concrete-driver mapping ingress, occupied locators, exact
 identity, real post-action inspection, full-ID stop without delete, closed probe catalog
 validation, ambiguous outcome without retry, preflight zero action, and legacy P0 ambient
-compatibility. `DRIVER_EXECUTION_CONTEXT_MUTATIONS` exists only in Task 4B and is exercised
+compatibility. The safe-driver test proves the approved absolute executable and complete
+minimal environment reach the one shared kernel, while the Compose compatibility test
+proves the legacy wrapper passes relative `docker` and its unchanged ambient-derived
+filtered environment. `DRIVER_EXECUTION_CONTEXT_MUTATIONS` exists only in Task 4B and is exercised
 only through the driver host pre-action gate; it is never passed to the Task 4A rendered-
 snapshot validator.
 
 - [ ] **Step 2: Run Task 4B RED**
 
 ```powershell
-python -S -m unittest tests.test_safe_compose_driver -v
+python -S -m unittest tests.test_safe_compose_driver tests.test_compose_runtime -v
 ```
 
-Expected: `tools.safe_compose_driver` and its adapter are missing. The module command
-discovers both TestCase classes and every shown Task 4B security/lifecycle method.
+Expected: `tools.safe_compose_driver` and the parameterized kernel contract are missing. The
+module command discovers both safe-driver TestCase classes and the Compose compatibility
+TestCase.
 
 - [ ] **Step 3: Implement the concrete adapter**
 
 `tools/safe_compose_driver.py` calls the Task 4A final validator immediately before every
-launch mutation, invokes the extracted validated P0 kernel with argument arrays only, and
-uses real post-action inspection. It performs no automatic retry, stops only exact identity
-by immutable full container ID, and never removes containers, networks, volumes, paths,
-images, state, or secrets. All preflight rejections occur before render/action subprocesses
-or runtime mutation.
+launch mutation and invokes the same extracted validated P0 kernel with argument arrays
+only. Task 4B minimally parameterizes that kernel to require explicit
+`docker_executable: str` and complete `environment: Mapping[str, str]` inputs; the kernel
+uses those inputs for both render and action and never chooses or extends them. The legacy
+wrapper supplies relative `docker` and its unchanged ambient-derived filtered environment;
+the safe driver supplies only its prevalidated absolute executable/minimal environment/local
+endpoint. There is no second kernel or bypass. The adapter uses real post-action inspection,
+performs no automatic retry, stops only exact identity by immutable full container ID, and
+never removes containers, networks, volumes, paths, images, state, or secrets. All preflight
+rejections occur before render/action subprocesses or runtime mutation.
 
 - [ ] **Step 4: Run Task 4B GREEN and commit separately**
 
 ```powershell
-python -S -m unittest tests.test_safe_compose_driver -v
-python -S -m unittest tests.test_runtime_driver tests.test_runtime_snapshot tests.test_safe_compose_driver -v
-git add tools/safe_compose_driver.py tests/test_safe_compose_driver.py
+python -S -m unittest tests.test_safe_compose_driver tests.test_compose_runtime -v
+python -S -m unittest tests.test_runtime_driver tests.test_runtime_snapshot tests.test_safe_compose_driver tests.test_compose_runtime -v
+git add tools/safe_compose_driver.py tools/compose_runtime.py tests/test_safe_compose_driver.py tests/test_compose_runtime.py
 git commit -m "feat(runtime): add safe compose driver"
 ```
 
-Expected: every Task 4B TestCase method is discovered under dependency-free `python -S`;
-Task 4A remains pure, Task 4B has its own two-file commit, and legacy P0 behavior is unchanged.
+Expected: every Task 4B and compatibility TestCase method is discovered under dependency-
+free `python -S`; Task 4A remains pure, Task 4B has its own exact four-file commit, one shared
+kernel remains, and legacy P0 behavior is unchanged.
+`tests.test_runtime_driver` and `tests.test_runtime_snapshot` are unchanged prerequisite
+contract/compiler gates; Task 4B owns and stages exactly the four files in its file list.
 
 ---
 
@@ -565,18 +650,31 @@ Task 4A remains pure, Task 4B has its own two-file commit, and legacy P0 behavio
 
 **Files:**
 - Modify: `tools/runtime_driver.py`
+- Modify: `tools/safe_compose_driver.py`
 - Modify: `tools/runtime_supervisor/reconciler.py`
+- Modify: `tests/test_runtime_driver.py`
+- Modify: `tests/test_safe_compose_driver.py`
 - Test: `tests/test_runtime_access_network.py`
 
 **Interfaces:**
 - Produces `ensure_access_network(identity, platform_control_identity)` and `remove_access_network_if_empty(identity)`.
 - Network contains exactly verified platform-control and exact active runtime.
 - Network name/alias is deterministic from non-secret instance/attempt identity and never caller-provided.
+- `tools/runtime_driver.py` may add only genuinely required pure protocol method signatures
+  or immutable network identity/observation DTOs; it must not import Docker/subprocess code
+  or implement network actions.
+- Every Docker network inspect/create/connect/disconnect/rm action is implemented only by
+  `SafeComposeRuntimeDriver` in `tools/safe_compose_driver.py`.
 
 - [ ] **Step 1: Write RED network tests**
 
+In `tests/test_runtime_access_network.py`:
+
 ```python
 class RuntimeAccessNetworkTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.driver = fake_runtime_network_driver()
+
     def test_two_runtimes_never_share_access_network(self) -> None:
         first = access_network_identity("runtime-a")
         second = access_network_identity("runtime-b")
@@ -589,6 +687,43 @@ class RuntimeAccessNetworkTests(unittest.TestCase):
         self.assertFalse(self.driver.disconnect_called)
 ```
 
+In `tests/test_safe_compose_driver.py`, add focused adapter ownership coverage:
+
+```python
+class SafeComposeDriverNetworkTests(unittest.TestCase):
+    def test_network_action_uses_safe_driver_execution_context_and_exact_argv(self) -> None:
+        network_subprocess = mock.Mock(return_value=completed_process(returncode=0))
+        driver = safe_driver_fixture(network_subprocess=network_subprocess)
+        driver.ensure_access_network(
+            expected_identity(),
+            verified_platform_control_identity(),
+        )
+        network_subprocess.assert_called_once_with(
+            expected_network_argv(),
+            executable=trusted_absolute_docker_executable(),
+            environment=approved_driver_minimal_environment(),
+        )
+
+    def test_unknown_network_member_never_disconnects_or_removes(self) -> None:
+        disconnect = mock.Mock()
+        remove = mock.Mock()
+        driver = safe_driver_fixture(
+            observed_members=network_members("platform-control", "runtime-a", "unknown"),
+            disconnect=disconnect,
+            remove=remove,
+        )
+        with self.assertRaisesRegex(
+            NetworkIdentityError,
+            "^access_network_member_mismatch$",
+        ):
+            driver.ensure_access_network(
+                expected_identity(),
+                verified_platform_control_identity(),
+            )
+        disconnect.assert_not_called()
+        remove.assert_not_called()
+```
+
 - [ ] **Step 2: Run RED**
 
 ```powershell
@@ -599,15 +734,24 @@ Expected: missing interfaces.
 
 - [ ] **Step 3: Implement verified closed network operations**
 
-Use exact `docker network inspect/create/connect/disconnect/rm` argument arrays inside the driver only. Verify platform-control container ID and immutable labels before connect. Create with `--internal` when upstream access is not required. Never disconnect/delete a network containing an unknown member. Reconcile attachments after daemon restart.
+The reconciler owns pure decisions and calls the protocol; all exact `docker network
+inspect/create/connect/disconnect/rm` argument arrays and execution live only in
+`tools/safe_compose_driver.py`. Verify platform-control container ID and immutable labels
+before connect. Create with `--internal` when upstream access is not required. Never
+disconnect/delete a network containing an unknown member. Reconcile attachments after
+daemon restart. `tools/runtime_driver.py` remains dependency-free and contains no Docker
+executable, subprocess call, or mutation authority.
 
 - [ ] **Step 4: Run GREEN and commit**
 
 ```powershell
-python -S -m unittest tests.test_runtime_access_network tests.test_runtime_driver tests.test_runtime_supervisor_reconciler -v
-git add tools/runtime_driver.py tools/runtime_supervisor/reconciler.py tests/test_runtime_access_network.py
+python -S -m unittest tests.test_runtime_access_network tests.test_safe_compose_driver tests.test_runtime_driver tests.test_runtime_supervisor_reconciler -v
+git add tools/runtime_driver.py tools/safe_compose_driver.py tools/runtime_supervisor/reconciler.py tests/test_runtime_driver.py tests/test_safe_compose_driver.py tests/test_runtime_access_network.py
 git commit -m "feat(runtime): isolate per-instance access networks"
 ```
+
+`tests.test_runtime_supervisor_reconciler` is an unchanged prerequisite regression gate;
+all Task 5-owned source/test files in the file list are staged explicitly.
 
 ---
 
@@ -627,17 +771,34 @@ git commit -m "feat(runtime): isolate per-instance access networks"
 
 - [ ] **Step 1: Write RED failure and emergency tests**
 
-```python
-def test_timeout_adopts_exact_healthy_container(reconciler) -> None:
-    reconciler.driver.launch.side_effect = TimeoutError()
-    reconciler.driver.inspect.return_value = healthy_exact_inspection()
-    result = reconciler.run(start_job())
-    assert result.code == "adopted_after_ambiguous_launch"
+In `tests/test_runtime_supervisor_failures.py`:
 
-def test_emergency_rejects_label_mismatch_without_stop(emergency) -> None:
-    with pytest.raises(EmergencyIdentityError, match="offline_identity_mismatch"):
-        emergency.stop("runtime-1", observed=wrong_labels())
-    emergency.driver.stop.assert_not_called()
+```python
+class RuntimeSupervisorFailureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.reconciler = fake_reconciler()
+
+    def test_timeout_adopts_exact_healthy_container(self) -> None:
+        self.reconciler.driver.launch.side_effect = TimeoutError()
+        self.reconciler.driver.inspect.return_value = healthy_exact_inspection()
+        result = self.reconciler.run(start_job())
+        self.assertEqual(result.code, "adopted_after_ambiguous_launch")
+```
+
+In `tests/test_runtime_offline_identity.py`:
+
+```python
+class RuntimeOfflineIdentityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.emergency = fake_emergency_controller()
+
+    def test_emergency_rejects_label_mismatch_without_stop(self) -> None:
+        with self.assertRaisesRegex(
+            EmergencyIdentityError,
+            "^offline_identity_mismatch$",
+        ):
+            self.emergency.stop("runtime-1", observed=wrong_labels())
+        self.emergency.driver.stop.assert_not_called()
 ```
 
 - [ ] **Step 2: Run RED**
@@ -669,6 +830,9 @@ git add tools/runtime_supervisor/offline_identity.py tools/runtime_supervisor/re
 git commit -m "feat(runtime): latch failures and publish emergency identity"
 ```
 
+`tests.test_compose_runtime` is an unchanged prerequisite compatibility regression gate;
+all Task 6-owned files are listed and staged explicitly.
+
 ---
 
 ### Task 7: Supervisor daemon, CLI, and paper-probe offline acceptance
@@ -691,22 +855,40 @@ git commit -m "feat(runtime): latch failures and publish emergency identity"
 
 - [ ] **Step 1: Write RED daemon/CLI tests**
 
-```python
-def test_daemon_renews_lease_and_processes_one_job_at_a_time() -> None:
-    daemon = RuntimeSupervisorDaemon(fake_repository(two_jobs()), fake_reconciler())
-    daemon.run_once()
-    assert daemon.repository.claim_count == 1
-    assert daemon.repository.completed_count == 1
+In `tests/test_runtime_supervisor_daemon.py`:
 
-def test_cli_start_creates_job_without_calling_driver() -> None:
-    result = run_cli(
-        "runtime-registry", "start",
-        "--instance-id", "phase2-paper-probe",
-        "--expected-version", "0",
-        "--idempotency-key", "acceptance-start-1",
-    )
-    assert result.returncode == 0
-    assert fake_driver.calls == []
+```python
+class RuntimeSupervisorDaemonTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = fake_repository(two_jobs())
+        self.daemon = RuntimeSupervisorDaemon(
+            self.repository,
+            fake_reconciler(),
+        )
+
+    def test_daemon_renews_lease_and_processes_one_job_at_a_time(self) -> None:
+        self.daemon.run_once()
+        self.assertEqual(self.repository.claim_count, 1)
+        self.assertEqual(self.repository.completed_count, 1)
+```
+
+In `tests/test_runtime_registry_cli.py`:
+
+```python
+class RuntimeRegistryCliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.driver = fake_runtime_driver()
+        self.cli = runtime_registry_cli_fixture(driver=self.driver)
+
+    def test_cli_start_creates_job_without_calling_driver(self) -> None:
+        result = self.cli.run(
+            "runtime-registry", "start",
+            "--instance-id", "phase2-paper-probe",
+            "--expected-version", "0",
+            "--idempotency-key", "acceptance-start-1",
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.driver.mock_calls, [])
 ```
 
 - [ ] **Step 2: Run RED**
@@ -728,7 +910,7 @@ CI compiles the paper probe, provisions isolated temporary state/secrets, render
 - [ ] **Step 5: Verify Phase 2C**
 
 ```powershell
-python -S -m unittest tests.test_runtime_driver tests.test_runtime_snapshot tests.test_safe_compose_driver tests.test_runtime_access_network tests.test_runtime_supervisor_reconciler tests.test_runtime_supervisor_failures tests.test_runtime_offline_identity tests.test_runtime_supervisor_daemon tests.test_runtime_registry_cli -v
+python -S -m unittest tests.test_runtime_driver tests.test_runtime_snapshot tests.test_safe_compose_driver tests.test_runtime_access_network tests.test_runtime_supervisor_reconciler tests.test_runtime_supervisor_failures tests.test_runtime_offline_identity tests.test_runtime_supervisor_daemon tests.test_runtime_registry_cli tests.test_root_safety_workflow -v
 Push-Location freqtrade
 python -m pytest tests/platform/test_supervisor_repository.py tests/platform/test_runtime_repository.py tests/platform/test_runtime_service.py -q -p no:cacheprovider
 ruff check freqtrade/platform tests/platform
@@ -736,12 +918,17 @@ Pop-Location
 ```
 
 Expected: all tests pass; no authorized-online step runs.
+The root `python -S -m unittest` command remains dependency-free. The backend pytest command
+is a separate submodule regression gate and is not a dependency of any root unittest module.
 
 - [ ] **Step 6: Commit root integration**
 
 ```powershell
-git add tools/runtime_supervisor tools/runtime_registry_cli.py .github/workflows/root-safety.yml tests/test_root_safety_workflow.py tests/test_runtime_supervisor_daemon.py docs/operations/runtime-supervisor.md freqtrade
+git add tools/runtime_supervisor/daemon.py tools/runtime_supervisor/__main__.py tools/runtime_registry_cli.py tests/test_runtime_supervisor_daemon.py tests/test_runtime_registry_cli.py .github/workflows/root-safety.yml tests/test_root_safety_workflow.py docs/operations/runtime-supervisor.md freqtrade
 git commit -m "ci: gate phase2c runtime supervisor"
 ```
 
 Expected: reviewed backend gitlink, root supervisor/CI/runbook only, clean worktree.
+The Task 1-6 root/backend test modules in the Phase 2C verification command are unchanged
+prerequisite regression gates. Task 7 owns and stages exactly its daemon, CLI, Root Safety,
+runbook, and reviewed backend-gitlink files listed above.
