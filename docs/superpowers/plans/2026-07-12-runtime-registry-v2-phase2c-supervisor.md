@@ -5,7 +5,7 @@
 
 **Goal:** Execute Registry lifecycle jobs through one host-local Supervisor, reuse the verified P0 Compose launch kernel, create append-only attempts, reconcile ambiguous outcomes, manage per-instance access networks, and launch the isolated Bitget Spot paper probe.
 
-**Architecture:** Keep orchestration/state transitions independent of Docker behind a `RuntimeDriver` protocol. Adapt the existing `tools.compose_runtime` validated-snapshot path instead of introducing Docker SDK control; only the Supervisor resolves state/secrets and calls the driver. Failures latch and never auto-restart.
+**Architecture:** Keep orchestration/state transitions independent of Docker behind a `RuntimeDriver` protocol. Adapt the existing `tools.compose_runtime` validated-snapshot path instead of introducing Docker SDK control. The Supervisor supplies typed RuntimeSpec/state/secret references to the Task 4 compiler; only that compiler resolves launch material and emits the internal snapshot before the Supervisor calls the driver. Failures latch and never auto-restart.
 
 **Tech Stack:** Python standard library, SQLAlchemy/PostgreSQL repository adapter, Docker Compose CLI, Pydantic DTOs, unittest, pytest, Ruff.
 
@@ -24,7 +24,7 @@
 
 ## File Structure
 
-- Create `tools/runtime_driver.py`: `RuntimeDriver` protocol, safe Compose adapter, identity DTOs.
+- Create `tools/runtime_driver.py`: pure `RuntimeDriver` protocol and immutable identity/snapshot DTOs; the safe Compose adapter is deferred until Task 4 trust-boundary gates pass.
 - Create `tools/runtime_supervisor/domain.py`: driver-neutral reconciliation decisions.
 - Create `tools/runtime_supervisor/reconciler.py`: job/attempt reconciliation.
 - Create `tools/runtime_supervisor/daemon.py`: bounded lease loop and one-shot command.
@@ -94,7 +94,11 @@ class RuntimeDriver(Protocol):
     ) -> HealthObservation: ...
 ```
 
-`SafeComposeRuntimeDriver` calls extracted `_validate_launch`, exact image inspection, committed build identity, validated temporary snapshot, `--no-build --no-deps`, and cleanup functions. It constructs subprocess argument lists only; no shell interpolation and no Docker SDK.
+Task 1 does not create `SafeComposeRuntimeDriver`. The concrete adapter is deferred until
+Task 4 has implemented and mutation-tested the approved compiler and final pre-mutation
+validator. It will then call the extracted `_validate_launch`, exact image inspection,
+committed build identity, validated temporary snapshot, `--no-build --no-deps`, and cleanup
+functions using subprocess argument lists only, with no shell interpolation or Docker SDK.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -228,6 +232,31 @@ git commit -m "feat(runtime): reconcile supervised attempts"
 - Output uses one-time temporary Compose input and contains no long-lived generated file.
 - Secrets mount as Compose secrets/fixed read-only files, never ordinary environment values.
 
+**User-approved Architecture Resolution A:** `LaunchSnapshot` is an internal
+post-compilation value, never accepted or deserialized from a public API, PostgreSQL,
+RuntimeSpec JSON, or generic external mapping. Task 2 validates only structural/canonical
+form and is not provenance or secret-classification authority. The Task 4 compiler accepts
+only committed closed `AdapterTemplate`/policy plus typed RuntimeSpec, state-allocation, and
+secret references. Only it emits argv, environment entries, and resolved mount sources.
+
+Task 4 trust-boundary gates are mandatory:
+
+- read-only sources originate only from compiler-owned or allowlisted material roots and
+  cannot expose host directories, Docker sockets, devices, named pipes, or untyped secrets;
+- every source is resolved, and parent/root escape plus symlink, junction, or reparse-point
+  escape is rejected;
+- argv is expanded only from a committed executable/argument template, never shell
+  interpolation or caller strings, and never contains raw credentials or other secrets;
+- environment names use a per-template closed allowlist, with values only from typed
+  non-secret fields or committed constants;
+- provider-resolved `SecretMount` values are the only secret transport;
+- the final snapshot validator rechecks every gate, and the future concrete driver invokes
+  it immediately before mutation.
+
+No `SafeComposeRuntimeDriver` exists until all gates and mutation tests pass. This is the
+approved resolution of the review finding, not a claim that Task 2 dataclasses prove
+provenance.
+
 - [ ] **Step 1: Write RED security mutation tests**
 
 ```python
@@ -238,6 +267,13 @@ MUTATIONS = (
     ("pid", "host"),
     ("volumes", ["/:/host"]),
     ("ports", ["9000:8080"]),
+    ("parent_directory_docker_socket", "../docker.sock"),
+    ("read_only_mount_secret_role_bypass", "secret-as-config"),
+    ("source_root_or_link_escape", "material-root/link-out"),
+    ("shell_argv", ("sh", "-c", "caller command")),
+    ("raw_credential_argv", ("freqtrade", "--password", "private")),
+    ("non_allowlisted_environment", ("CALLER_VALUE", "raw-secret")),
+    ("external_launch_snapshot", {"argv": ["caller"]}),
 )
 
 def test_snapshot_validator_rejects_escape_mutations() -> None:
@@ -270,7 +306,13 @@ Snapshot service has:
 - identity/provenance labels;
 - no host port.
 
-Validate rendered JSON before and immediately before action. Temporary file is opened with exclusive permissions and removed in `finally`.
+Validate the compiled snapshot and rendered JSON before and immediately before action. The
+acceptance tests independently cover parent-directory Docker socket exposure,
+`ReadOnlyMount` secret-role bypass, source-root and symlink/junction/reparse escape, shell
+argv, raw credential argv, non-allowlisted/raw-secret environment, and external
+`LaunchSnapshot` deserialization. Temporary files are opened with exclusive permissions
+and removed in `finally`. Create `SafeComposeRuntimeDriver` only after all of these tests
+pass; it must call the final validator immediately before mutation.
 
 - [ ] **Step 4: Run GREEN and commit**
 

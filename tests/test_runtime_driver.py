@@ -275,7 +275,11 @@ class LaunchSnapshotTests(unittest.TestCase):
                 self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_secret_environment_and_mount_escape_hatches(self) -> None:
-        from tools.runtime_driver import EnvironmentEntry, ReadOnlyMount
+        from tools.runtime_driver import (
+            DriverValidationError,
+            EnvironmentEntry,
+            ReadOnlyMount,
+        )
 
         for name in (
             "API_PASSWORD",
@@ -283,25 +287,102 @@ class LaunchSnapshotTests(unittest.TestCase):
             "FREQTRADE__API_SERVER__WS_TOKEN",
         ):
             with self.subTest(name=name):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(DriverValidationError) as raised:
                     EnvironmentEntry(name, "private")
-        with self.assertRaises(ValueError):
+                self.assertEqual(str(raised.exception), "driver_validation_error")
+        with self.assertRaises(DriverValidationError) as raised:
             ReadOnlyMount(
                 Path.cwd().resolve() / "var" / "run" / "docker.sock",
                 PurePosixPath("/var/run/docker.sock"),
             )
+        self.assertEqual(str(raised.exception), "driver_validation_error")
 
-    def test_snapshot_rejects_colliding_targets_and_state_identity_mismatch(self) -> None:
-        from tools.runtime_driver import LaunchSnapshot, WritableStateMount
+    def test_mounts_reject_lexical_parent_components(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            ReadOnlyMount,
+            SecretMount,
+            WritableStateMount,
+        )
+
+        host_root = Path.cwd().resolve() / "runtime-driver-fixtures"
+        mount_factories = (
+            ("read_only", lambda source, target: ReadOnlyMount(source, target)),
+            (
+                "state",
+                lambda source, target: WritableStateMount(
+                    source,
+                    target,
+                    "phase2-spot-paper-probe-state",
+                ),
+            ),
+            (
+                "secret",
+                lambda source, target: SecretMount(
+                    source,
+                    target,
+                    "phase2-paper-probe-api-password",
+                    "version-1",
+                ),
+            ),
+        )
+        invalid_paths = (
+            (
+                host_root / "config" / ".." / "config.json",
+                PurePosixPath("/runtime/config/config.json"),
+            ),
+            (
+                host_root / "config.json",
+                PurePosixPath("/runtime/config/../config.json"),
+            ),
+        )
+        for mount_kind, factory in mount_factories:
+            for source, target in invalid_paths:
+                with self.subTest(
+                    mount_kind=mount_kind,
+                    source=source,
+                    target=target,
+                ):
+                    with self.assertRaises(DriverValidationError) as raised:
+                        factory(source, target)
+                    self.assertEqual(
+                        str(raised.exception),
+                        "driver_validation_error",
+                    )
+
+    def test_snapshot_rejects_colliding_targets(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            WritableStateMount,
+        )
 
         payload = self.valid_snapshot_payload()
         payload["state_mount"] = WritableStateMount(
             Path.cwd().resolve() / "runtime-driver-fixtures" / "state",
             PurePosixPath("/runtime/config/config.json"),
+            "phase2-spot-paper-probe-state",
+        )
+        with self.assertRaises(DriverValidationError) as raised:
+            LaunchSnapshot.model_validate(payload)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
+
+    def test_snapshot_rejects_state_identity_mismatch(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            WritableStateMount,
+        )
+
+        payload = self.valid_snapshot_payload()
+        payload["state_mount"] = WritableStateMount(
+            Path.cwd().resolve() / "runtime-driver-fixtures" / "state",
+            PurePosixPath("/runtime/state"),
             "wrong-allocation",
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(DriverValidationError) as raised:
             LaunchSnapshot.model_validate(payload)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_raw_nested_values_and_boolean_limits(self) -> None:
         from tools.runtime_driver import (
@@ -316,8 +397,9 @@ class LaunchSnapshotTests(unittest.TestCase):
             LaunchSnapshot.model_validate(payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
-        with self.assertRaises(DriverValidationError):
+        with self.assertRaises(DriverValidationError) as raised:
             ResourceLimits(True, 536870912, 256)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_protocol_has_exact_driver_neutral_methods(self) -> None:
         from tools.runtime_driver import RuntimeDriver

@@ -573,6 +573,33 @@ class RuntimeDriver(Protocol):
 
 - Does not produce a concrete driver.
 
+**User-approved Architecture Resolution A / Task 4 handoff:** `LaunchSnapshot` is an
+internal post-compilation value and is never accepted or deserialized from a public API,
+PostgreSQL, RuntimeSpec JSON, or generic external mappings. Task 2 validation is
+structural/canonical only; these dataclasses do not prove provenance or classify secrets.
+Task 4 accepts only committed closed AdapterTemplate/policy plus typed RuntimeSpec,
+state-allocation, and secret references, and it alone emits argv, environment entries, and
+resolved mount sources. Task 4 must:
+
+- restrict read-only sources to compiler-owned or allowlisted material roots and reject
+  host-directory exposure, Docker sockets, devices, named pipes, and untyped secrets;
+- resolve sources and reject material-root escape through parent components, symlinks,
+  junctions, or reparse points;
+- derive argv only from a committed executable/argument template, without shell
+  interpolation, caller command strings, or embedded secrets;
+- enforce a per-template closed environment-name allowlist and source values only from
+  typed non-secret fields or committed constants;
+- resolve secrets only as provider-produced `SecretMount` values;
+- recheck all gates in the final snapshot validator, which the future concrete driver calls
+  immediately before mutation.
+
+No `SafeComposeRuntimeDriver` exists until these gates and mutation tests pass. Task 4
+acceptance mutations cover parent-directory Docker socket exposure, `ReadOnlyMount`
+secret-role bypass, source-root or symlink/junction/reparse escape, shell argv, raw
+credential argv, non-allowlisted or raw-secret environment entries, and external
+`LaunchSnapshot` deserialization. This records the approved resolution of the review
+finding; it is not a claim that Task 2 alone establishes provenance.
+
 - [ ] **Step 1: Extend RED tests for the final snapshot contract**
 
 Append tests that construct nested typed values and pass them through `LaunchSnapshot.model_validate()`:
@@ -667,7 +694,11 @@ class LaunchSnapshotTests(unittest.TestCase):
                 self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_secret_environment_and_mount_escape_hatches(self) -> None:
-        from tools.runtime_driver import EnvironmentEntry, ReadOnlyMount
+        from tools.runtime_driver import (
+            DriverValidationError,
+            EnvironmentEntry,
+            ReadOnlyMount,
+        )
 
         for name in (
             "API_PASSWORD",
@@ -675,25 +706,102 @@ class LaunchSnapshotTests(unittest.TestCase):
             "FREQTRADE__API_SERVER__WS_TOKEN",
         ):
             with self.subTest(name=name):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(DriverValidationError) as raised:
                     EnvironmentEntry(name, "private")
-        with self.assertRaises(ValueError):
+                self.assertEqual(str(raised.exception), "driver_validation_error")
+        with self.assertRaises(DriverValidationError) as raised:
             ReadOnlyMount(
                 Path.cwd().resolve() / "var" / "run" / "docker.sock",
                 PurePosixPath("/var/run/docker.sock"),
             )
+        self.assertEqual(str(raised.exception), "driver_validation_error")
 
-    def test_snapshot_rejects_colliding_targets_and_state_identity_mismatch(self) -> None:
-        from tools.runtime_driver import LaunchSnapshot, WritableStateMount
+    def test_mounts_reject_lexical_parent_components(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            ReadOnlyMount,
+            SecretMount,
+            WritableStateMount,
+        )
+
+        host_root = Path.cwd().resolve() / "runtime-driver-fixtures"
+        mount_factories = (
+            ("read_only", lambda source, target: ReadOnlyMount(source, target)),
+            (
+                "state",
+                lambda source, target: WritableStateMount(
+                    source,
+                    target,
+                    "phase2-spot-paper-probe-state",
+                ),
+            ),
+            (
+                "secret",
+                lambda source, target: SecretMount(
+                    source,
+                    target,
+                    "phase2-paper-probe-api-password",
+                    "version-1",
+                ),
+            ),
+        )
+        invalid_paths = (
+            (
+                host_root / "config" / ".." / "config.json",
+                PurePosixPath("/runtime/config/config.json"),
+            ),
+            (
+                host_root / "config.json",
+                PurePosixPath("/runtime/config/../config.json"),
+            ),
+        )
+        for mount_kind, factory in mount_factories:
+            for source, target in invalid_paths:
+                with self.subTest(
+                    mount_kind=mount_kind,
+                    source=source,
+                    target=target,
+                ):
+                    with self.assertRaises(DriverValidationError) as raised:
+                        factory(source, target)
+                    self.assertEqual(
+                        str(raised.exception),
+                        "driver_validation_error",
+                    )
+
+    def test_snapshot_rejects_colliding_targets(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            WritableStateMount,
+        )
 
         payload = self.valid_snapshot_payload()
         payload["state_mount"] = WritableStateMount(
             Path.cwd().resolve() / "runtime-driver-fixtures" / "state",
             PurePosixPath("/runtime/config/config.json"),
+            "phase2-spot-paper-probe-state",
+        )
+        with self.assertRaises(DriverValidationError) as raised:
+            LaunchSnapshot.model_validate(payload)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
+
+    def test_snapshot_rejects_state_identity_mismatch(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            WritableStateMount,
+        )
+
+        payload = self.valid_snapshot_payload()
+        payload["state_mount"] = WritableStateMount(
+            Path.cwd().resolve() / "runtime-driver-fixtures" / "state",
+            PurePosixPath("/runtime/state"),
             "wrong-allocation",
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(DriverValidationError) as raised:
             LaunchSnapshot.model_validate(payload)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_raw_nested_values_and_boolean_limits(self) -> None:
         from tools.runtime_driver import (
@@ -708,8 +816,9 @@ class LaunchSnapshotTests(unittest.TestCase):
             LaunchSnapshot.model_validate(payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
-        with self.assertRaises(DriverValidationError):
+        with self.assertRaises(DriverValidationError) as raised:
             ResourceLimits(True, 536870912, 256)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_protocol_has_exact_driver_neutral_methods(self) -> None:
         from tools.runtime_driver import RuntimeDriver
@@ -801,7 +910,7 @@ class LaunchSnapshot(_StrictValue):
 Implement explicit `__post_init__` validation with these exact rules:
 
 - Environment names match `[A-Z_][A-Z0-9_]*`; split the name on `_` and reject any exact segment in `{"KEY", "SECRET", "PASSWORD", "TOKEN", "CREDENTIAL"}`. Values are non-empty strings without control characters.
-- Every mount source is an absolute `Path`; every target is an absolute `PurePosixPath`. Reject any source or target whose slash-normalized lowercase parts contain `docker.sock`.
+- Every mount source is an absolute `Path`; every target is an absolute `PurePosixPath`. Reject any source or target whose slash-normalized lowercase parts contain `..` or `docker.sock`; this is lexical validation and performs no filesystem I/O.
 - Read-only, writable-state, and secret target paths must be pairwise unique.
 - Writable state `allocation_id` must equal `identity.state_allocation_id`.
 - Secret reference/version values use `_require_identifier`; secret mounts stay a tuple and may be empty only when the compiled template requires no secrets.

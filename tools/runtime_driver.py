@@ -61,7 +61,7 @@ def _require_mount_paths(source: object, target: object) -> None:
         raise DriverValidationError()
     for path in (source, target):
         parts = str(path).replace("\\", "/").lower().split("/")
-        if "docker.sock" in parts:
+        if ".." in parts or "docker.sock" in parts:
             raise DriverValidationError()
 
 

@@ -219,6 +219,13 @@ mismatch uses a stable failure code.
 the concrete driver. It is not a Compose document and cannot carry arbitrary Docker
 options.
 
+**User-approved Architecture Resolution A:** `LaunchSnapshot` is an internal,
+post-compilation value. It is never accepted or deserialized from a public API,
+PostgreSQL, RuntimeSpec JSON, or a generic external mapping. Task 2 validation proves only
+that this internal value has the required structural and canonical form; the Task 2
+dataclasses are not provenance authority and do not classify values as secret or
+non-secret.
+
 Top-level fields:
 
 | Field | Type | Meaning |
@@ -249,16 +256,19 @@ Nested value objects are also frozen and strict:
   `cpu_millis` avoids floating-point ambiguity; the committed resource policy supplies the
   permitted upper bounds.
 
-`LaunchSnapshot` rejects any field or nested option named or equivalent to:
+The Task 2 DTO surface rejects unknown fields and structurally unrepresentable options such
+as:
 
 - `compose` or a rendered Compose document;
 - `host_port`, `ports` with host mappings, or host networking;
-- Docker socket mounts;
 - `privileged`, host PID/IPC, devices, or added capabilities;
 - caller-provided `restart`, `labels`, `container_name`, or project overrides;
-- raw secret values or credentials;
-- arbitrary command strings or shell interpolation;
 - more than one writable mount.
+
+Task 4 compilation and final validation reject semantically equivalent forms that shape
+validation alone cannot classify: Docker socket/device/named-pipe or host-directory source
+exposure, raw secret values or credentials in argv/environment/read-only mounts, arbitrary
+command strings, and shell interpolation.
 
 The concrete driver always derives and enforces these non-overridable values:
 
@@ -271,6 +281,30 @@ The concrete driver always derives and enforces these non-overridable values:
 - deterministic project/container names and identity labels;
 - only the networks listed in `identity.network_names`;
 - one managed writable state and fixed read-only inputs/secrets.
+
+Task 4 owns the trust transition into this value. Its compiler accepts only a committed,
+closed `AdapterTemplate` and policy plus typed RuntimeSpec, state-allocation, and secret
+references. Only that compiler emits `argv`, `EnvironmentEntry` values, and resolved mount
+sources:
+
+- read-only sources originate only from compiler-owned or explicitly allowlisted material
+  roots and cannot expose host directories, Docker sockets, devices, named pipes, or
+  untyped secret material;
+- source paths are resolved before use, and symlink, junction, reparse-point, or material-
+  root escape is rejected;
+- `argv` is expanded from a committed executable/argument template, never from shell
+  interpolation or caller-provided command strings, and never embeds credentials or other
+  secrets;
+- environment names come from a per-template closed allowlist, and values come only from
+  typed non-secret RuntimeSpec fields or committed constants;
+- secrets are resolved by the provider only into `SecretMount` values, never argv,
+  ordinary environment entries, or read-only mounts.
+
+The final Task 4 snapshot validator rechecks all of these gates. A future concrete driver
+must invoke that validator immediately before any runtime mutation. No
+`SafeComposeRuntimeDriver` exists until these trust-boundary gates and their mutation tests
+pass. This is the approved resolution of the review finding, not a claim that Task 2's
+dataclasses alone prove source provenance or secret classification.
 
 ## 6. RuntimeDriver protocol semantics
 
@@ -425,9 +459,13 @@ observed field in `DriverInspection`. It never needs Compose imports.
 ### Task 4 — Snapshot compiler, validator, and concrete driver
 
 Task 4 compiles reviewed RuntimeSpec/template/policy/state/secret material into the final
-`LaunchSnapshot`, performs security mutation tests, and adds `SafeComposeRuntimeDriver` in
-a dedicated infrastructure module. Only at this point can Phase 2C dynamically launch a
-Registry runtime.
+`LaunchSnapshot`. Its input is restricted to committed closed AdapterTemplate/policy and
+typed RuntimeSpec/state/secret references; it alone emits argv, environment entries, and
+resolved material sources. It resolves every source and rejects disallowed source roles,
+parent/root escape, and symlink/junction/reparse traversal, then validates the final
+snapshot again immediately before mutation. Task 4 adds `SafeComposeRuntimeDriver` in a
+dedicated infrastructure module only after these gates and their mutation tests pass. Only
+at this point can Phase 2C dynamically launch a Registry runtime.
 
 ### Tasks 5–7
 
@@ -463,7 +501,11 @@ CLI, and offline paper-probe acceptance continue in their planned order.
 - timeout produces `AmbiguousDriverOutcome`, not a synthetic state;
 - identity mismatch causes zero mutation;
 - stop uses full immutable container ID;
-- mutation tests reject every escape hatch;
+- mutation tests reject parent-directory Docker socket exposure, a `ReadOnlyMount` used to
+  bypass the secret role, source-root or symlink/junction/reparse escape, shell argv, raw
+  credential argv, non-allowlisted or raw-secret environment entries, and external
+  `LaunchSnapshot` deserialization;
+- the final snapshot validator is called immediately before every mutation;
 - unknown containers/networks/paths are never deleted or disconnected.
 
 No Task 1 test may run a real Docker lifecycle action or contact an exchange. Online
@@ -491,10 +533,13 @@ The corrected Task 1 is complete only when:
    I/O;
 2. expected identity and observed state are separate;
 3. inspection and health are never synthesized from launch return codes;
-4. `LaunchSnapshot` cannot express raw Compose, host ports, Docker socket, privilege
-   escalation, arbitrary labels, raw secrets, or multiple writable mounts;
+4. Task 2 structurally excludes raw Compose, host-port and privilege fields, arbitrary
+   labels, and multiple writable mounts, while Task 4 provenance gates exclude Docker
+   socket/host exposure, arbitrary commands, and raw secrets;
 5. the existing P0 CLI and emergency behavior remain unchanged;
 6. the P0 path uses the extracted single validation/execution kernel;
 7. no dynamic Docker actor is enabled before Task 4's complete compiler and validator;
 8. all focused and existing P0 tests pass;
-9. independent task and whole-branch reviews report no open Critical or Important finding.
+9. independent task and whole-branch reviews report no open Critical or Important finding;
+10. Task 2 is treated only as structural/canonical validation; Task 4 exclusively establishes
+    source provenance and secret classification before a concrete driver is enabled.
