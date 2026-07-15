@@ -470,16 +470,57 @@ jobs:
             printf '%s\n' "${status_first}" > "${platform_ci_dir}/operator-status.json"
             printf '%s\n' 'operator_status_phase_complete' >&2
 
+            invalid_probe_index=0
             for invalid_arguments in \
               "runtime-registry status --image forbidden" \
               "runtime-registry compile --environment live" \
               "runtime-registry start"
             do
+              invalid_probe_index="$(( invalid_probe_index + 1 ))"
+              invalid_container="platform-operator-invalid-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${invalid_probe_index}-ci"
               set +e
-              invalid_output="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator ${invalid_arguments} 2>&1)"
-              invalid_status=$?
+              invalid_container_id="$(docker compose --profile platform-operator run --detach --name "${invalid_container}" --no-deps -T platform-operator ${invalid_arguments} 2>/dev/null)"
+              invalid_create_status=$?
               set -e
-              if ! test "${invalid_status}" -eq 2; then
+              if ! test "${invalid_create_status}" -eq 0; then
+                printf '%s\n' 'operator_invalid_arguments_create_failed' >&2
+                exit 1
+              fi
+              if [[ ! "${invalid_container_id}" =~ ^[0-9a-f]{64}$ ]]; then
+                printf '%s\n' 'operator_invalid_arguments_container_id_contract_failed' >&2
+                exit 1
+              fi
+              set +e
+              invalid_status="$(docker wait "${invalid_container_id}" 2>/dev/null)"
+              invalid_wait_status=$?
+              invalid_output="$(docker logs "${invalid_container_id}" 2>&1)"
+              invalid_log_status=$?
+              docker rm "${invalid_container_id}" >/dev/null 2>&1
+              invalid_cleanup_status=$?
+              invalid_remaining="$(docker container ls --all --quiet --no-trunc --filter "id=${invalid_container_id}" 2>/dev/null)"
+              invalid_absence_status=$?
+              set -e
+              if ! test "${invalid_wait_status}" -eq 0; then
+                printf '%s\n' 'operator_invalid_arguments_wait_failed' >&2
+                exit 1
+              fi
+              if ! test "${invalid_log_status}" -eq 0; then
+                printf '%s\n' 'operator_invalid_arguments_log_capture_failed' >&2
+                exit 1
+              fi
+              if ! test "${invalid_cleanup_status}" -eq 0; then
+                printf '%s\n' 'operator_invalid_arguments_cleanup_failed' >&2
+                exit 1
+              fi
+              if ! test "${invalid_absence_status}" -eq 0; then
+                printf '%s\n' 'operator_invalid_arguments_absence_check_failed' >&2
+                exit 1
+              fi
+              if test -n "${invalid_remaining}"; then
+                printf '%s\n' 'operator_invalid_arguments_cleanup_incomplete' >&2
+                exit 1
+              fi
+              if ! test "${invalid_status}" = "2"; then
                 printf '%s\n' 'operator_invalid_arguments_exit_status_failed' >&2
                 exit 1
               fi

@@ -1467,33 +1467,102 @@ def run_operator_invalid_probe_with_stubbed_docker(
     probe_script = "\n".join(lines[start : end + 1])
     setup = f"export STUB_INVALID_SCENARIO={shlex.quote(scenario)}\n" + r'''
 set -euo pipefail
+export GITHUB_RUN_ID=123456
+export GITHUB_RUN_ATTEMPT=2
 RUNNER_TEMP="$(mktemp -d)"
-trap 'rm -rf "${RUNNER_TEMP}"' EXIT
 platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
 mkdir -p "${platform_ci_dir}"
 docker_call_count="${RUNNER_TEMP}/docker-call-count"
 printf '0\n' > "${docker_call_count}"
+docker_container_state="${RUNNER_TEMP}/docker-container-state"
+docker_operation_trace="${RUNNER_TEMP}/docker-operation-trace"
+: > "${docker_operation_trace}"
+stub_container_id="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+stub_foreign_id="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+if test "${STUB_INVALID_SCENARIO}" = "create-fail-foreign-container"; then
+  printf '%s\n' "${stub_foreign_id}" > "${docker_container_state}"
+fi
+
+stub_finish() {
+  cat "${docker_operation_trace}"
+  if test -s "${docker_container_state}"; then
+    printf 'STUB_STATE:'
+    cat "${docker_container_state}"
+  else
+    printf '%s\n' 'STUB_STATE:absent'
+  fi
+  rm -rf "${RUNNER_TEMP}"
+}
+trap stub_finish EXIT
+
+record_docker_operation() {
+  printf '%s:%s\n' "$1" "$2" >> "${docker_operation_trace}"
+}
 
 docker() {
   call_count="$(( $(cat "${docker_call_count}") + 1 ))"
   printf '%s\n' "${call_count}" > "${docker_call_count}"
-  if test "${call_count}" -le 2; then
+  if test "$1" = "compose" && printf '%s\n' "$*" | grep -q -- '--instance-id phase2-spot-paper-probe'; then
     printf '%s\n' '{"state":"stable"}'
     return 0
   fi
+
+  if test "$1" = "compose"; then
+    printf '%s\n' 'SENSITIVE_COMPOSE_SENTINEL' >&2
+    if test "${STUB_INVALID_SCENARIO}" = "create-fail-foreign-container"; then
+      record_docker_operation compose no-id
+      return 125
+    fi
+    if test "${STUB_INVALID_SCENARIO}" = "invalid-container-id"; then
+      record_docker_operation compose invalid-id
+      printf '%s\n' 'SENSITIVE_CONTAINER_ID_SENTINEL'
+      return 0
+    fi
+    printf '%s\n' "${stub_container_id}" > "${docker_container_state}"
+    record_docker_operation compose "${stub_container_id}"
+    printf '%s\n' "${stub_container_id}"
+    return 0
+  fi
+
+  if test "$1" = "wait"; then
+    record_docker_operation wait "$2"
+    if test "${STUB_INVALID_SCENARIO}" = "wrong-status"; then
+      printf '%s\n' '7'
+    else
+      printf '%s\n' '2'
+    fi
+    return 0
+  fi
+
+  if test "$1" = "logs"; then
+    record_docker_operation logs "$2"
+    if test "${STUB_INVALID_SCENARIO}" = "contaminated-app-output"; then
+      printf '%s\n' 'SENSITIVE_INVALID_SENTINEL'
+    fi
+    printf '%s\n' 'invalid_arguments'
+    return 0
+  fi
+
+  if test "$1" = "rm"; then
+    record_docker_operation rm "$2"
+    rm -f "${docker_container_state}"
+    return 0
+  fi
+
+  if test "$1" = "container" && test "$2" = "ls"; then
+    filter_value="$7"
+    filtered_container="${filter_value#id=}"
+    record_docker_operation container-list "${filtered_container}"
+    if test -s "${docker_container_state}"; then
+      printf '%s\n' 'stub-container-id'
+    fi
+    return 0
+  fi
+
   case "${STUB_INVALID_SCENARIO}" in
-    wrong-status)
-      printf '%s\n' 'SENSITIVE_INVALID_SENTINEL'
-      return 7
-      ;;
-    contaminated-output)
-      printf '%s\n' 'SENSITIVE_INVALID_SENTINEL'
+    *)
       printf '%s\n' 'invalid_arguments'
-      return 2
-      ;;
-    exact-output)
-      printf '%s\n' 'invalid_arguments'
-      return 2
+      return 125
       ;;
   esac
 }
@@ -2808,7 +2877,7 @@ sleep() {
             "runtime-registry compile --actor platform-operator",
             "runtime-registry status --instance-id phase2-spot-paper-probe",
             "runtime-registry status --image forbidden",
-            'test "${invalid_status}" -eq 2',
+            'test "${invalid_status}" = "2"',
             'test "${invalid_output}" = "invalid_arguments"',
         )
         for fragment in required:
@@ -3051,6 +3120,13 @@ sleep() {
 
         tokens = (
             "operator_status_phase_complete",
+            "operator_invalid_arguments_create_failed",
+            "operator_invalid_arguments_container_id_contract_failed",
+            "operator_invalid_arguments_wait_failed",
+            "operator_invalid_arguments_log_capture_failed",
+            "operator_invalid_arguments_cleanup_failed",
+            "operator_invalid_arguments_absence_check_failed",
+            "operator_invalid_arguments_cleanup_incomplete",
             "operator_invalid_arguments_exit_status_failed",
             "operator_invalid_arguments_output_contract_failed",
             "operator_invalid_arguments_phase_complete",
@@ -3067,16 +3143,70 @@ sleep() {
                 )
                 self.assertNotIn("${", diagnostic_line)
 
+        for status_name, diagnostic in (
+            ("invalid_create_status", "operator_invalid_arguments_create_failed"),
+            ("invalid_wait_status", "operator_invalid_arguments_wait_failed"),
+            ("invalid_log_status", "operator_invalid_arguments_log_capture_failed"),
+            ("invalid_cleanup_status", "operator_invalid_arguments_cleanup_failed"),
+            ("invalid_absence_status", "operator_invalid_arguments_absence_check_failed"),
+        ):
+            self.assertIn(
+                f'if ! test "${{{status_name}}}" -eq 0; then\n'
+                f"printf '%s\\n' '{diagnostic}' >&2\nexit 1\nfi",
+                normalized_step,
+            )
+
         self.assertIn(
             "\n".join(
                 (
-                    'if ! test "${invalid_status}" -eq 2; then',
+                    'if ! test "${invalid_status}" = "2"; then',
                     "printf '%s\\n' 'operator_invalid_arguments_exit_status_failed' >&2",
                     "exit 1",
                     "fi",
                 )
             ),
             normalized_step,
+        )
+        self.assertIn(
+            "docker compose --profile platform-operator run --detach --name",
+            normalized_step,
+        )
+        self.assertIn(
+            'invalid_container="platform-operator-invalid-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${invalid_probe_index}-ci"',
+            step,
+        )
+        self.assertEqual(
+            step.count(
+                'docker container ls --all --quiet --no-trunc --filter "id=${invalid_container_id}"'
+            ),
+            1,
+        )
+        self.assertIn(
+            'invalid_status="$(docker wait "${invalid_container_id}" 2>/dev/null)"',
+            step,
+        )
+        self.assertIn(
+            'invalid_output="$(docker logs "${invalid_container_id}" 2>&1)"',
+            step,
+        )
+        self.assertIn('docker rm "${invalid_container_id}" >/dev/null 2>&1', step)
+        self.assertIn(
+            '[[ ! "${invalid_container_id}" =~ ^[0-9a-f]{64}$ ]]',
+            step,
+        )
+        self.assertNotIn("invalid_existing=", step)
+        self.assertNotIn('name=^/${invalid_container}$', step)
+        self.assertNotIn(
+            "run --rm --no-deps -T platform-operator ${invalid_arguments}",
+            step,
+        )
+        self.assertLess(
+            step.index('docker rm "${invalid_container_id}"'),
+            step.index("operator_invalid_arguments_exit_status_failed"),
+        )
+        self.assertLess(
+            step.index('docker rm "${invalid_container_id}"'),
+            step.index("operator_invalid_arguments_output_contract_failed"),
         )
         self.assertIn(
             "\n".join(
@@ -3116,6 +3246,22 @@ sleep() {
     ) -> None:
         scenarios = (
             (
+                "create-fail-foreign-container",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_create_failed",
+                ),
+            ),
+            (
+                "invalid-container-id",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_container_id_contract_failed",
+                ),
+            ),
+            (
                 "wrong-status",
                 1,
                 (
@@ -3124,7 +3270,7 @@ sleep() {
                 ),
             ),
             (
-                "contaminated-output",
+                "contaminated-app-output",
                 1,
                 (
                     "operator_status_phase_complete",
@@ -3132,7 +3278,7 @@ sleep() {
                 ),
             ),
             (
-                "exact-output",
+                "compose-noise-exact-app-output",
                 0,
                 (
                     "operator_status_phase_complete",
@@ -3142,6 +3288,13 @@ sleep() {
         )
         all_tokens = {
             "operator_status_phase_complete",
+            "operator_invalid_arguments_create_failed",
+            "operator_invalid_arguments_container_id_contract_failed",
+            "operator_invalid_arguments_wait_failed",
+            "operator_invalid_arguments_log_capture_failed",
+            "operator_invalid_arguments_cleanup_failed",
+            "operator_invalid_arguments_absence_check_failed",
+            "operator_invalid_arguments_cleanup_incomplete",
             "operator_invalid_arguments_exit_status_failed",
             "operator_invalid_arguments_output_contract_failed",
             "operator_invalid_arguments_phase_complete",
@@ -3156,6 +3309,10 @@ sleep() {
                 )
                 self.assertNotIn("SENSITIVE_INVALID_SENTINEL", result.stdout)
                 self.assertNotIn("SENSITIVE_INVALID_SENTINEL", result.stderr)
+                self.assertNotIn("SENSITIVE_COMPOSE_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_COMPOSE_SENTINEL", result.stderr)
+                self.assertNotIn("SENSITIVE_CONTAINER_ID_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_CONTAINER_ID_SENTINEL", result.stderr)
                 self.assertEqual(
                     tuple(
                         line
@@ -3165,8 +3322,39 @@ sleep() {
                     expected_stderr,
                 )
                 self.assertEqual("STUB_CONTINUED" in result.stdout, returncode == 0)
+                trace = tuple(
+                    line
+                    for line in result.stdout.splitlines()
+                    if line.startswith(
+                        ("container-list:", "compose:", "wait:", "logs:", "rm:")
+                    )
+                )
+                expected_container_id = (
+                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                )
+                if scenario in ("wrong-status", "contaminated-app-output"):
+                    self.assertEqual(
+                        trace,
+                        (
+                            f"compose:{expected_container_id}",
+                            f"wait:{expected_container_id}",
+                            f"logs:{expected_container_id}",
+                            f"rm:{expected_container_id}",
+                            f"container-list:{expected_container_id}",
+                        ),
+                    )
+                if scenario == "create-fail-foreign-container":
+                    self.assertEqual(trace, ("compose:no-id",))
+                    self.assertIn(
+                        "STUB_STATE:ffffffffffffffffffffffffffffffff"
+                        "ffffffffffffffffffffffffffffffff\n",
+                        result.stdout,
+                    )
+                if scenario == "invalid-container-id":
+                    self.assertEqual(trace, ("compose:invalid-id",))
                 if returncode == 0:
-                    self.assertIn("STUB_CALLS:5\n", result.stdout)
+                    self.assertIn("STUB_CALLS:17\n", result.stdout)
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
     def test_operator_status_gate_classifies_failures_without_reflecting_output(
