@@ -101,7 +101,9 @@ class DriverIdentity(_StrictValue):
         if not isinstance(self.image_id, str) or _IMAGE_ID.fullmatch(self.image_id) is None:
             raise DriverValidationError()
         names = _require_tuple(self.network_names, allow_empty=False)
-        if any(_IDENTIFIER.fullmatch(name) is None for name in names):
+        if any(
+            not isinstance(name, str) or _IDENTIFIER.fullmatch(name) is None for name in names
+        ):
             raise DriverValidationError()
         if names != tuple(sorted(set(names))):
             raise DriverValidationError()

@@ -37,6 +37,7 @@ class RuntimeDriverIdentityTests(unittest.TestCase):
             {"image_id": "repo:tag"},
             {"network_names": ("z-network", "a-network")},
             {"network_names": ("same", "same")},
+            {"network_names": ("valid-network", 1)},
             {"network_names": []},
             {"project_name": ""},
         )
