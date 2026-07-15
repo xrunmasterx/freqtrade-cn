@@ -1,9 +1,9 @@
 # Phase 2C RuntimeDriver Contract and P0 Kernel Extraction Design
 
-**Status:** Proposed for implementation planning  
-**Date:** 2026-07-15  
-**Applies to:** Phase 2C Tasks 1, 3, 4, 5, and 6  
-**Supersedes:** The underspecified interface and sequencing portions of Phase 2C Task 1  
+**Status:** Proposed for implementation planning
+**Date:** 2026-07-15
+**Applies to:** Phase 2C Tasks 1, 3, 4, 5, and 6
+**Supersedes:** The underspecified interface and sequencing portions of Phase 2C Task 1
 **Does not supersede:** Phase 2C global safety constraints or the Phase 2A/2B reviewed domain models
 
 ## 1. Background
