@@ -575,7 +575,77 @@ import unittest
 from unittest import mock
 
 
+AMBIENT_DOCKER_POISON = {
+    "PATH": "attacker-bin",
+    "DOCKER_HOST": "tcp://attacker:2375",
+    "DOCKER_CONTEXT": "attacker-context",
+    "DOCKER_CONFIG": "attacker-config",
+    "DOCKER_TLS_VERIFY": "1",
+    "DOCKER_CERT_PATH": "attacker-certs",
+}
+
+
 class ComposeKernelCompatibilityTests(unittest.TestCase):
+    def test_parameterized_kernel_preserves_executable_environment_and_order(self) -> None:
+        docker_executable = trusted_absolute_docker_executable()
+        approved_environment = {
+            "SYSTEMROOT": existing_system_root(),
+            "DOCKER_HOST": approved_local_docker_host(),
+        }
+        expected_environment = dict(approved_environment)
+        events = []
+
+        def record_validation(*args, **kwargs) -> None:
+            events.append("validation")
+
+        def record_action(*args, **kwargs):
+            events.append("action")
+            return completed_process(returncode=0)
+
+        with mock.patch.dict(os.environ, AMBIENT_DOCKER_POISON, clear=False):
+            with mock.patch(
+                "tools.compose_runtime._validate_launch",
+                side_effect=record_validation,
+            ) as validate_launch, mock.patch(
+                "tools.compose_runtime.subprocess.run",
+                side_effect=record_action,
+            ) as action_subprocess:
+                _run_validated_snapshot_launch(
+                    service="freqtrade",
+                    root=repository_root(),
+                    manifest=valid_manifest(),
+                    image_id="sha256:" + "b" * 64,
+                    commit_identity=valid_commit_identity(),
+                    override=valid_launch_override(),
+                    docker_executable=docker_executable,
+                    environment=approved_environment,
+                )
+
+        validate_launch.assert_called_once()
+        action_subprocess.assert_called_once()
+        render_command = validate_launch.call_args.args[2]
+        validator_environment = validate_launch.call_args.args[4]
+        action_command = action_subprocess.call_args.args[0]
+        action_environment = action_subprocess.call_args.kwargs["env"]
+        self.assertEqual(render_command[0], docker_executable)
+        self.assertEqual(action_command[0], docker_executable)
+        self.assertIs(validator_environment, approved_environment)
+        self.assertIs(action_environment, approved_environment)
+        self.assertEqual(validator_environment, expected_environment)
+        self.assertEqual(action_environment, expected_environment)
+        self.assertEqual(approved_environment, expected_environment)
+        for name, poisoned_value in AMBIENT_DOCKER_POISON.items():
+            with self.subTest(name=name):
+                if name in approved_environment:
+                    self.assertEqual(
+                        validator_environment[name],
+                        approved_environment[name],
+                    )
+                    self.assertNotEqual(validator_environment[name], poisoned_value)
+                else:
+                    self.assertNotIn(name, validator_environment)
+        self.assertEqual(events, ["validation", "action"])
+
     def test_legacy_wrapper_passes_relative_docker_and_current_filtered_environment(self) -> None:
         ambient = {"PATH": "legacy-path", "DOCKER_HOST": "legacy-endpoint"}
         launch_kernel = mock.Mock(return_value=completed_process(returncode=0))
@@ -595,15 +665,22 @@ class ComposeKernelCompatibilityTests(unittest.TestCase):
         )
 ```
 
-These TestCase methods cover concrete-driver mapping ingress, occupied locators, exact
+Task 4B has three explicit coverage levels: (1) safe-driver-to-kernel caller inputs in
+`SafeComposeDriverPreActionSecurityTests`, (2) direct real-kernel executable/environment/
+ordering invariants in `ComposeKernelCompatibilityTests`, and (3) legacy-wrapper-to-kernel
+compatibility in `ComposeKernelCompatibilityTests`. These TestCase methods also cover
+concrete-driver mapping ingress, occupied locators, exact
 identity, real post-action inspection, full-ID stop without delete, closed probe catalog
 validation, ambiguous outcome without retry, preflight zero action, and legacy P0 ambient
 compatibility. The safe-driver test proves the approved absolute executable and complete
 minimal environment reach the one shared kernel, while the Compose compatibility test
 proves the legacy wrapper passes relative `docker` and its unchanged ambient-derived
-filtered environment. `DRIVER_EXECUTION_CONTEXT_MUTATIONS` exists only in Task 4B and is exercised
-only through the driver host pre-action gate; it is never passed to the Task 4A rendered-
-snapshot validator.
+filtered environment. `DRIVER_EXECUTION_CONTEXT_MUTATIONS` exists only in Task 4B and is
+exercised only through the driver host pre-action gate; it is never passed to the Task 4A
+rendered-snapshot validator.
+The direct kernel method invokes the real `_run_validated_snapshot_launch()` and mocks only
+the `_validate_launch` callable and `subprocess.run`; `patch.dict` temporarily supplies
+hostile ambient variables but does not replace a kernel boundary.
 
 - [ ] **Step 2: Run Task 4B RED**
 
@@ -612,8 +689,8 @@ python -S -m unittest tests.test_safe_compose_driver tests.test_compose_runtime 
 ```
 
 Expected: `tools.safe_compose_driver` and the parameterized kernel contract are missing. The
-module command discovers both safe-driver TestCase classes and the Compose compatibility
-TestCase.
+module command discovers all three coverage levels: safe-driver caller, direct real-kernel
+contract, and legacy-wrapper caller.
 
 - [ ] **Step 3: Implement the concrete adapter**
 
@@ -639,7 +716,8 @@ git commit -m "feat(runtime): add safe compose driver"
 ```
 
 Expected: every Task 4B and compatibility TestCase method is discovered under dependency-
-free `python -S`; Task 4A remains pure, Task 4B has its own exact four-file commit, one shared
+free `python -S`, including safe-driver-to-kernel, direct real-kernel, and legacy-wrapper-to-
+kernel coverage. Task 4A remains pure, Task 4B has its own exact four-file commit, one shared
 kernel remains, and legacy P0 behavior is unchanged.
 `tests.test_runtime_driver` and `tests.test_runtime_snapshot` are unchanged prerequisite
 contract/compiler gates; Task 4B owns and stages exactly the four files in its file list.
@@ -727,10 +805,11 @@ class SafeComposeDriverNetworkTests(unittest.TestCase):
 - [ ] **Step 2: Run RED**
 
 ```powershell
-python -S -m unittest tests.test_runtime_access_network -v
+python -S -m unittest tests.test_runtime_access_network tests.test_safe_compose_driver.SafeComposeDriverNetworkTests -v
 ```
 
-Expected: missing interfaces.
+Expected: missing pure network contract/reconciler behavior and missing concrete
+`SafeComposeRuntimeDriver` network inspect/create/connect/disconnect/rm operations.
 
 - [ ] **Step 3: Implement verified closed network operations**
 
