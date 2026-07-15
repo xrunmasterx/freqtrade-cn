@@ -166,7 +166,7 @@ whether the observation is acceptable; that decision belongs to the pure reconci
 
 | Field | Type | Meaning |
 |---|---|---|
-| `state` | `DriverState` | `absent`, `created`, `starting`, `running`, or `exited` |
+| `state` | `DriverState` | `absent`, `created`, `starting`, `running`, `exited`, or `unknown` |
 | `container_id` | `str | None` | Full immutable engine object ID, or `None` when absent |
 | `observed_project_name` | `str | None` | Observed identity label, possibly missing |
 | `observed_container_name` | `str | None` | Observed engine name, possibly missing |
@@ -182,6 +182,13 @@ whether the observation is acceptable; that decision belongs to the pure reconci
 Partial or malformed observations remain representable. Missing labels do not become a
 validation exception and do not disappear; they result in `None` fields that the reconciler
 will treat as an identity mismatch.
+
+`DriverState.UNKNOWN` represents every present engine state that cannot be normalized
+safely, including paused, restarting, removing, dead, and future engine values. It is not
+absence: it requires the full immutable `container_id`, retains every observed identity
+field available from inspection, and forbids `exit_code`. A future reconciler must latch or
+no-op on `UNKNOWN`; it must not launch, adopt, stop, restart, remove, or otherwise mutate the
+observed object.
 
 The inspection does not contain:
 
@@ -204,6 +211,13 @@ The inspection does not contain:
 | `timeout_seconds` | `int` | Positive and not greater than interval |
 | `retries` | `int` | Positive; the closed committed policy supplies the upper bound |
 
+The launch compiler resolves `HealthProfile` as a closed launch/catalog value, but callers
+request a health probe only by `profile_id`. A future concrete driver validates that ID,
+resolves exactly one driver-owned committed catalog entry, verifies the ID is authorized
+for the complete expected `DriverIdentity`, enforces committed upper bounds on timing and
+retries, and compares the complete resolved profile again immediately before execution.
+Only that entry's exact `probe_argv` may execute.
+
 `HealthObservation` contains only:
 
 - `status: DriverHealth`;
@@ -225,6 +239,13 @@ PostgreSQL, RuntimeSpec JSON, or a generic external mapping. Task 2 validation p
 that this internal value has the required structural and canonical form; the Task 2
 dataclasses are not provenance authority and do not classify values as secret or
 non-secret.
+
+`LaunchSnapshot.model_validate(value)` is deliberately not a deserializer. It returns an
+already-constructed `LaunchSnapshot` unchanged and rejects every `Mapping` or other raw
+external value with the fixed `DriverValidationError` code `driver_validation_error`.
+Internal compiler code constructs the value only through the explicit dataclass constructor;
+no public API DTO, repository/PostgreSQL loader, RuntimeSpec/compiler input, Supervisor
+assembly path, or concrete-driver launch path may call generic mapping deserialization.
 
 Top-level fields:
 
@@ -316,7 +337,7 @@ class RuntimeDriver(Protocol):
     def probe(
         self,
         identity: DriverIdentity,
-        profile: HealthProfile,
+        profile_id: str,
     ) -> HealthObservation: ...
 ```
 
@@ -357,8 +378,13 @@ class RuntimeDriver(Protocol):
 ### 6.4 probe
 
 - Requires exact identity before executing or reading a health result.
-- Uses only `HealthProfile.probe_argv`; no shell interpolation.
-- Applies the profile's bounded timeout and attempt count.
+- Validates `profile_id`, resolves one exact driver-owned committed catalog entry, and
+  rejects an unknown, mismatched, ambiguous, or unauthorized ID before execution.
+- Revalidates complete expected identity, the complete resolved profile, and committed
+  timing/retry upper bounds immediately before the probe.
+- Executes only the resolved entry's exact `HealthProfile.probe_argv`; arbitrary executables,
+  shell commands/interpolation, and credential-bearing argv are rejected.
+- Any rejection performs zero probe execution and zero runtime mutation.
 - Returns a redacted `HealthObservation`; raw output remains inside the adapter and is not
   persisted or logged.
 - Does not stop, restart, or repair the runtime.
@@ -467,6 +493,13 @@ snapshot again immediately before mutation. Task 4 adds `SafeComposeRuntimeDrive
 dedicated infrastructure module only after these gates and their mutation tests pass. Only
 at this point can Phase 2C dynamically launch a Registry runtime.
 
+The future driver also invokes Docker only through a trusted absolute executable, a
+driver-owned minimal environment, and one explicitly approved local engine endpoint and
+context. It rejects a poisoned `PATH`, `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, or
+Docker TLS/certificate variable before mutation and performs zero action. This gate applies
+only to the future driver; the extracted P0 compatibility CLI retains its current ambient
+Docker executable and environment behavior unchanged.
+
 ### Tasks 5–7
 
 Per-instance access networks, bounded health/failure handling, offline identity, daemon,
@@ -476,8 +509,11 @@ CLI, and offline paper-probe acceptance continue in their planned order.
 
 ### 10.1 Task 1A pure contract tests
 
-- valid complete identities and snapshots are accepted;
-- all unknown top-level and nested fields fail closed;
+- valid complete identities and explicitly constructed snapshots are accepted;
+- `LaunchSnapshot.model_validate` preserves the same instance and rejects both valid-looking
+  and dangerous mappings with the fixed validation code;
+- `DriverState.UNKNOWN` is representable only as a present object with `container_id` and no
+  `exit_code`;
 - raw Compose, host port, host mode, Docker socket, privileged options, added capabilities,
   raw labels, and multiple writable mounts are unrepresentable or rejected;
 - DTO mutation fails;
@@ -503,8 +539,15 @@ CLI, and offline paper-probe acceptance continue in their planned order.
 - stop uses full immutable container ID;
 - mutation tests reject parent-directory Docker socket exposure, a `ReadOnlyMount` used to
   bypass the secret role, source-root or symlink/junction/reparse escape, shell argv, raw
-  credential argv, non-allowlisted or raw-secret environment entries, and external
-  `LaunchSnapshot` deserialization;
+  credential argv, and non-allowlisted or raw-secret environment entries;
+- boundary tests reject raw/external snapshot mappings at the public API DTO,
+  repository/PostgreSQL load, RuntimeSpec/compiler input, Supervisor assembly, and concrete-
+  driver launch boundaries, and assert that none calls mapping deserialization;
+- probe mutations reject shell or arbitrary executables, credential argv, identity/profile
+  mismatch, and excessive timing/retry bounds, with zero execution on every rejection;
+- poisoned `PATH`, `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, and Docker TLS/certificate
+  variables are rejected before future-driver mutation with zero action;
+- `UNKNOWN` reconciliation latches or no-ops and performs zero mutation;
 - the final snapshot validator is called immediately before every mutation;
 - unknown containers/networks/paths are never deleted or disconnected.
 

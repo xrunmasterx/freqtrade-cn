@@ -52,6 +52,7 @@ Create `tests/test_runtime_driver.py` with these initial tests:
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import subprocess
 import sys
 import unittest
@@ -319,6 +320,7 @@ class DriverState(StrEnum):
     STARTING = "starting"
     RUNNING = "running"
     EXITED = "exited"
+    UNKNOWN = "unknown"
 
 
 class DriverHealth(StrEnum):
@@ -363,6 +365,13 @@ class DriverIdentity(_StrictValue):
 ```
 
 Then add `DriverInspection`, `HealthProfile`, and `HealthObservation` with the exact fields shown in Step 1. Enforce these exact invariants:
+
+`DriverState.UNKNOWN` represents a present engine object whose state cannot be safely
+normalized (including paused, restarting, removing, dead, and future values). It requires
+`container_id`, may retain partial observed identity, forbids `exit_code`, and is never
+treated as `ABSENT`. Add DTO tests for a valid retained-identity observation plus rejection
+when `container_id` is missing or `exit_code` is present. Future reconciliation tests must
+prove `UNKNOWN` latches/no-ops and performs no driver mutation.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -567,7 +576,7 @@ class RuntimeDriver(Protocol):
     def probe(
         self,
         identity: DriverIdentity,
-        profile: HealthProfile,
+        profile_id: str,
     ) -> HealthObservation: ...
 ```
 
@@ -592,17 +601,32 @@ resolved mount sources. Task 4 must:
 - resolve secrets only as provider-produced `SecretMount` values;
 - recheck all gates in the final snapshot validator, which the future concrete driver calls
   immediately before mutation.
+- invoke Docker only through a trusted absolute executable, a driver-owned minimal
+  environment, and an explicitly approved local engine endpoint and context. Poisoned
+  `PATH`, `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, and Docker TLS/certificate
+  variables must be rejected before mutation with zero action. This future-driver gate does
+  not change the extracted P0 compatibility CLI's ambient Docker behavior.
+- validate a requested health `profile_id`, resolve exactly one driver-owned committed
+  catalog entry authorized for the complete expected identity, enforce committed timing and
+  retry bounds, compare the complete profile immediately before probing, and execute only
+  its exact argv. Shell/arbitrary executables, credential argv, ID/profile mismatch, and
+  excessive bounds are rejected with zero execution.
 
 No `SafeComposeRuntimeDriver` exists until these gates and mutation tests pass. Task 4
 acceptance mutations cover parent-directory Docker socket exposure, `ReadOnlyMount`
 secret-role bypass, source-root or symlink/junction/reparse escape, shell argv, raw
-credential argv, non-allowlisted or raw-secret environment entries, and external
-`LaunchSnapshot` deserialization. This records the approved resolution of the review
-finding; it is not a claim that Task 2 alone establishes provenance.
+credential argv, and non-allowlisted or raw-secret environment entries. Boundary-specific
+tests reject raw snapshot mappings at the public API DTO, repository/PostgreSQL loading,
+RuntimeSpec/compiler input, Supervisor assembly, and concrete-driver launch, and prove none
+calls mapping deserialization. This records the approved resolution of the review finding;
+it is not a claim that Task 2 alone establishes provenance.
 
 - [ ] **Step 1: Extend RED tests for the final snapshot contract**
 
-Append tests that construct nested typed values and pass them through `LaunchSnapshot.model_validate()`:
+Append tests that construct nested typed values through the explicit dataclass constructor.
+`LaunchSnapshot.model_validate()` is tested only as an internal-value guard: it returns an
+existing snapshot unchanged and rejects every mapping/raw external value with the fixed
+`driver_validation_error` code.
 
 ```python
 from pathlib import Path, PurePosixPath
@@ -674,23 +698,19 @@ class LaunchSnapshotTests(unittest.TestCase):
             "resource_limits": ResourceLimits(1000, 536870912, 256),
         }
 
-    def test_launch_snapshot_is_strict_and_forbids_raw_power(self) -> None:
+    def test_launch_snapshot_validation_accepts_only_an_existing_snapshot(self) -> None:
         from tools.runtime_driver import DriverValidationError, LaunchSnapshot
 
-        snapshot = LaunchSnapshot.model_validate(self.valid_snapshot_payload())
-        self.assertEqual(snapshot.identity.instance_id, "phase2-spot-paper-probe")
-        for field, value in (
-            ("compose", {"services": {}}),
-            ("host_port", 9000),
-            ("privileged", True),
-            ("restart", "unless-stopped"),
-            ("labels", {"caller": "chosen"}),
+        payload = self.valid_snapshot_payload()
+        snapshot = LaunchSnapshot(**payload)
+        self.assertIs(LaunchSnapshot.model_validate(snapshot), snapshot)
+        for external_value in (
+            payload,
+            {**payload, "compose": {"services": {}}},
         ):
-            with self.subTest(field=field):
+            with self.subTest(external_value=external_value):
                 with self.assertRaises(DriverValidationError) as raised:
-                    LaunchSnapshot.model_validate(
-                        {**self.valid_snapshot_payload(), field: value}
-                    )
+                    LaunchSnapshot.model_validate(external_value)
                 self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_secret_environment_and_mount_escape_hatches(self) -> None:
@@ -783,7 +803,7 @@ class LaunchSnapshotTests(unittest.TestCase):
             "phase2-spot-paper-probe-state",
         )
         with self.assertRaises(DriverValidationError) as raised:
-            LaunchSnapshot.model_validate(payload)
+            LaunchSnapshot(**payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_state_identity_mismatch(self) -> None:
@@ -800,7 +820,7 @@ class LaunchSnapshotTests(unittest.TestCase):
             "wrong-allocation",
         )
         with self.assertRaises(DriverValidationError) as raised:
-            LaunchSnapshot.model_validate(payload)
+            LaunchSnapshot(**payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_raw_nested_values_and_boolean_limits(self) -> None:
@@ -813,7 +833,7 @@ class LaunchSnapshotTests(unittest.TestCase):
         payload = self.valid_snapshot_payload()
         payload["identity"] = dataclasses.asdict(payload["identity"])
         with self.assertRaises(DriverValidationError) as raised:
-            LaunchSnapshot.model_validate(payload)
+            LaunchSnapshot(**payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
         with self.assertRaises(DriverValidationError) as raised:
@@ -831,6 +851,9 @@ class LaunchSnapshotTests(unittest.TestCase):
             },
             {"inspect", "launch", "stop", "probe"},
         )
+        probe = inspect.signature(RuntimeDriver.probe)
+        self.assertEqual(tuple(probe.parameters), ("self", "identity", "profile_id"))
+        self.assertEqual(probe.parameters["profile_id"].annotation, "str")
 ```
 
 - [ ] **Step 2: Run RED and verify missing names**
@@ -905,6 +928,12 @@ class LaunchSnapshot(_StrictValue):
     internal_ports: tuple[int, ...]
     health_profile: HealthProfile
     resource_limits: ResourceLimits
+
+    @classmethod
+    def model_validate(cls, value: object) -> "LaunchSnapshot":
+        if isinstance(value, cls):
+            return value
+        raise DriverValidationError()
 ```
 
 Implement explicit `__post_init__` validation with these exact rules:
@@ -921,7 +950,7 @@ Implement explicit `__post_init__` validation with these exact rules:
 - Environment entries are sorted uniquely by name.
 - Read-only and secret mounts are sorted uniquely by string target.
 - Internal ports are a sorted unique tuple of integers in `1..65535`; an empty tuple is allowed.
-- Every nested top-level value is already an instance of its declared type. `model_validate` does not accept raw nested dicts and raises `DriverValidationError` whose fixed public string is `driver_validation_error`; this avoids building a second general validation framework or leaking internal validation detail.
+- Every nested top-level value is already an instance of its declared type. Internal compiler construction uses only the explicit dataclass constructor. The `LaunchSnapshot.model_validate` override returns the same existing instance and rejects every `Mapping` or other raw value with `DriverValidationError`, whose fixed public string is `driver_validation_error`; there is no generic mapping deserialization path.
 - Boolean values are rejected anywhere the contract requires an integer (`exit_code`, health counts/bounds, UID/GID, resource limits, and ports).
 
 Add the exact four-method protocol after all DTO definitions:
@@ -937,7 +966,7 @@ class RuntimeDriver(Protocol):
     def probe(
         self,
         identity: DriverIdentity,
-        profile: HealthProfile,
+        profile_id: str,
     ) -> HealthObservation: ...
 ```
 

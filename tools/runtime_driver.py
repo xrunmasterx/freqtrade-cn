@@ -87,6 +87,7 @@ class DriverState(StrEnum):
     STARTING = "starting"
     RUNNING = "running"
     EXITED = "exited"
+    UNKNOWN = "unknown"
 
 
 class DriverHealth(StrEnum):
@@ -358,6 +359,12 @@ class LaunchSnapshot(_StrictValue):
     health_profile: HealthProfile
     resource_limits: ResourceLimits
 
+    @classmethod
+    def model_validate(cls, value: object) -> "LaunchSnapshot":
+        if isinstance(value, cls):
+            return value
+        raise DriverValidationError()
+
     def __post_init__(self) -> None:
         if (
             not isinstance(self.identity, DriverIdentity)
@@ -455,5 +462,5 @@ class RuntimeDriver(Protocol):
     def probe(
         self,
         identity: DriverIdentity,
-        profile: HealthProfile,
+        profile_id: str,
     ) -> HealthObservation: ...

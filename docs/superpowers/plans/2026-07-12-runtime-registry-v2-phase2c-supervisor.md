@@ -46,7 +46,7 @@
 - Test: `tests/test_compose_runtime.py`
 
 **Interfaces:**
-- Produces `RuntimeDriver.inspect(identity)`, `launch(snapshot)`, `stop(identity)`, `probe(identity, health_profile)`.
+- Produces `RuntimeDriver.inspect(identity)`, `launch(snapshot)`, `stop(identity)`, `probe(identity, profile_id)`.
 - Produces immutable `DriverIdentity`, `DriverInspection`, `LaunchSnapshot`.
 - Preserves every existing `tools.compose_runtime` CLI behavior.
 
@@ -54,17 +54,13 @@
 
 ```python
 class RuntimeDriverTests(unittest.TestCase):
-    def test_launch_snapshot_has_no_raw_compose_or_host_port(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unknown field"):
-            LaunchSnapshot.model_validate({
-                **valid_snapshot_payload(),
-                "compose": {"services": {}},
-            })
-        with self.assertRaisesRegex(ValueError, "unknown field"):
-            LaunchSnapshot.model_validate({
-                **valid_snapshot_payload(),
-                "host_port": 9000,
-            })
+    def test_launch_snapshot_validation_accepts_only_existing_snapshot(self) -> None:
+        payload = valid_snapshot_payload()
+        snapshot = LaunchSnapshot(**payload)
+        assert LaunchSnapshot.model_validate(snapshot) is snapshot
+        for external in (payload, {**payload, "compose": {"services": {}}}):
+            with self.assertRaisesRegex(DriverValidationError, "driver_validation_error"):
+                LaunchSnapshot.model_validate(external)
 
     def test_existing_compose_cli_still_calls_verified_path(self) -> None:
         completed = launch_reviewed_service("freqtrade", self.root)
@@ -90,7 +86,7 @@ class RuntimeDriver(Protocol):
     def probe(
         self,
         identity: DriverIdentity,
-        profile: HealthProfile,
+        profile_id: str,
     ) -> HealthObservation: ...
 ```
 
@@ -99,6 +95,11 @@ Task 4 has implemented and mutation-tested the approved compiler and final pre-m
 validator. It will then call the extracted `_validate_launch`, exact image inspection,
 committed build identity, validated temporary snapshot, `--no-build --no-deps`, and cleanup
 functions using subprocess argument lists only, with no shell interpolation or Docker SDK.
+The future adapter validates `profile_id`, resolves an exact driver-owned committed health
+catalog entry authorized for the complete identity, enforces bounded timing/retries,
+compares the complete profile immediately before execution, and executes only that argv.
+Shell/arbitrary executables, credential argv, ID/profile mismatch, and excessive bounds are
+rejected with zero probe execution.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -187,6 +188,7 @@ CASES = (
     ("stopped_exact", "fail_latched"),
     ("healthy_wrong_spec", "identity_mismatch"),
     ("healthy_wrong_state", "identity_mismatch"),
+    ("unknown_present", "fail_latched"),
 )
 
 def test_reconciliation_matrix() -> None:
@@ -195,7 +197,10 @@ def test_reconciliation_matrix() -> None:
             assert decide_reconciliation(expected_identity(), inspection(observed)).value == expected
 ```
 
-Add a test proving `identity_mismatch` never invokes driver stop/delete.
+Add tests proving `identity_mismatch` and `DriverState.UNKNOWN` never invoke driver
+launch/stop/restart/delete. `UNKNOWN` represents paused, restarting, removing, dead, and any
+future present state that cannot be safely normalized; it retains observed identity,
+requires `container_id`, forbids `exit_code`, and always latches/no-ops.
 
 - [ ] **Step 2: Run RED**
 
@@ -238,6 +243,9 @@ RuntimeSpec JSON, or generic external mapping. Task 2 validates only structural/
 form and is not provenance or secret-classification authority. The Task 4 compiler accepts
 only committed closed `AdapterTemplate`/policy plus typed RuntimeSpec, state-allocation, and
 secret references. Only it emits argv, environment entries, and resolved mount sources.
+Internal compilation uses the explicit dataclass constructor. `LaunchSnapshot.model_validate`
+returns an already-constructed snapshot unchanged and rejects every mapping/raw value with
+fixed `DriverValidationError`; no external boundary may use it as a deserializer.
 
 Task 4 trust-boundary gates are mandatory:
 
@@ -252,6 +260,11 @@ Task 4 trust-boundary gates are mandatory:
 - provider-resolved `SecretMount` values are the only secret transport;
 - the final snapshot validator rechecks every gate, and the future concrete driver invokes
   it immediately before mutation.
+- the future driver invokes a trusted absolute Docker executable with a driver-owned minimal
+  environment and an explicitly approved local engine endpoint/context. It rejects poisoned
+  `PATH`, `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, and Docker TLS/certificate
+  variables before mutation with zero action. The extracted P0 compatibility CLI keeps its
+  existing ambient Docker executable/environment behavior unchanged.
 
 No `SafeComposeRuntimeDriver` exists until all gates and mutation tests pass. This is the
 approved resolution of the review finding, not a claim that Task 2 dataclasses prove
@@ -273,7 +286,11 @@ MUTATIONS = (
     ("shell_argv", ("sh", "-c", "caller command")),
     ("raw_credential_argv", ("freqtrade", "--password", "private")),
     ("non_allowlisted_environment", ("CALLER_VALUE", "raw-secret")),
-    ("external_launch_snapshot", {"argv": ["caller"]}),
+    ("poisoned_path", {"PATH": "attacker-bin"}),
+    ("remote_docker_host", {"DOCKER_HOST": "tcp://attacker:2375"}),
+    ("unapproved_docker_context", {"DOCKER_CONTEXT": "attacker"}),
+    ("poisoned_docker_config", {"DOCKER_CONFIG": "attacker-config"}),
+    ("poisoned_docker_tls", {"DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "attacker"}),
 )
 
 def test_snapshot_validator_rejects_escape_mutations() -> None:
@@ -309,10 +326,13 @@ Snapshot service has:
 Validate the compiled snapshot and rendered JSON before and immediately before action. The
 acceptance tests independently cover parent-directory Docker socket exposure,
 `ReadOnlyMount` secret-role bypass, source-root and symlink/junction/reparse escape, shell
-argv, raw credential argv, non-allowlisted/raw-secret environment, and external
-`LaunchSnapshot` deserialization. Temporary files are opened with exclusive permissions
-and removed in `finally`. Create `SafeComposeRuntimeDriver` only after all of these tests
-pass; it must call the final validator immediately before mutation.
+argv, raw credential argv, non-allowlisted/raw-secret environment, and poisoned Docker
+executable/environment/endpoint inputs with pre-mutation rejection and zero action.
+Boundary-specific tests reject mapping input at the public API DTO,
+repository/PostgreSQL loader, RuntimeSpec/compiler input, Supervisor assembly, and concrete-
+driver launch, and assert none calls mapping deserialization. Temporary files are opened
+with exclusive permissions and removed in `finally`. Create `SafeComposeRuntimeDriver` only
+after all of these tests pass; it must call the final validator immediately before mutation.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -413,7 +433,16 @@ Expected: missing offline/failure behavior.
 
 - [ ] **Step 3: Implement bounded health and snapshot**
 
-Health uses closed profile start-period/interval/timeout/retries. Exhaustion stops only exact identity, records failed attempt, latches instance, and queues nothing. Offline snapshot is canonical JSON with instance/attempt/project/container/image/spec/allocation/network identities, component commits, written atomically with durability and fixed ACL; it contains no secret/path/credential/DSN.
+Health requests pass only `profile_id`. The driver validates the ID, resolves exactly one
+driver-owned committed catalog entry authorized for the complete expected identity,
+enforces bounded start-period/interval/timeout/retries, compares the complete profile again
+immediately before execution, and runs only its exact argv. Future mutation tests reject
+shell/arbitrary executables, credential argv, ID/profile mismatch, and excessive bounds with
+zero execution. Exhaustion stops only exact identity, records failed attempt, latches
+instance, and queues nothing. Offline snapshot is canonical JSON with
+instance/attempt/project/container/image/spec/allocation/network identities, component
+commits, written atomically with durability and fixed ACL; it contains no
+secret/path/credential/DSN.
 
 - [ ] **Step 4: Run GREEN and commit**
 

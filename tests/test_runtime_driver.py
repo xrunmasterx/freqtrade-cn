@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import subprocess
 import sys
 import unittest
@@ -105,6 +106,38 @@ class RuntimeDriverIdentityTests(unittest.TestCase):
                 health=DriverHealth.UNKNOWN,
                 exit_code=None,
             )
+
+    def test_unknown_state_retains_observed_identity_and_is_non_absent(self) -> None:
+        from tools.runtime_driver import (
+            DriverHealth,
+            DriverInspection,
+            DriverState,
+            DriverValidationError,
+        )
+
+        observation = {
+            "state": DriverState.UNKNOWN,
+            "container_id": "c" * 64,
+            "observed_project_name": "runtime-phase2-paper-probe",
+            "observed_container_name": "runtime-phase2-paper-probe-attempt-1",
+            "observed_instance_id": "phase2-spot-paper-probe",
+            "observed_attempt_id": "phase2-spot-paper-probe-attempt-1",
+            "observed_runtime_spec_digest": "a" * 64,
+            "observed_state_allocation_id": "phase2-spot-paper-probe-state",
+            "observed_image_id": "sha256:" + "b" * 64,
+            "observed_network_names": ("runtime-phase2-paper-probe-private",),
+            "health": DriverHealth.UNKNOWN,
+            "exit_code": None,
+        }
+        inspection = DriverInspection(**observation)
+        self.assertEqual(inspection.state, DriverState.UNKNOWN)
+        self.assertEqual(inspection.container_id, "c" * 64)
+
+        for mutation in ({"container_id": None}, {"exit_code": 1}):
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(DriverValidationError) as raised:
+                    DriverInspection(**{**observation, **mutation})
+                self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_health_contract_uses_argv_and_redacted_failure_code(self) -> None:
         from tools.runtime_driver import DriverHealth, HealthObservation, HealthProfile
@@ -255,23 +288,20 @@ class LaunchSnapshotTests(unittest.TestCase):
             "resource_limits": ResourceLimits(1000, 536870912, 256),
         }
 
-    def test_launch_snapshot_is_strict_and_forbids_raw_power(self) -> None:
+    def test_launch_snapshot_validation_accepts_only_an_existing_snapshot(self) -> None:
         from tools.runtime_driver import DriverValidationError, LaunchSnapshot
 
-        snapshot = LaunchSnapshot.model_validate(self.valid_snapshot_payload())
-        self.assertEqual(snapshot.identity.instance_id, "phase2-spot-paper-probe")
-        for field, value in (
-            ("compose", {"services": {}}),
-            ("host_port", 9000),
-            ("privileged", True),
-            ("restart", "unless-stopped"),
-            ("labels", {"caller": "chosen"}),
+        payload = self.valid_snapshot_payload()
+        snapshot = LaunchSnapshot(**payload)
+        self.assertIs(LaunchSnapshot.model_validate(snapshot), snapshot)
+
+        for external_value in (
+            payload,
+            {**payload, "compose": {"services": {}}},
         ):
-            with self.subTest(field=field):
+            with self.subTest(external_value=external_value):
                 with self.assertRaises(DriverValidationError) as raised:
-                    LaunchSnapshot.model_validate(
-                        {**self.valid_snapshot_payload(), field: value}
-                    )
+                    LaunchSnapshot.model_validate(external_value)
                 self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_secret_environment_and_mount_escape_hatches(self) -> None:
@@ -364,7 +394,7 @@ class LaunchSnapshotTests(unittest.TestCase):
             "phase2-spot-paper-probe-state",
         )
         with self.assertRaises(DriverValidationError) as raised:
-            LaunchSnapshot.model_validate(payload)
+            LaunchSnapshot(**payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_state_identity_mismatch(self) -> None:
@@ -381,7 +411,7 @@ class LaunchSnapshotTests(unittest.TestCase):
             "wrong-allocation",
         )
         with self.assertRaises(DriverValidationError) as raised:
-            LaunchSnapshot.model_validate(payload)
+            LaunchSnapshot(**payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
     def test_snapshot_rejects_raw_nested_values_and_boolean_limits(self) -> None:
@@ -394,7 +424,7 @@ class LaunchSnapshotTests(unittest.TestCase):
         payload = self.valid_snapshot_payload()
         payload["identity"] = dataclasses.asdict(payload["identity"])
         with self.assertRaises(DriverValidationError) as raised:
-            LaunchSnapshot.model_validate(payload)
+            LaunchSnapshot(**payload)
         self.assertEqual(str(raised.exception), "driver_validation_error")
 
         with self.assertRaises(DriverValidationError) as raised:
@@ -412,3 +442,8 @@ class LaunchSnapshotTests(unittest.TestCase):
             },
             {"inspect", "launch", "stop", "probe"},
         )
+        probe = inspect.signature(RuntimeDriver.probe)
+        self.assertEqual(tuple(probe.parameters), ("self", "identity", "profile_id"))
+        self.assertEqual(probe.parameters["identity"].annotation, "DriverIdentity")
+        self.assertEqual(probe.parameters["profile_id"].annotation, "str")
+        self.assertEqual(probe.return_annotation, "HealthObservation")
