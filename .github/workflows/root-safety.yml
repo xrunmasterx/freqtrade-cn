@@ -272,7 +272,12 @@ jobs:
 
           ready=0
           for attempt in $(seq 1 60); do
-            if docker exec platform-postgres-ci pg_isready --username postgres --dbname platform >/dev/null 2>&1; then
+            if docker exec platform-postgres-ci sh -c '
+              postmaster_pid=
+              read -r postmaster_pid < "${PGDATA}/postmaster.pid" &&
+                test "${postmaster_pid}" = "1" &&
+                exec pg_isready --username postgres --dbname platform
+            ' >/dev/null 2>&1; then
               ready=1
               break
             fi

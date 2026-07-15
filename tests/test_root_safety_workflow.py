@@ -2295,6 +2295,115 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertNotIn("docker compose", step)
         self.assertNotIn("docker network disconnect bridge platform-postgres-ci", step)
 
+    def test_platform_postgres_readiness_requires_pid_one_before_pg_isready(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = step_run_script(workflow, PLATFORM_CI_STEPS[0])
+        probe = (
+            "docker exec platform-postgres-ci sh -c '\n"
+            "    postmaster_pid=\n"
+            '    read -r postmaster_pid < "${PGDATA}/postmaster.pid" &&\n'
+            '      test "${postmaster_pid}" = "1" &&\n'
+            "      exec pg_isready --username postgres --dbname platform\n"
+            "  ' >/dev/null 2>&1"
+        )
+
+        self.assertIn(probe, step)
+        self.assertNotIn(
+            "docker exec platform-postgres-ci pg_isready ",
+            step,
+        )
+        self.assertIn("for attempt in $(seq 1 60); do", step)
+        self.assertIn("sleep 1", step)
+        self.assertIn('test "${ready}" -eq 1', step)
+        self.assertLess(step.index("read -r postmaster_pid"), step.index("exec pg_isready"))
+        self.assertLess(
+            step.index('test "${ready}" -eq 1'),
+            step.index("CREATE DATABASE platform_test_ci"),
+        )
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_platform_postgres_readiness_waits_for_final_postmaster_and_fails_closed(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        script_lines = step_run_script(workflow, PLATFORM_CI_STEPS[0]).splitlines()
+        loop_start = script_lines.index("ready=0")
+        loop_end = script_lines.index('test "${ready}" -eq 1', loop_start) + 1
+        readiness_loop = "\n".join(script_lines[loop_start:loop_end]) + "\n"
+        harness = r'''set -u
+fixture_root="$(mktemp -d)"
+trap 'rm -rf "${fixture_root}"' EXIT
+mkdir -p "${fixture_root}/bin" "${fixture_root}/pgdata"
+printf '%s\n' '#!/bin/sh' 'test "$*" = "--username postgres --dbname platform"' \
+  > "${fixture_root}/bin/pg_isready"
+chmod +x "${fixture_root}/bin/pg_isready"
+printf '0\n' > "${fixture_root}/attempt"
+
+docker() {
+  test "$#" -eq 5 || return 91
+  test "$1" = "exec" || return 92
+  test "$2" = "platform-postgres-ci" || return 93
+  test "$3" = "sh" || return 94
+  test "$4" = "-c" || return 95
+  probe_script="$5"
+  attempt="$(( $(cat "${fixture_root}/attempt") + 1 ))"
+  printf '%s\n' "${attempt}" > "${fixture_root}/attempt"
+  case "${PROBE_SCENARIO}:${attempt}" in
+    temp-gap-final:1|temp-only:*)
+      printf '42\n' > "${fixture_root}/pgdata/postmaster.pid"
+      ;;
+    temp-gap-final:2)
+      rm -f "${fixture_root}/pgdata/postmaster.pid"
+      ;;
+    temp-gap-final:3)
+      printf '1\n' > "${fixture_root}/pgdata/postmaster.pid"
+      ;;
+    *)
+      return 96
+      ;;
+  esac
+  env PGDATA="${fixture_root}/pgdata" PATH="${fixture_root}/bin:${PATH}" \
+    sh -c "${probe_script}"
+}
+
+seq() {
+  test "$1" = "1" && test "$2" = "60" || return 97
+  printf '1\n2\n3\n'
+}
+
+sleep() {
+  test "$1" = "1"
+}
+'''
+
+        def run_scenario(scenario: str) -> subprocess.CompletedProcess[bytes]:
+            assertions = (
+                'loop_status=$?\n'
+                'test "$(cat "${fixture_root}/attempt")" = "3"\n'
+                'exit "${loop_status}"\n'
+            )
+            return subprocess.run(
+                [shutil.which("bash") or "bash", "-s"],
+                input=(
+                    f"PROBE_SCENARIO={shlex.quote(scenario)}\n"
+                    + harness
+                    + readiness_loop
+                    + assertions
+                ).encode(),
+                capture_output=True,
+                check=False,
+            )
+
+        final_ready = run_scenario("temp-gap-final")
+        self.assertEqual(final_ready.returncode, 0, final_ready.stderr.decode())
+        self.assertEqual(final_ready.stdout, b"")
+        self.assertEqual(final_ready.stderr, b"")
+
+        temporary_only = run_scenario("temp-only")
+        self.assertNotEqual(temporary_only.returncode, 0)
+        self.assertEqual(temporary_only.stdout, b"")
+        self.assertEqual(temporary_only.stderr, b"")
+
     def test_platform_upgrade_and_backend_selectors_are_executable(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         upgrade = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[1]))
