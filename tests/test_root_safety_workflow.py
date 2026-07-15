@@ -3083,6 +3083,99 @@ sleep() {
             step.index("CREATE FUNCTION public.platform_operator_public_null_probe()"),
         )
 
+    def test_operator_privilege_gate_reports_fixed_post_reconcile_checkpoints(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        checkpoints = (
+            (
+                'test "${operator_membership_count}" = "0"',
+                "operator_membership_checkpoint_complete",
+                "operator_default_acl_count=",
+            ),
+            (
+                'test "${operator_default_acl_count}" = "0"',
+                "operator_default_acl_checkpoint_complete",
+                "direct_operator_database_acl_difference=",
+            ),
+            (
+                'test "${direct_operator_database_acl_difference}" = "0"',
+                "operator_database_acl_checkpoint_complete",
+                "direct_operator_schema_acl_difference=",
+            ),
+            (
+                'test "${direct_operator_schema_acl_difference}" = "0"',
+                "operator_schema_acl_checkpoint_complete",
+                "direct_operator_relation_acl_difference=",
+            ),
+            (
+                'test "${direct_operator_relation_acl_difference}" = "0"',
+                "operator_relation_acl_checkpoint_complete",
+                "direct_operator_sequence_acl_count=",
+            ),
+            (
+                'test "${direct_operator_sequence_acl_count}" = "0"',
+                "operator_sequence_acl_checkpoint_complete",
+                "direct_operator_column_acl_count=",
+            ),
+            (
+                'test "${direct_operator_column_acl_count}" = "0"',
+                "operator_column_acl_checkpoint_complete",
+                "direct_operator_routine_acl_count=",
+            ),
+            (
+                'test "${direct_operator_routine_acl_count}" = "0"',
+                "operator_routine_acl_checkpoint_complete",
+                "residual_operator_authority=",
+            ),
+            (
+                'test "${residual_operator_authority}" = "f|f|f|f|f|f"',
+                "operator_residual_authority_checkpoint_complete",
+                "public_default_acl_count=",
+            ),
+            (
+                'test "${public_default_acl_count}" = "0"',
+                "operator_public_default_acl_checkpoint_complete",
+                "public_effective_acl_count=",
+            ),
+            (
+                'test "${public_effective_acl_count}" = "0"',
+                "operator_public_effective_acl_checkpoint_complete",
+                "expect_operator_denied sequence",
+            ),
+        )
+
+        for assertion, marker, next_gate in checkpoints:
+            with self.subTest(marker=marker):
+                self.assertEqual(step.count(marker), 1)
+                marker_line = next(line for line in step.splitlines() if marker in line)
+                self.assertEqual(
+                    marker_line.strip(),
+                    f"printf '%s\\n' '{marker}' >&2",
+                )
+                self.assertNotIn("${", marker_line)
+                self.assertLess(step.index(assertion), step.index(marker))
+                self.assertLess(step.index(marker), step.index(next_gate))
+
+        denial_marker = "operator_final_denial_probes_complete"
+        self.assertEqual(step.count(denial_marker), 1)
+        denial_marker_line = next(
+            line for line in step.splitlines() if denial_marker in line
+        )
+        self.assertEqual(
+            denial_marker_line.strip(),
+            f"printf '%s\\n' '{denial_marker}' >&2",
+        )
+        self.assertNotIn("${", denial_marker_line)
+        for denial_probe in (
+            "expect_operator_denied sequence",
+            "expect_operator_denied routine",
+            'expect_operator_denied maintain "VACUUM public.runtime_instances"',
+            'expect_operator_denied secret-version-after "SELECT * FROM secret_version_metadata"',
+            'expect_operator_denied lifecycle-after "SELECT * FROM runtime_lifecycle_jobs"',
+        ):
+            with self.subTest(denial_probe=denial_probe):
+                self.assertLess(step.index(denial_probe), step.index(denial_marker))
+
     def test_operator_login_uses_a_private_cleaned_libpq_passfile(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))

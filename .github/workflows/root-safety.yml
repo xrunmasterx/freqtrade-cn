@@ -878,6 +878,7 @@ jobs:
               WHERE granted_role.rolname = 'platform_operator'
                  OR member_role.rolname = 'platform_operator'")"
           test "${operator_membership_count}" = "0"
+          printf '%s\n' 'operator_membership_checkpoint_complete' >&2
           operator_default_acl_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -891,6 +892,7 @@ jobs:
                  OR grantee.rolname = 'platform_operator'
                  OR privilege.grantee = 0")"
           test "${operator_default_acl_count}" = "0"
+          printf '%s\n' 'operator_default_acl_checkpoint_complete' >&2
           direct_operator_database_acl_difference="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -911,6 +913,7 @@ jobs:
               )
               SELECT count(*) FROM difference")"
           test "${direct_operator_database_acl_difference}" = "0"
+          printf '%s\n' 'operator_database_acl_checkpoint_complete' >&2
           direct_operator_schema_acl_difference="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -931,6 +934,7 @@ jobs:
               )
               SELECT count(*) FROM difference")"
           test "${direct_operator_schema_acl_difference}" = "0"
+          printf '%s\n' 'operator_schema_acl_checkpoint_complete' >&2
           direct_operator_relation_acl_difference="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -966,6 +970,7 @@ jobs:
               )
               SELECT count(*) FROM difference")"
           test "${direct_operator_relation_acl_difference}" = "0"
+          printf '%s\n' 'operator_relation_acl_checkpoint_complete' >&2
           direct_operator_sequence_acl_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -979,6 +984,7 @@ jobs:
                 AND namespace.nspname <> 'information_schema'
                 AND namespace.nspname !~ '^pg_'")"
           test "${direct_operator_sequence_acl_count}" = "0"
+          printf '%s\n' 'operator_sequence_acl_checkpoint_complete' >&2
           direct_operator_column_acl_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -992,6 +998,7 @@ jobs:
                 AND namespace.nspname !~ '^pg_'
                 AND (grantee.rolname = 'platform_operator' OR privilege.grantee = 0)")"
           test "${direct_operator_column_acl_count}" = "0"
+          printf '%s\n' 'operator_column_acl_checkpoint_complete' >&2
           direct_operator_routine_acl_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -1004,6 +1011,7 @@ jobs:
                 AND namespace.nspname <> 'information_schema'
                 AND namespace.nspname !~ '^pg_'")"
           test "${direct_operator_routine_acl_count}" = "0"
+          printf '%s\n' 'operator_routine_acl_checkpoint_complete' >&2
 
           residual_operator_authority="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
@@ -1022,6 +1030,7 @@ jobs:
                      has_database_privilege('platform_operator', 'platform', 'CREATE'),
                      has_schema_privilege('platform_operator', 'public', 'CREATE')")"
           test "${residual_operator_authority}" = "f|f|f|f|f|f"
+          printf '%s\n' 'operator_residual_authority_checkpoint_complete' >&2
           public_default_acl_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -1030,6 +1039,7 @@ jobs:
               CROSS JOIN LATERAL aclexplode(defaclacl) AS privilege
               WHERE privilege.grantee = 0")"
           test "${public_default_acl_count}" = "0"
+          printf '%s\n' 'operator_public_default_acl_checkpoint_complete' >&2
           public_effective_acl_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -1074,6 +1084,7 @@ jobs:
               ) AS effective_acl
               WHERE grantee = 0")"
           test "${public_effective_acl_count}" = "0"
+          printf '%s\n' 'operator_public_effective_acl_checkpoint_complete' >&2
 
           expect_operator_denied sequence \
             "SELECT nextval('public.platform_operator_forbidden_sequence')"
@@ -1082,6 +1093,7 @@ jobs:
           expect_operator_denied maintain "VACUUM public.runtime_instances"
           expect_operator_denied secret-version-after "SELECT * FROM secret_version_metadata"
           expect_operator_denied lifecycle-after "SELECT * FROM runtime_lifecycle_jobs"
+          printf '%s\n' 'operator_final_denial_probes_complete' >&2
 
       - name: Verify platform-control least privilege
         shell: bash
