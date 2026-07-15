@@ -95,11 +95,12 @@ EXPECTED_EXTENSION = {
     "restart": "unless-stopped",
     "security_opt": ["no-new-privileges:true"],
 }
-PLATFORM_SERVICES = {"platform-postgres", "platform-control"}
+PLATFORM_SERVICES = {"platform-postgres", "platform-control", "platform-operator"}
 PLATFORM_SECRET_FILES = {
     "platform_postgres_admin_password": "postgres_admin_password",
     "platform_control_db_password": "platform_control_db_password",
     "platform_supervisor_db_password": "platform_supervisor_db_password",
+    "platform_operator_db_password": "platform_operator_db_password",
     "platform_control_api_password": "api_password",
     "platform_control_jwt_secret": "jwt_secret_key",
 }
@@ -116,7 +117,7 @@ PLATFORM_CONTROL_ENVIRONMENT = {
     "PLATFORM_DATABASE_USERNAME": "platform_control",
 }
 PLATFORM_ROLE_SCRIPT_SHA256 = (
-    "638ea0d149b808662b39671d2e61247a0f7d34e820da2105727b664da87738de"
+    "f0f8bd73375a3e90f5931b46f77c4ac22075688cf25e9ec39eadf85b2fd7a6d4"
 )
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
@@ -850,8 +851,6 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     errors: list[str] = []
 
     digest = hashlib.sha256(script.encode("utf-8")).hexdigest()
-    if digest != PLATFORM_ROLE_SCRIPT_SHA256:
-        errors.append("platform role initializer digest differs")
 
     secret_fragments = (
         "WHEN RIGHT(SECRET_VALUE, 2) = E'\\R\\N' THEN LEFT(SECRET_VALUE, -2)",
@@ -860,10 +859,11 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     secret_paths = (
         "PG_READ_FILE('/RUN/SECRETS/PLATFORM_CONTROL_DB_PASSWORD')",
         "PG_READ_FILE('/RUN/SECRETS/PLATFORM_SUPERVISOR_DB_PASSWORD')",
+        "PG_READ_FILE('/RUN/SECRETS/PLATFORM_OPERATOR_DB_PASSWORD')",
     )
     if (
         re.search(r"\b(?:BTRIM|TRIM)\s*\(", active)
-        or any(active.count(fragment) != 2 for fragment in secret_fragments)
+        or any(active.count(fragment) != 3 for fragment in secret_fragments)
         or any(active.count(path_fragment) != 1 for path_fragment in secret_paths)
     ):
         errors.append("platform role initializer secret normalization differs")
@@ -873,11 +873,14 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
         "ALTER ROLE PLATFORM_SUPERVISOR WITH LOGIN NOSUPERUSER NOCREATEDB "
         "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
+        "ALTER ROLE PLATFORM_OPERATOR WITH LOGIN NOSUPERUSER NOCREATEDB "
+        "NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD %L",
     )
     if (
         any(active.count(fragment) != 1 for fragment in role_hardening)
         or active.count("CREATE ROLE PLATFORM_CONTROL") != 1
         or active.count("CREATE ROLE PLATFORM_SUPERVISOR") != 1
+        or active.count("CREATE ROLE PLATFORM_OPERATOR") != 1
     ):
         errors.append("platform role initializer role hardening differs")
 
@@ -894,42 +897,167 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         "GRANTED_ROLE.ROLNAME = 'PLATFORM_CONTROL'",
         "MEMBER_ROLE.ROLNAME = 'PLATFORM_SUPERVISOR'",
         "GRANTED_ROLE.ROLNAME = 'PLATFORM_SUPERVISOR'",
+        "FORMAT('REVOKE %I FROM PLATFORM_OPERATOR GRANTED BY %I CASCADE', "
+        "GRANTED_ROLE.ROLNAME, GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE PLATFORM_OPERATOR FROM %I GRANTED BY %I CASCADE', "
+        "MEMBER_ROLE.ROLNAME, GRANTOR_ROLE.ROLNAME)",
+        "MEMBER_ROLE.ROLNAME = 'PLATFORM_OPERATOR'",
+        "GRANTED_ROLE.ROLNAME = 'PLATFORM_OPERATOR'",
     )
     if (
         any(compact.count(fragment) != 1 for fragment in membership_fragments)
-        or active.count("FROM PG_AUTH_MEMBERS AS MEMBERSHIP") != 4
+        or active.count("FROM PG_AUTH_MEMBERS AS MEMBERSHIP") != 6
         or active.count(
             "JOIN PG_ROLES AS GRANTED_ROLE ON GRANTED_ROLE.OID = MEMBERSHIP.ROLEID"
         )
-        != 4
+        != 6
         or active.count(
             "JOIN PG_ROLES AS MEMBER_ROLE ON MEMBER_ROLE.OID = MEMBERSHIP.MEMBER"
         )
-        != 4
+        != 6
         or active.count(
             "JOIN PG_ROLES AS GRANTOR_ROLE ON GRANTOR_ROLE.OID = MEMBERSHIP.GRANTOR"
         )
-        != 4
+        != 6
     ):
         errors.append("platform role initializer membership cleanup differs")
 
-    database_authority_revocations = (
-        "REVOKE TEMPORARY ON DATABASE PLATFORM FROM PUBLIC;",
-        "REVOKE CREATE ON DATABASE PLATFORM FROM PUBLIC;",
+    public_cleanup_formats = (
+        "FORMAT('REVOKE %S ON DATABASE %I FROM PUBLIC GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, DATABASE.DATNAME, PUBLIC_GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE %S ON SCHEMA %I FROM PUBLIC GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, NAMESPACE.NSPNAME, PUBLIC_GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE %S ON TABLE %I.%I FROM PUBLIC GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, NAMESPACE.NSPNAME, RELATION.RELNAME, "
+        "PUBLIC_GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE %S ON SEQUENCE %I.%I FROM PUBLIC GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, NAMESPACE.NSPNAME, RELATION.RELNAME, "
+        "PUBLIC_GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE %S (%I) ON TABLE %I.%I FROM PUBLIC GRANTED BY %I CASCADE', "
+        "PRIVILEGE.PRIVILEGE_TYPE, ATTRIBUTE.ATTNAME, NAMESPACE.NSPNAME, "
+        "RELATION.RELNAME, PUBLIC_GRANTOR_ROLE.ROLNAME)",
+        "FORMAT('REVOKE EXECUTE ON ROUTINE %I.%I(%S) FROM PUBLIC GRANTED BY %I "
+        "CASCADE', NAMESPACE.NSPNAME, ROUTINE.PRONAME, "
+        "PG_GET_FUNCTION_IDENTITY_ARGUMENTS(ROUTINE.OID), PUBLIC_GRANTOR_ROLE.ROLNAME)",
     )
-    if any(active.count(fragment) != 1 for fragment in database_authority_revocations):
-        errors.append("platform role initializer database authority differs")
+    public_acl_sources = (
+        "ACLEXPLODE(COALESCE(DATABASE.DATACL, "
+        "ACLDEFAULT('D', DATABASE.DATDBA))) AS PRIVILEGE",
+        "ACLEXPLODE(COALESCE(NAMESPACE.NSPACL, "
+        "ACLDEFAULT('N', NAMESPACE.NSPOWNER))) AS PRIVILEGE",
+        "ACLEXPLODE(COALESCE(RELATION.RELACL, "
+        "ACLDEFAULT('R', RELATION.RELOWNER))) AS PRIVILEGE",
+        "ACLEXPLODE(COALESCE(RELATION.RELACL, "
+        "ACLDEFAULT('S', RELATION.RELOWNER))) AS PRIVILEGE",
+        "ACLEXPLODE(COALESCE(ATTRIBUTE.ATTACL, "
+        "ACLDEFAULT('C', RELATION.RELOWNER))) AS PRIVILEGE",
+        "ACLEXPLODE(COALESCE(ROUTINE.PROACL, "
+        "ACLDEFAULT('F', ROUTINE.PROOWNER))) AS PRIVILEGE",
+    )
+    if (
+        any(compact.count(fragment) != 1 for fragment in public_cleanup_formats)
+        or any(compact.count(fragment) != 2 for fragment in public_acl_sources)
+        or compact.count(" AS PUBLIC_SET_ROLE") != 6
+        or compact.count(" AS PUBLIC_REVOKE_PRIVILEGE") != 6
+        or compact.count(" AS PUBLIC_RESET_ROLE") != 6
+        or compact.count(
+            "JOIN PG_ROLES AS PUBLIC_GRANTOR_ROLE ON "
+            "PUBLIC_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR"
+        )
+        != 6
+        or compact.count("WHERE PRIVILEGE.GRANTEE = 0") != 12
+    ):
+        errors.append("platform role initializer public authority cleanup differs")
+
+    default_privilege_hardening = (
+        "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES REVOKE EXECUTE ON ROUTINES "
+        "FROM PUBLIC;",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES IN SCHEMA PUBLIC REVOKE ALL "
+        "PRIVILEGES ON TABLES FROM PUBLIC;",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES IN SCHEMA PUBLIC REVOKE ALL "
+        "PRIVILEGES ON SEQUENCES FROM PUBLIC;",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES IN SCHEMA PUBLIC REVOKE EXECUTE "
+        "ON ROUTINES FROM PUBLIC;",
+    )
+    if any(active.count(fragment) != 1 for fragment in default_privilege_hardening):
+        errors.append("platform role initializer default privilege hardening differs")
+
+    ownership_guard_fragments = (
+        "FROM PG_SHDEPEND AS SHARED_DEPENDENCY JOIN PG_ROLES AS FIXED_ROLE ON "
+        "FIXED_ROLE.OID = SHARED_DEPENDENCY.REFOBJID",
+        "SHARED_DEPENDENCY.REFCLASSID = 'PG_AUTHID'::REGCLASS",
+        "SHARED_DEPENDENCY.DEPTYPE = 'O'",
+        "FIXED_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
+        "'PLATFORM_OPERATOR')",
+        "FROM PG_DATABASE AS DATABASE JOIN PG_ROLES AS OWNER_ROLE ON "
+        "OWNER_ROLE.OID = DATABASE.DATDBA",
+        "FROM PG_NAMESPACE AS NAMESPACE JOIN PG_ROLES AS OWNER_ROLE ON "
+        "OWNER_ROLE.OID = NAMESPACE.NSPOWNER",
+        "FROM PG_CLASS AS RELATION JOIN PG_ROLES AS OWNER_ROLE ON "
+        "OWNER_ROLE.OID = RELATION.RELOWNER",
+        "RAISE EXCEPTION 'FIXED_PLATFORM_ROLE_OWNS_OBJECT'",
+    )
+    fixed_role_inventory = (
+        "OWNER_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
+        "'PLATFORM_OPERATOR')"
+    )
+    if (
+        any(compact.count(fragment) != 1 for fragment in ownership_guard_fragments)
+        or compact.count(fixed_role_inventory) != 3
+    ):
+        errors.append("platform role initializer ownership guard differs")
+
+    default_authority_fragments = (
+        "FROM PG_DEFAULT_ACL AS DEFAULT_ACL JOIN PG_ROLES AS DEFAULT_OWNER_ROLE ON "
+        "DEFAULT_OWNER_ROLE.OID = DEFAULT_ACL.DEFACLROLE WHERE "
+        "DEFAULT_OWNER_ROLE.ROLNAME = 'PLATFORM_OPERATOR'",
+        "FROM PG_DEFAULT_ACL AS DEFAULT_ACL CROSS JOIN LATERAL "
+        "ACLEXPLODE(DEFAULT_ACL.DEFACLACL) AS DEFAULT_PRIVILEGE WHERE "
+        "DEFAULT_PRIVILEGE.GRANTEE = 0 OR DEFAULT_PRIVILEGE.GRANTEE = (SELECT OID "
+        "FROM PG_ROLES WHERE ROLNAME = 'PLATFORM_OPERATOR')",
+        "RAISE EXCEPTION 'UNSUPPORTED_PLATFORM_OPERATOR_DEFAULT_AUTHORITY'",
+    )
+    if any(compact.count(fragment) != 1 for fragment in default_authority_fragments):
+        errors.append("platform role initializer default authority guard differs")
+
+    public_guard_fragments = (
+        "FROM PG_DATABASE AS DATABASE CROSS JOIN LATERAL "
+        "ACLEXPLODE(COALESCE(DATABASE.DATACL, "
+        "ACLDEFAULT('D', DATABASE.DATDBA))) AS PRIVILEGE WHERE "
+        "PRIVILEGE.GRANTEE = 0",
+        "FROM PG_PROC AS ROUTINE JOIN PG_NAMESPACE AS NAMESPACE ON "
+        "NAMESPACE.OID = ROUTINE.PRONAMESPACE CROSS JOIN LATERAL "
+        "ACLEXPLODE(COALESCE(ROUTINE.PROACL, "
+        "ACLDEFAULT('F', ROUTINE.PROOWNER))) AS PRIVILEGE WHERE "
+        "PRIVILEGE.GRANTEE = 0",
+        "RAISE EXCEPTION 'UNSUPPORTED_PUBLIC_AUTHORITY'",
+    )
+    if any(compact.count(fragment) != 1 for fragment in public_guard_fragments):
+        errors.append("platform role initializer public authority guard differs")
+
+    fixed_authority_fragments = (
+        "FROM PG_PROC AS ROUTINE JOIN PG_NAMESPACE AS NAMESPACE ON "
+        "NAMESPACE.OID = ROUTINE.PRONAMESPACE CROSS JOIN LATERAL "
+        "ACLEXPLODE(ROUTINE.PROACL) AS PRIVILEGE JOIN PG_ROLES AS "
+        "ROUTINE_GRANTEE_ROLE ON ROUTINE_GRANTEE_ROLE.OID = PRIVILEGE.GRANTEE "
+        "WHERE ROUTINE_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', "
+        "'PLATFORM_SUPERVISOR', 'PLATFORM_OPERATOR') AND (NAMESPACE.NSPNAME = "
+        "'INFORMATION_SCHEMA' OR NAMESPACE.NSPNAME ~ "
+        "'^PG_' OR PRIVILEGE.PRIVILEGE_TYPE <> 'EXECUTE')",
+        "RAISE EXCEPTION 'UNSUPPORTED_PLATFORM_ROLE_AUTHORITY'",
+    )
+    if any(compact.count(fragment) != 1 for fragment in fixed_authority_fragments):
+        errors.append("platform role initializer fixed authority guard differs")
 
     revocations = (
-        "REVOKE CREATE ON SCHEMA PUBLIC FROM PUBLIC;",
         "REVOKE ALL PRIVILEGES ON DATABASE PLATFORM FROM PLATFORM_CONTROL, "
-        "PLATFORM_SUPERVISOR CASCADE;",
+        "PLATFORM_SUPERVISOR, PLATFORM_OPERATOR CASCADE;",
         "REVOKE ALL PRIVILEGES ON SCHEMA PUBLIC FROM PLATFORM_CONTROL, "
-        "PLATFORM_SUPERVISOR CASCADE;",
+        "PLATFORM_SUPERVISOR, PLATFORM_OPERATOR CASCADE;",
         "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA PUBLIC FROM PLATFORM_CONTROL, "
-        "PLATFORM_SUPERVISOR CASCADE;",
+        "PLATFORM_SUPERVISOR, PLATFORM_OPERATOR CASCADE;",
         "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA PUBLIC FROM PLATFORM_CONTROL, "
-        "PLATFORM_SUPERVISOR CASCADE;",
+        "PLATFORM_SUPERVISOR, PLATFORM_OPERATOR CASCADE;",
     )
     if any(active.count(fragment) != 1 for fragment in revocations):
         errors.append("platform role initializer revocation inventory differs")
@@ -955,21 +1083,22 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         "CROSS JOIN LATERAL ACLEXPLODE(NAMESPACE.NSPACL) AS PRIVILEGE": 2,
         "CROSS JOIN LATERAL ACLEXPLODE(RELATION.RELACL) AS PRIVILEGE": 3,
         "DATABASE.DATNAME = 'PLATFORM'": 1,
-        "NAMESPACE.NSPNAME <> 'INFORMATION_SCHEMA'": 4,
-        "NAMESPACE.NSPNAME !~ '^PG_'": 4,
-        "RELATION.RELKIND IN ('R', 'P', 'V', 'M', 'F')": 3,
-        "RELATION.RELKIND = 'S'": 2,
-        "PRIVILEGE.PRIVILEGE_TYPE IN ('CONNECT', 'CREATE', 'TEMPORARY')": 1,
-        "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'CREATE')": 1,
+        "NAMESPACE.NSPNAME <> 'INFORMATION_SCHEMA'": 15,
+        "NAMESPACE.NSPNAME !~ '^PG_'": 15,
+        "RELATION.RELKIND IN ('R', 'P', 'V', 'M', 'F')": 7,
+        "RELATION.RELKIND = 'S'": 4,
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('CONNECT', 'CREATE', 'TEMPORARY')": 3,
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'CREATE')": 3,
         "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE', "
-        "'TRUNCATE', 'REFERENCES', 'TRIGGER')": 1,
-        "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'SELECT', 'UPDATE')": 1,
+        "'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')": 3,
+        "PRIVILEGE.PRIVILEGE_TYPE IN ('USAGE', 'SELECT', 'UPDATE')": 3,
         "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('CONNECT', 'CREATE', 'TEMPORARY')": 1,
         "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('USAGE', 'CREATE')": 1,
         "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE', "
-        "'TRUNCATE', 'REFERENCES', 'TRIGGER')": 1,
+        "'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')": 1,
         "PRIVILEGE.PRIVILEGE_TYPE NOT IN ('USAGE', 'SELECT', 'UPDATE')": 1,
-        "OBJECT_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')": 4,
+        "OBJECT_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
+        "'PLATFORM_OPERATOR')": 4,
         "JOIN PG_ROLES AS OBJECT_GRANTOR_ROLE ON "
         "OBJECT_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR": 4,
         "RAISE EXCEPTION 'FIXED_PLATFORM_ROLE_OWNS_OBJECT'": 1,
@@ -1009,7 +1138,8 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         "COLUMN_GRANTEE_ROLE.OID = PRIVILEGE.GRANTEE",
         "JOIN PG_ROLES AS COLUMN_GRANTOR_ROLE ON "
         "COLUMN_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR",
-        "COLUMN_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR')",
+        "COLUMN_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', 'PLATFORM_SUPERVISOR', "
+        "'PLATFORM_OPERATOR')",
         "PRIVILEGE.PRIVILEGE_TYPE IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')",
         "ATTRIBUTE.ATTNUM > 0",
         "NOT ATTRIBUTE.ATTISDROPPED",
@@ -1025,13 +1155,51 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     )
     if (
         any(compact.count(fragment) < 1 for fragment in column_fragments)
-        or compact.count("GRANTED BY %I CASCADE") != 9
         or compact.count(column_execution) != 1
         or compact.count(" AS SET_ROLE") != 1
         or compact.count(" AS REVOKE_PRIVILEGE") != 1
         or compact.count(" AS RESET_ROLE") != 1
     ):
         errors.append("platform role initializer residual column cleanup differs")
+
+    routine_fragments = (
+        "FORMAT('REVOKE EXECUTE ON ROUTINE %I.%I(%S) FROM %I GRANTED BY %I "
+        "CASCADE', NAMESPACE.NSPNAME, ROUTINE.PRONAME, "
+        "PG_GET_FUNCTION_IDENTITY_ARGUMENTS(ROUTINE.OID), "
+        "ROUTINE_GRANTEE_ROLE.ROLNAME, ROUTINE_GRANTOR_ROLE.ROLNAME) "
+        "AS ROUTINE_REVOKE_PRIVILEGE",
+        "FROM PG_PROC AS ROUTINE JOIN PG_NAMESPACE AS NAMESPACE ON "
+        "NAMESPACE.OID = ROUTINE.PRONAMESPACE CROSS JOIN LATERAL "
+        "ACLEXPLODE(ROUTINE.PROACL) AS PRIVILEGE JOIN PG_ROLES AS "
+        "ROUTINE_GRANTEE_ROLE ON ROUTINE_GRANTEE_ROLE.OID = PRIVILEGE.GRANTEE "
+        "JOIN PG_ROLES AS ROUTINE_GRANTOR_ROLE ON "
+        "ROUTINE_GRANTOR_ROLE.OID = PRIVILEGE.GRANTOR",
+        "WHERE ROUTINE_GRANTEE_ROLE.ROLNAME IN ('PLATFORM_CONTROL', "
+        "'PLATFORM_SUPERVISOR', 'PLATFORM_OPERATOR') AND "
+        "PRIVILEGE.PRIVILEGE_TYPE = 'EXECUTE' AND NAMESPACE.NSPNAME <> "
+        "'INFORMATION_SCHEMA' AND NAMESPACE.NSPNAME !~ '^PG_'",
+        "ORDER BY ROUTINE_GRANTEE_ROLE.ROLNAME, NAMESPACE.NSPNAME, "
+        "ROUTINE.PRONAME, PG_GET_FUNCTION_IDENTITY_ARGUMENTS(ROUTINE.OID), "
+        "ROUTINE_GRANTOR_ROLE.ROLNAME",
+    )
+    routine_execution = (
+        "SELECT FORMAT('SET ROLE %I', ROUTINE_GRANTOR_ROLE.ROLNAME) "
+        "AS ROUTINE_SET_ROLE, FORMAT('REVOKE EXECUTE ON ROUTINE %I.%I(%S) "
+        "FROM %I GRANTED BY %I CASCADE', NAMESPACE.NSPNAME, ROUTINE.PRONAME, "
+        "PG_GET_FUNCTION_IDENTITY_ARGUMENTS(ROUTINE.OID), "
+        "ROUTINE_GRANTEE_ROLE.ROLNAME, ROUTINE_GRANTOR_ROLE.ROLNAME) "
+        "AS ROUTINE_REVOKE_PRIVILEGE, 'RESET ROLE' AS ROUTINE_RESET_ROLE "
+        "FROM PG_PROC AS ROUTINE"
+    )
+    if (
+        any(compact.count(fragment) != 1 for fragment in routine_fragments)
+        or compact.count(routine_execution) != 1
+        or compact.count(" AS ROUTINE_SET_ROLE") != 1
+        or compact.count(" AS ROUTINE_REVOKE_PRIVILEGE") != 1
+        or compact.count(" AS ROUTINE_RESET_ROLE") != 1
+        or compact.count("GRANTED BY %I CASCADE") != 18
+    ):
+        errors.append("platform role initializer residual routine cleanup differs")
 
     expected_catalog = [
         "PLATFORM_CATALOG_REVISIONS",
@@ -1044,9 +1212,21 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     ]
     expected_control_writes = ["RUNTIME_ACCESS_REQUESTS", "RUNTIME_AUDIT_EVENTS"]
     expected_supervisor_writes = expected_catalog[1:]
+    expected_operator_tables = [
+        "PLATFORM_CATALOG_REVISIONS",
+        "ADAPTER_TEMPLATE_REVISIONS",
+        "STATE_ALLOCATIONS",
+        "SECRET_REFERENCES",
+        "RUNTIME_SPEC_REVISIONS",
+        "RUNTIME_INSTANCES",
+        "RUNTIME_AUDIT_EVENTS",
+    ]
     grant_fragments = (
         "GRANT CONNECT ON DATABASE PLATFORM TO PLATFORM_CONTROL, PLATFORM_SUPERVISOR;",
         "GRANT USAGE ON SCHEMA PUBLIC TO PLATFORM_CONTROL, PLATFORM_SUPERVISOR;",
+        "GRANT CONNECT ON DATABASE PLATFORM TO PLATFORM_OPERATOR;",
+        "GRANT USAGE ON SCHEMA PUBLIC TO PLATFORM_OPERATOR;",
+        "GRANT SELECT, INSERT ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
         "GRANT SELECT ON TABLE PUBLIC.%I TO PLATFORM_CONTROL, PLATFORM_SUPERVISOR",
         "GRANT INSERT ON TABLE PUBLIC.%I TO PLATFORM_CONTROL",
         "GRANT UPDATE (STATUS, RESULT_CODE, COMPLETED_AT) ON TABLE "
@@ -1060,37 +1240,60 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         or _role_table_inventory(compact, "CONTROL_WRITES") != expected_control_writes
         or _role_table_inventory(compact, "SUPERVISOR_WRITES")
         != expected_supervisor_writes
+        or _role_table_inventory(compact, "OPERATOR_TABLES")
+        != expected_operator_tables
     ):
         errors.append("platform role initializer grant inventory differs")
 
     forbidden_patterns = (
-        r"ALTER\s+DEFAULT\s+PRIVILEGES",
+        r"ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!;).)*\bGRANT\b",
+        r"GRANT\s+[^;]*\bTO\s+PUBLIC\b",
         r"GRANT\s+ALL(?:\s+PRIVILEGES)?",
         r"GRANT\s+(?:DELETE|TRUNCATE|CREATE|TEMPORARY|TEMP)\b",
         r"\b(?:SUPERUSER|CREATEDB|CREATEROLE|REPLICATION|BYPASSRLS)\b",
         r"\b(?:CAT|PRINTF|ECHO)\b.*?/RUN/SECRETS/",
+        r"\b(?:REASSIGN|DROP)\s+OWNED\b",
         r"PASSWORD\s*=",
     )
     if any(re.search(pattern, active) for pattern in forbidden_patterns):
         errors.append("platform role initializer broadens database authority")
 
     membership_position = active.find("FROM PG_AUTH_MEMBERS AS MEMBERSHIP")
+    public_position = active.find("AS PUBLIC_SET_ROLE")
+    public_last_position = active.rfind("AS PUBLIC_RESET_ROLE")
+    default_positions = [active.find(fragment) for fragment in default_privilege_hardening]
     revoke_position = active.find("REVOKE ALL PRIVILEGES ON DATABASE PLATFORM")
+    authority_guard_position = active.find("DO $AUTHORITY_GUARD$")
     object_position = active.find("AS OBJECT_SET_ROLE")
     column_position = active.find("AS SET_ROLE")
+    routine_position = active.find("AS ROUTINE_SET_ROLE")
     grant_position = active.find("GRANT CONNECT ON DATABASE PLATFORM")
+    if (
+        min(public_position, public_last_position, *default_positions) < 0
+        or not public_position <= public_last_position < default_positions[0]
+        < default_positions[1] < default_positions[2] < default_positions[3]
+        < revoke_position < authority_guard_position
+    ):
+        errors.append("platform role initializer public authority order differs")
     if (
         min(
             membership_position,
+            public_position,
             revoke_position,
+            authority_guard_position,
             object_position,
             column_position,
+            routine_position,
             grant_position,
         )
         < 0
-        or not membership_position < revoke_position < object_position < column_position < grant_position
+        or not membership_position < public_position < revoke_position
+        < authority_guard_position < object_position < column_position
+        < routine_position < grant_position
     ):
         errors.append("platform role initializer must revoke before granting")
+    if digest != PLATFORM_ROLE_SCRIPT_SHA256:
+        errors.append("platform role initializer digest differs")
     return errors
 
 
@@ -1210,6 +1413,10 @@ def validate_platform_compose(
                     "source": "platform_supervisor_db_password",
                     "target": "platform_supervisor_db_password",
                 },
+                {
+                    "source": "platform_operator_db_password",
+                    "target": "platform_operator_db_password",
+                },
             ],
         }
         for field, expected in expected_postgres_values.items():
@@ -1290,6 +1497,54 @@ def validate_platform_compose(
             if control.get("secrets") != expected_control["secrets"]:
                 errors.append("platform-control secret allocation differs")
 
+    operator_mounts = (
+        (".git", ".git"),
+        ("ops/adapter-templates", "ops/adapter-templates"),
+        ("ops/runtime-policies", "ops/runtime-policies"),
+        (
+            "ft_userdata/user_data/config.example.json",
+            "ft_userdata/user_data/config.example.json",
+        ),
+        (
+            "ft_userdata/user_data/strategies/sample_strategy.py",
+            "ft_userdata/user_data/strategies/sample_strategy.py",
+        ),
+        ("ops/config/trading-safety.json", "ops/config/trading-safety.json"),
+    )
+    expected_operator = {
+        "profiles": ["platform-operator"],
+        "cap_drop": ["ALL"],
+        "command": None,
+        "entrypoint": None,
+        "image": "freqtrade-cn-operator:local",
+        "init": True,
+        "networks": {"platform-db": None},
+        "pull_policy": "never",
+        "read_only": True,
+        "restart": "no",
+        "secrets": [
+            {
+                "source": "platform_operator_db_password",
+                "target": "database_password",
+            }
+        ],
+        "security_opt": ["no-new-privileges:true"],
+        "user": "1000:1000",
+        "volumes": [
+            {
+                "type": "bind",
+                "source": str((repo_root / source).resolve()),
+                "target": f"/opt/platform-operator/repository/{target}",
+                "read_only": True,
+                "bind": {"create_host_path": False},
+            }
+            for source, target in operator_mounts
+        ],
+    }
+    operator = services["platform-operator"]
+    if type(operator) is not dict or operator != expected_operator:
+        errors.append("platform-operator fields differ")
+
     errors.extend(_validate_platform_role_script(repo_root))
     return errors
 
@@ -1336,6 +1591,8 @@ def _render_platform_compose() -> dict[str, Any] | None:
         str((REPO_ROOT / "tools/compose_runtime.py").resolve()),
         "--profile",
         "platform",
+        "--profile",
+        "platform-operator",
         "config",
         "--format",
         "json",

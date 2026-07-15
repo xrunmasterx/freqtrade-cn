@@ -12,6 +12,39 @@ current endpoint, stopping a current Bot, or restoring a current database each
 requires explicit operator authorization at the time of execution. Approval for
 one service or maintenance window does not authorize another.
 
+## Versioned RuntimeAttempt secret resolution
+
+Phase 2B adds the `local-file-v1` provider for an exact set of secrets required
+by one RuntimeAttempt. Its production root and fixed layout are:
+
+```text
+ft_userdata/secrets/runtime/<reference-id>/<version-id>/value
+```
+
+Reference IDs, version IDs, and secret classes are closed platform identifiers;
+the caller cannot supply a path, filename, length, or permission policy. The
+supported classes are `api_password`, `jwt_secret`, and `ws_token`, with fixed
+minimum character lengths of 32, 48, and 32. Material is strict UTF-8, one
+non-empty NUL-free line, at most 4096 bytes and characters, and every required
+value for the attempt must be distinct.
+
+The provider rejects symlinks, Windows reparse points, hardlinks, non-regular
+files, replacement races, POSIX ownership/mode other than the approved runtime
+UID and `0600`, and Windows files that fail the protected owner-only ACL proof.
+POSIX permission checks are bound to the opened descriptor with `fstat` before
+and after the path-based compatibility proof. On Windows the provider opens the
+file without delete sharing, so rename or replacement remains blocked while the
+existing ACL helper checks the same name and until the descriptor closes. It
+returns an already-open, non-inheritable descriptor at offset zero. The consumer
+owns that descriptor and must close the handle, preferably with its
+context-manager boundary. Peer and failed descriptors are closed by the provider.
+
+Secret material is not read from environment variables or PostgreSQL and must
+never be logged, printed, hashed, persisted, enumerated, or exposed through
+serialization. The provider does not cache material. This phase resolves only
+already-provisioned versioned files; it does not create, migrate, rotate, or
+delete secrets and does not change the legacy bootstrap/rotation process below.
+
 ## Bootstrap a new machine
 
 From a recursive clone:

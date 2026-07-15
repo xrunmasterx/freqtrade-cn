@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -52,13 +54,23 @@ RUNTIME_ROOT_COMMAND = (
     "test_actual_research_profile_paths_resolve_below_read_only_input -v"
 )
 BUILD_IMAGE_STEP = "Build integrated image"
+BUILD_OPERATOR_IMAGE_STEP = "Build platform operator image"
 PLATFORM_CI_STEPS = (
     "Start platform PostgreSQL",
     "Upgrade platform schema",
     "Run platform PostgreSQL integration tests",
-    "Run Phase 2A backend regressions",
+    "Run Phase 2B backend regressions",
     "Verify platform-control least privilege",
     "Clean platform control plane",
+)
+OPERATOR_CI_STEPS = (
+    "Run platform-operator CLI acceptance",
+    "Verify platform-operator least privilege",
+)
+ALL_PLATFORM_CI_STEPS = (
+    *PLATFORM_CI_STEPS[:4],
+    *OPERATOR_CI_STEPS,
+    *PLATFORM_CI_STEPS[4:],
 )
 SECRET_SCAN_STEP = "Scan current committed trees for secrets"
 GITLEAKS_IMAGE = (
@@ -183,6 +195,93 @@ def step_run_script(workflow: str, step_name: str) -> str:
             break
         script_lines.append(line[10:] if line.startswith("          ") else "")
     return "\n".join(script_lines) + "\n"
+
+
+def operator_output_validator_script(workflow: str) -> str:
+    script = step_run_script(workflow, OPERATOR_CI_STEPS[0])
+    start_marker = '  "${GITHUB_SHA}" <<\'PY\'\n'
+    if script.count(start_marker) != 1:
+        raise AssertionError("expected exactly one operator output validator")
+    validator = script.split(start_marker, 1)[1]
+    end_marker = "\nPY\n"
+    if end_marker not in validator:
+        raise AssertionError("operator output validator is not terminated")
+    return validator.split(end_marker, 1)[0] + "\n"
+
+
+def canonical_operator_documents() -> tuple[str, list[dict[str, object]]]:
+    root_commit = "a" * 40
+    component_commit = "b" * 40
+    digest = "c" * 64
+    template_revision = f"template-{digest}"
+    registration: dict[str, object] = {
+        "adapter_template_revision_id": template_revision,
+        "catalog_revision_id": "builtin-market-catalog-v2",
+        "desired_state": "stopped",
+        "instance_id": "phase2-spot-paper-probe",
+        "lifecycle_status": "registered",
+        "runtime_spec_revision_id": f"runtime-spec-{digest}",
+        "secret_reference_ids": [
+            "secret-phase2-spot-paper-probe-api-password-v1",
+            "secret-phase2-spot-paper-probe-jwt-secret-v1",
+            "secret-phase2-spot-paper-probe-ws-token-v1",
+        ],
+        "state_allocation_id": "state-phase2-spot-paper-probe-v1",
+    }
+    validate: dict[str, object] = {
+        "backend_commit": component_commit,
+        "config_blob_digest": digest,
+        "frontend_commit": component_commit,
+        "root_commit": root_commit,
+        "safety_policy_digest": digest,
+        "status": "valid",
+        "strategies_commit": component_commit,
+        "strategy_class_name": "SampleStrategy",
+        "strategy_digest": digest,
+        "template_id": "freqtrade-paper-probe-v1",
+        "template_payload_digest": digest,
+    }
+    publish: dict[str, object] = {
+        "adapter_template_revision_id": template_revision,
+        "backend_commit": component_commit,
+        "frontend_commit": component_commit,
+        "root_commit": root_commit,
+        "status": "active",
+        "strategies_commit": component_commit,
+        "template_id": "freqtrade-paper-probe-v1",
+        "template_payload_digest": digest,
+    }
+    return root_commit, [validate, publish, registration, registration, registration]
+
+
+def run_operator_output_validator(
+    documents: list[dict[str, object]], root_commit: str
+) -> subprocess.CompletedProcess[str]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    validator = operator_output_validator_script(workflow)
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        paths = []
+        for index, document in enumerate(documents):
+            path = Path(temporary_directory) / f"operator-{index}.json"
+            path.write_text(
+                json.dumps(
+                    document,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            paths.append(str(path))
+        return subprocess.run(
+            [sys.executable, "-", *paths, root_commit],
+            cwd=REPO_ROOT,
+            input=validator,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
 
 def split_shell_compound(command: str) -> list[str]:
@@ -403,6 +502,77 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "--publish 127.0.0.1:55432:5432",
         "docker network connect freqtrade-platform-ci platform-postgres-ci",
     ),
+    OPERATOR_CI_STEPS[0]: (
+        "operator_database_networks_before=",
+        "git clone --no-local --no-checkout",
+        "git checkout --detach",
+        "submodule update --init --recursive",
+        'sudo chown 1000:1000 "${operator_checkout}"',
+        'sudo chown -R 1000:1000 "${operator_checkout}/.git"',
+        "validate_first=",
+        "validate_second=",
+        "publish_first=",
+        "publish_second=",
+        "register_first=",
+        "register_second=",
+        "compile_first=",
+        "compile_second=",
+        "status_first=",
+        "status_second=",
+        "docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci",
+        "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
+        "docker network rm freqtrade-cn_platform-db",
+        "operator_database_networks=",
+        'test "${operator_database_networks}" = "${operator_database_networks_before}"',
+        "sudo rm -rf",
+    ),
+    OPERATOR_CI_STEPS[1]: (
+        "operator_pgpass=",
+        "role_state=",
+        'test "${role_state}" = "t|f|f|f|f|f|f"',
+        "database_schema_state=",
+        'test "${database_schema_state}" = "t|f|f|t|f"',
+        "operator_table_state=",
+        'test "${operator_table_state}" = "0"',
+        "direct_operator_table_acl=",
+        'test "${direct_operator_table_acl}" = "14|14|0"',
+        "direct_column_acl_count=",
+        'test "${direct_column_acl_count}" = "0"',
+        "operator_membership_count=",
+        'test "${operator_membership_count}" = "0"',
+        "operator_default_acl_count=",
+        'test "${operator_default_acl_count}" = "0"',
+        "direct_operator_database_acl_difference=",
+        'test "${direct_operator_database_acl_difference}" = "0"',
+        "direct_operator_schema_acl_difference=",
+        'test "${direct_operator_schema_acl_difference}" = "0"',
+        "direct_operator_relation_acl_difference=",
+        'test "${direct_operator_relation_acl_difference}" = "0"',
+        "direct_operator_sequence_acl_count=",
+        'test "${direct_operator_sequence_acl_count}" = "0"',
+        "direct_operator_routine_acl_count=",
+        'test "${direct_operator_routine_acl_count}" = "0"',
+        'expect_operator_denied temp "CREATE TEMP TABLE',
+        'expect_operator_denied create "CREATE SCHEMA',
+        'expect_operator_denied update "UPDATE runtime_instances',
+        'expect_operator_denied delete "DELETE FROM runtime_instances"',
+        'expect_operator_denied truncate "TRUNCATE TABLE runtime_instances"',
+        'expect_operator_denied secret-version "SELECT * FROM secret_version_metadata"',
+        'expect_operator_denied lifecycle "SELECT * FROM runtime_lifecycle_jobs"',
+        "owner_reconcile_status=$?",
+        'test "${owner_reconcile_status}" -ne 0',
+        "null_acl_effective=",
+        'test "${null_acl_effective}" = "t|t"',
+        "residual_operator_authority=",
+        'test "${residual_operator_authority}" = "f|f|f|f|f|f"',
+        "public_default_acl_count=",
+        'test "${public_default_acl_count}" = "0"',
+        "public_effective_acl_count=",
+        'test "${public_effective_acl_count}" = "0"',
+        "expect_operator_denied sequence",
+        "expect_operator_denied routine",
+        'expect_operator_denied maintain "REINDEX TABLE public.runtime_instances"',
+    ),
     PLATFORM_CI_STEPS[4]: (
         "docker network disconnect bridge platform-postgres-ci",
         "database_networks=\"$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')\"",
@@ -472,14 +642,18 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "docker rm -f platform-control-ci platform-postgres-ci",
         "docker network rm freqtrade-platform-ci",
         "docker network rm freqtrade-platform-ingress-ci",
-        "docker ps --all --quiet --filter",
-        "docker network inspect freqtrade-platform-ci",
-        "docker network inspect freqtrade-platform-ingress-ci",
+        'if ! platform_containers="$(docker ps --all --quiet',
+        "verify_network_absent freqtrade-platform-ci",
+        "verify_network_absent freqtrade-platform-ingress-ci",
         "comm -13",
         "docker volume rm",
         'cmp "${platform_ci_dir}/volumes.before" "${platform_ci_dir}/volumes.after"',
         'rm -rf "${platform_ci_dir}"',
         'test ! -e "${platform_ci_dir}"',
+        'docker image rm "${operator_tag}"',
+        'docker tag "${operator_id}" "${operator_tag}"',
+        'remove_operator_image_id "${reviewed_operator_image_id}"',
+        'cmp "${operator_image_baseline}" "${operator_image_current}"',
         'exit "${cleanup_status}"',
     ),
     SECRET_SCAN_STEP: (
@@ -498,6 +672,28 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test "${mutation_status}" -eq 1',
     ),
 }
+
+OPERATOR_OUTPUT_CONTRACT = (
+    "forbidden_field_names = {",
+    "def exposes_forbidden_data(value):",
+    "key.casefold() in forbidden_field_names",
+    're.search(r"/(?:opt|run)/", value, re.I)',
+    "if exposes_forbidden_data(document):",
+    "validate_keys = {",
+    "publish_keys = {",
+    "registration_keys = {",
+    "if set(validate) != validate_keys",
+    "if set(publish) != publish_keys",
+    "if set(register) != registration_keys",
+    'validate["strategy_class_name"] != "SampleStrategy"',
+    'register["catalog_revision_id"] != "builtin-market-catalog-v2"',
+    'register["state_allocation_id"] != "state-phase2-spot-paper-probe-v1"',
+    'runtime_spec_revision_id.startswith("runtime-spec-")',
+    "secret-phase2-spot-paper-probe-api-password-v1",
+    "secret-phase2-spot-paper-probe-jwt-secret-v1",
+    "secret-phase2-spot-paper-probe-ws-token-v1",
+    "commit_pattern.fullmatch",
+)
 
 
 def executable_statement_position(statements: list[str], fragment: str) -> int:
@@ -523,7 +719,7 @@ def executable_statement_position(statements: list[str], fragment: str) -> int:
 def validate_root_safety_workflow(workflow: str) -> list[str]:
     errors: list[str] = []
     scripts: dict[str, str] = {}
-    for step_name in (*PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
+    for step_name in (*ALL_PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
         try:
             scripts[step_name] = step_run_script(workflow, step_name)
         except AssertionError as error:
@@ -630,6 +826,70 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     )
     if active_shell.count(sentinel_matcher) != 1:
         errors.append("least-privilege query sentinel matcher differs")
+
+    operator_privilege = scripts.get(OPERATOR_CI_STEPS[1], "")
+    operator_sql_payload = "\n".join(executable_sql_payloads(operator_privilege))
+    for fragment in (
+        "CREATE FUNCTION public.platform_operator_owned_probe()",
+        "OWNER TO platform_operator",
+        "GRANT EXECUTE ON FUNCTION public.platform_operator_owned_probe()",
+        "GRANT MAINTAIN ON TABLE public.runtime_instances TO platform_operator",
+        "GRANT TEMPORARY, CREATE ON DATABASE platform TO PUBLIC",
+        "GRANT CREATE ON SCHEMA public TO PUBLIC",
+        "GRANT SELECT ON TABLE public.runtime_instances TO PUBLIC",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE postgres",
+    ):
+        if fragment not in operator_sql_payload:
+            errors.append(f"operator least-privilege SQL payload missing: {fragment}")
+    operator_psql_bodies = active_shell_function_bodies(
+        operator_privilege, "operator_psql"
+    )
+    if len(operator_psql_bodies) != 1 or any(
+        fragment not in operator_psql_bodies[0]
+        for fragment in (
+            'PGPASSFILE="${operator_pgpass}"',
+            "--host 127.0.0.1",
+            "--port 55432",
+            "--username platform_operator",
+            "--dbname platform",
+        )
+    ):
+        errors.append("operator login helper differs")
+    operator_denial_bodies = active_shell_function_bodies(
+        operator_privilege, "expect_operator_denied"
+    )
+    if len(operator_denial_bodies) != 1 or any(
+        fragment not in operator_denial_bodies[0]
+        for fragment in (
+            "operator_psql --command",
+            "denied_status=$?",
+            'test "${denied_status}" -ne 0',
+            "permission denied|must be owner of",
+        )
+    ):
+        errors.append("operator denial helper differs")
+    default_acl = operator_sql_payload.find(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE postgres"
+    )
+    null_probe = operator_sql_payload.find(
+        "CREATE FUNCTION public.platform_operator_public_null_probe()"
+    )
+    if default_acl < 0 or null_probe < 0 or default_acl >= null_probe:
+        errors.append("operator null ACL contamination order differs")
+    operator_acceptance = scripts.get(OPERATOR_CI_STEPS[0], "")
+    for fragment in OPERATOR_OUTPUT_CONTRACT:
+        if fragment not in operator_acceptance:
+            errors.append(f"operator output contract missing: {fragment}")
+    topology_fragments = (
+        "operator_database_networks_before=",
+        "docker network connect --alias platform-postgres",
+        "docker network disconnect freqtrade-cn_platform-db",
+        "operator_database_networks=",
+        'test "${operator_database_networks}" = "${operator_database_networks_before}"',
+    )
+    topology_positions = [operator_acceptance.find(value) for value in topology_fragments]
+    if any(position < 0 for position in topology_positions) or topology_positions != sorted(topology_positions):
+        errors.append("operator database topology restoration order differs")
 
     denial_bodies = active_shell_function_bodies(least_privilege, "expect_role_denied")
     if len(denial_bodies) != 1:
@@ -741,6 +1001,10 @@ def run_cleanup_with_stubbed_volumes(
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     cleanup_script = step_run_script(workflow, PLATFORM_CI_STEPS[5])
+    cleanup_script = cleanup_script.replace(
+        "${{ steps.reviewed-operator-image.outputs.image_id }}",
+        "reviewed-operator-image-id",
+    )
 
     def inventory(names: tuple[str, ...]) -> str:
         return "".join(f"{name}\n" for name in names)
@@ -775,6 +1039,7 @@ docker() {
     return 0
   fi
   if test "$1" = "network" && test "$2" = "inspect"; then
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
     return 1
   fi
   if test "$1" = "volume" && test "$2" = "ls"; then
@@ -813,6 +1078,608 @@ docker() {
         stderr,
     )
     return result, removed
+
+
+def run_cleanup_with_stubbed_docker_failure(
+    failure: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    cleanup_script = step_run_script(workflow, PLATFORM_CI_STEPS[5]).replace(
+        "${{ steps.reviewed-operator-image.outputs.image_id }}",
+        "",
+    )
+    export_failure = f"export STUB_DOCKER_FAILURE={shlex.quote(failure)}\n"
+    stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+baseline_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+printf 'freqtrade-cn-operator:preexisting|%s\n' "${baseline_id}" \
+  > "${RUNNER_TEMP}/platform-operator-images.before"
+printf '%s\n' "${baseline_id}" \
+  > "${RUNNER_TEMP}/platform-operator-image-ids.before"
+printf 'ready\n' > "${RUNNER_TEMP}/platform-operator-images.ready"
+image_mutations="${RUNNER_TEMP}/image-mutations"
+: > "${image_mutations}"
+cleanup_actions="${RUNNER_TEMP}/cleanup-actions"
+: > "${cleanup_actions}"
+image_list_count_file="${RUNNER_TEMP}/image-list-count"
+image_inspect_count_file="${RUNNER_TEMP}/image-inspect-count"
+docker_ps_count_file="${RUNNER_TEMP}/docker-ps-count"
+printf '0\n' > "${image_list_count_file}"
+printf '0\n' > "${image_inspect_count_file}"
+printf '0\n' > "${docker_ps_count_file}"
+trap 'cat "${image_mutations}"; cat "${cleanup_actions}"; rm -rf "${RUNNER_TEMP}"' EXIT
+
+docker() {
+  if test "$1" = "ps"; then
+    docker_ps_count="$(( $(cat "${docker_ps_count_file}") + 1 ))"
+    printf '%s\n' "${docker_ps_count}" > "${docker_ps_count_file}"
+    if test "${STUB_DOCKER_FAILURE}" = "docker-ps" \
+      || { test "${STUB_DOCKER_FAILURE}" = "docker-ps-final" \
+        && test "${docker_ps_count}" -ge 2; }; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    return 0
+  fi
+  if test "$1" = "rm"; then
+    printf 'cleanup:%s\n' "$*" >> "${cleanup_actions}"
+    return 0
+  fi
+  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    if test "${STUB_DOCKER_FAILURE}" = "network-inspect"; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "ls"; then
+    image_list_count="$(( $(cat "${image_list_count_file}") + 1 ))"
+    printf '%s\n' "${image_list_count}" > "${image_list_count_file}"
+    if test "${STUB_DOCKER_FAILURE}" = "image-list" \
+      || { test "${STUB_DOCKER_FAILURE}" = "image-list-final" \
+        && test "${image_list_count}" -ge 2; }; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    printf '%s\n' 'freqtrade-cn-operator:preexisting'
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    if test "$3" = "--format"; then
+      image_inspect_count="$(( $(cat "${image_inspect_count_file}") + 1 ))"
+      printf '%s\n' "${image_inspect_count}" > "${image_inspect_count_file}"
+    else
+      image_inspect_count="0"
+    fi
+    if test "${STUB_DOCKER_FAILURE}" = "image-inspect" \
+      || { test "${STUB_DOCKER_FAILURE}" = "image-inspect-final" \
+        && test "${image_inspect_count}" -ge 2; }; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    if test "$3" = "--format"; then
+      printf '%s\n' "${baseline_id}"
+      return 0
+    fi
+    printf 'Error response from daemon: No such image: %s\n' "$3" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "rm"; then
+    printf 'image-rm:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  if test "$1" = "tag"; then
+    printf 'tag:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  return 99
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        input=(export_failure + stub + cleanup_script).encode(),
+        capture_output=True,
+        check=False,
+    )
+    stdout = raw_result.stdout.decode()
+    result = subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        stdout,
+        raw_result.stderr.decode(),
+    )
+    events = [
+        line
+        for line in stdout.splitlines()
+        if line.startswith(("image-rm:", "tag:", "cleanup:"))
+    ]
+    return result, events
+
+
+def run_cleanup_with_stateful_images(
+    scenario: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str], str, int]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    new_id = "sha256:" + "b" * 64
+    reviewed_id = "" if scenario == "empty" else new_id
+    cleanup_script = step_run_script(workflow, PLATFORM_CI_STEPS[5]).replace(
+        "${{ steps.reviewed-operator-image.outputs.image_id }}",
+        reviewed_id,
+    )
+    export_scenario = f"export STUB_IMAGE_SCENARIO={shlex.quote(scenario)}\n"
+    stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+old_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+new_id="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+baseline="${RUNNER_TEMP}/platform-operator-images.before"
+baseline_ids="${RUNNER_TEMP}/platform-operator-image-ids.before"
+state="${RUNNER_TEMP}/image-state"
+image_ids="${RUNNER_TEMP}/image-ids"
+events="${RUNNER_TEMP}/image-events"
+image_list_count_file="${RUNNER_TEMP}/image-list-count"
+: > "${events}"
+printf '0\n' > "${image_list_count_file}"
+case "${STUB_IMAGE_SCENARIO}" in
+  restore)
+    printf 'freqtrade-cn-operator:preexisting|%s\n' "${old_id}" > "${baseline}"
+    printf '%s\n' "${old_id}" > "${baseline_ids}"
+    printf 'freqtrade-cn-operator:created|%s\n' "${new_id}" > "${state}"
+    printf 'freqtrade-cn-operator:preexisting|%s\n' "${new_id}" >> "${state}"
+    printf '%s\n%s\n' "${old_id}" "${new_id}" > "${image_ids}"
+    ;;
+  reviewed-membership-error)
+    printf 'freqtrade-cn-operator:preexisting|%s\n' "${old_id}" > "${baseline}"
+    printf '%s\n' "${old_id}" > "${baseline_ids}"
+    : > "${state}"
+    printf '%s\n%s\n' "${old_id}" "${new_id}" > "${image_ids}"
+    ;;
+  empty)
+    : > "${baseline}"
+    : > "${baseline_ids}"
+    : > "${state}"
+    : > "${image_ids}"
+    ;;
+  *) exit 97 ;;
+esac
+printf 'ready\n' > "${RUNNER_TEMP}/platform-operator-images.ready"
+trap '
+  status=$?
+  printf "IMAGE_LIST_COUNT:%s\n" "$(cat "${image_list_count_file}")"
+  sed "s/^/EVENT:/" "${events}"
+  if test -f "${RUNNER_TEMP}/platform-operator-images.current"; then
+    sed "s/^/FINAL:/" "${RUNNER_TEMP}/platform-operator-images.current"
+  fi
+  rm -rf "${RUNNER_TEMP}"
+  exit "${status}"
+' EXIT
+
+grep() {
+  if test "${STUB_IMAGE_SCENARIO}" = "reviewed-membership-error" \
+    && test "${*: -1}" = "${baseline_ids}" \
+    && printf '%s\n' "$*" | command grep --fixed-strings --quiet "${new_id}"; then
+    return 2
+  fi
+  command grep "$@"
+}
+remove_state_tag() {
+  removed_tag="$1"
+  : > "${state}.next"
+  while IFS='|' read -r tag image_id; do
+    test "${tag}" = "${removed_tag}" || printf '%s|%s\n' "${tag}" "${image_id}" \
+      >> "${state}.next"
+  done < "${state}"
+  mv "${state}.next" "${state}"
+}
+remove_image_id() {
+  removed_id="$1"
+  : > "${image_ids}.next"
+  while IFS= read -r image_id; do
+    test "${image_id}" = "${removed_id}" || printf '%s\n' "${image_id}" \
+      >> "${image_ids}.next"
+  done < "${image_ids}"
+  mv "${image_ids}.next" "${image_ids}"
+  : > "${state}.next"
+  while IFS='|' read -r tag image_id; do
+    test "${image_id}" = "${removed_id}" || printf '%s|%s\n' "${tag}" "${image_id}" \
+      >> "${state}.next"
+  done < "${state}"
+  mv "${state}.next" "${state}"
+}
+docker() {
+  if test "$1" = "ps"; then return 0; fi
+  if test "$1" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "ls"; then
+    image_list_count="$(( $(cat "${image_list_count_file}") + 1 ))"
+    printf '%s\n' "${image_list_count}" > "${image_list_count_file}"
+    while IFS='|' read -r tag image_id; do
+      test -n "${tag}" && printf '%s\n' "${tag}"
+    done < "${state}"
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect" && test "$3" = "--format"; then
+    inspected_tag="$5"
+    while IFS='|' read -r tag image_id; do
+      if test "${tag}" = "${inspected_tag}"; then
+        printf '%s\n' "${image_id}"
+        return 0
+      fi
+    done < "${state}"
+    printf 'Error response from daemon: No such image: %s\n' "${inspected_tag}" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    inspected_id="$3"
+    if command grep --fixed-strings --line-regexp --quiet "${inspected_id}" "${image_ids}"; then
+      return 0
+    fi
+    printf 'Error response from daemon: No such image: %s\n' "${inspected_id}" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "rm"; then
+    printf 'image-rm:%s\n' "$*" >> "${events}"
+    if test "$3" = "--force"; then
+      removed_id="$4"
+      if ! command grep --fixed-strings --line-regexp --quiet "${removed_id}" "${image_ids}"; then
+        printf 'Error response from daemon: No such image: %s\n' "${removed_id}" >&2
+        return 1
+      fi
+      remove_image_id "${removed_id}"
+    else
+      remove_state_tag "$3"
+    fi
+    return 0
+  fi
+  if test "$1" = "tag"; then
+    tagged_id="$2"
+    tagged_name="$3"
+    printf 'tag:%s\n' "$*" >> "${events}"
+    remove_state_tag "${tagged_name}"
+    printf '%s|%s\n' "${tagged_name}" "${tagged_id}" >> "${state}"
+    command sort --output="${state}" "${state}"
+    return 0
+  fi
+  return 99
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        input=(export_scenario + stub + cleanup_script).encode(),
+        capture_output=True,
+        check=False,
+    )
+    stdout = raw_result.stdout.decode()
+    result = subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        stdout,
+        raw_result.stderr.decode(),
+    )
+    events = [line.removeprefix("EVENT:") for line in stdout.splitlines() if line.startswith("EVENT:")]
+    final_mapping = "\n".join(
+        line.removeprefix("FINAL:")
+        for line in stdout.splitlines()
+        if line.startswith("FINAL:")
+    )
+    count_line = next(
+        line for line in stdout.splitlines() if line.startswith("IMAGE_LIST_COUNT:")
+    )
+    return result, events, final_mapping, int(count_line.rsplit(":", 1)[1])
+
+
+def run_operator_image_build_with_stubbed_inventory(
+    failure: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    build_script = step_run_script(workflow, BUILD_OPERATOR_IMAGE_STEP)
+    export_failure = f"export STUB_BUILD_FAILURE={shlex.quote(failure)}\n"
+    stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+GITHUB_OUTPUT="${RUNNER_TEMP}/github-output"
+export RUNNER_TEMP GITHUB_OUTPUT
+events="${RUNNER_TEMP}/events"
+sort_count_file="${RUNNER_TEMP}/sort-count"
+printf '0\n' > "${sort_count_file}"
+: > "${events}"
+trap '
+  if test -f "${RUNNER_TEMP}/platform-operator-images.ready"; then
+    printf "ready\n" >> "${events}"
+  fi
+  cat "${events}"
+  rm -rf "${RUNNER_TEMP}"
+' EXIT
+
+python() {
+  printf 'build\n' >> "${events}"
+  printf '%s\n' 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+}
+sort() {
+  sort_count="$(( $(cat "${sort_count_file}") + 1 ))"
+  printf '%s\n' "${sort_count}" > "${sort_count_file}"
+  if test "${STUB_BUILD_FAILURE}" = "sort" && test "${sort_count}" -eq 1; then
+    printf 'sort failed\n' >&2
+    return 2
+  fi
+  command sort "$@"
+}
+docker() {
+  if test "$1" = "image" && test "$2" = "ls"; then
+    if test "${STUB_BUILD_FAILURE}" = "image-list" && test "$3" = "--format"; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    if test "$3" = "--format"; then
+      if test "${STUB_BUILD_FAILURE}" != "zero-match"; then
+        printf '%s\n' 'freqtrade-cn-operator:preexisting'
+      fi
+    else
+      printf '%s\n' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    if test "${STUB_BUILD_FAILURE}" = "image-inspect" \
+      && test "$5" = "freqtrade-cn-operator:preexisting"; then
+      printf 'docker daemon unavailable\n' >&2
+      return 125
+    fi
+    if test "${STUB_BUILD_FAILURE}" = "image-id-empty" \
+      && test "$5" = "freqtrade-cn-operator:preexisting"; then
+      return 0
+    fi
+    if test "$5" = "freqtrade-cn-operator:local"; then
+      printf '%s\n' 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    else
+      printf '%s\n' 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    return 0
+  fi
+  if test "$1" = "tag"; then return 0; fi
+  return 99
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        input=(export_failure + stub + build_script).encode(),
+        capture_output=True,
+        check=False,
+    )
+    stdout = raw_result.stdout.decode()
+    result = subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        stdout,
+        raw_result.stderr.decode(),
+    )
+    return result, [line for line in stdout.splitlines() if line in {"build", "ready"}]
+
+
+def run_operator_status_with_stubbed_docker(
+    scenario: str,
+) -> subprocess.CompletedProcess[str]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    script = step_run_script(workflow, OPERATOR_CI_STEPS[0])
+    lines = script.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.lstrip().startswith("status_first=")
+        or line.lstrip().startswith("if ! status_first=")
+    )
+    end = next(
+        index
+        for index, line in enumerate(lines[start:], start)
+        if 'operator-status.json"' in line
+    )
+    status_script = "\n".join(lines[start : end + 1])
+    setup = f"export STUB_STATUS_SCENARIO={shlex.quote(scenario)}\n" + r'''
+set -euo pipefail
+RUNNER_TEMP="$(mktemp -d)"
+trap 'rm -rf "${RUNNER_TEMP}"' EXIT
+platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+mkdir -p "${platform_ci_dir}"
+status_call_count="${RUNNER_TEMP}/status-call-count"
+printf '0\n' > "${status_call_count}"
+
+docker() {
+  call_count="$(( $(cat "${status_call_count}") + 1 ))"
+  printf '%s\n' "${call_count}" > "${status_call_count}"
+  printf 'upstream-status-call-%s\n' "${call_count}" >&2
+  case "${STUB_STATUS_SCENARIO}:${call_count}" in
+    first-fail:1|second-fail:2)
+      printf '%s\n' 'SENSITIVE_STATUS_SENTINEL'
+      return 7
+      ;;
+    mismatch:1)
+      printf '%s\n' '{"state":"first"}'
+      ;;
+    mismatch:2)
+      printf '%s\n' '{"state":"second"}'
+      ;;
+    *)
+      printf '%s\n' '{"state":"stable"}'
+      ;;
+  esac
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        input=(
+            setup
+            + status_script
+            + "\nprintf 'STUB_ARTIFACT:'\n"
+            + 'cat "${platform_ci_dir}/operator-status.json"\n'
+        ).encode(),
+        capture_output=True,
+        check=False,
+    )
+    return subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        raw_result.stdout.decode(errors="replace"),
+        raw_result.stderr.decode(errors="replace"),
+    )
+
+
+def run_operator_invalid_probe_with_stubbed_docker(
+    scenario: str,
+) -> subprocess.CompletedProcess[str]:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    script = step_run_script(workflow, OPERATOR_CI_STEPS[0])
+    lines = script.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.lstrip().startswith("status_first=")
+        or line.lstrip().startswith("if ! status_first=")
+    )
+    loop_start = next(
+        index
+        for index, line in enumerate(lines[start:], start)
+        if line.lstrip().startswith("for invalid_arguments in")
+    )
+    end = next(
+        index
+        for index, line in enumerate(lines[loop_start:], loop_start)
+        if "operator_invalid_arguments_phase_complete" in line
+    )
+    probe_script = "\n".join(lines[start : end + 1])
+    setup = f"export STUB_INVALID_SCENARIO={shlex.quote(scenario)}\n" + r'''
+set -euo pipefail
+export GITHUB_RUN_ID=123456
+export GITHUB_RUN_ATTEMPT=2
+RUNNER_TEMP="$(mktemp -d)"
+platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
+mkdir -p "${platform_ci_dir}"
+docker_call_count="${RUNNER_TEMP}/docker-call-count"
+printf '0\n' > "${docker_call_count}"
+docker_container_state="${RUNNER_TEMP}/docker-container-state"
+docker_operation_trace="${RUNNER_TEMP}/docker-operation-trace"
+: > "${docker_operation_trace}"
+stub_container_id="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+stub_foreign_id="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+if test "${STUB_INVALID_SCENARIO}" = "create-fail-foreign-container"; then
+  printf '%s\n' "${stub_foreign_id}" > "${docker_container_state}"
+fi
+
+stub_finish() {
+  cat "${docker_operation_trace}"
+  if test -s "${docker_container_state}"; then
+    printf 'STUB_STATE:'
+    cat "${docker_container_state}"
+  else
+    printf '%s\n' 'STUB_STATE:absent'
+  fi
+  rm -rf "${RUNNER_TEMP}"
+}
+trap stub_finish EXIT
+
+record_docker_operation() {
+  printf '%s:%s\n' "$1" "$2" >> "${docker_operation_trace}"
+}
+
+docker() {
+  call_count="$(( $(cat "${docker_call_count}") + 1 ))"
+  printf '%s\n' "${call_count}" > "${docker_call_count}"
+  if test "$1" = "compose" && printf '%s\n' "$*" | grep -q -- '--instance-id phase2-spot-paper-probe'; then
+    printf '%s\n' '{"state":"stable"}'
+    return 0
+  fi
+
+  if test "$1" = "compose"; then
+    printf '%s\n' 'SENSITIVE_COMPOSE_SENTINEL' >&2
+    if test "${STUB_INVALID_SCENARIO}" = "create-fail-foreign-container"; then
+      record_docker_operation compose no-id
+      return 125
+    fi
+    if test "${STUB_INVALID_SCENARIO}" = "invalid-container-id"; then
+      record_docker_operation compose invalid-id
+      printf '%s\n' 'SENSITIVE_CONTAINER_ID_SENTINEL'
+      return 0
+    fi
+    printf '%s\n' "${stub_container_id}" > "${docker_container_state}"
+    record_docker_operation compose "${stub_container_id}"
+    printf '%s\n' "${stub_container_id}"
+    return 0
+  fi
+
+  if test "$1" = "wait"; then
+    record_docker_operation wait "$2"
+    if test "${STUB_INVALID_SCENARIO}" = "wrong-status"; then
+      printf '%s\n' '7'
+    else
+      printf '%s\n' '2'
+    fi
+    return 0
+  fi
+
+  if test "$1" = "logs"; then
+    record_docker_operation logs "$2"
+    if test "${STUB_INVALID_SCENARIO}" = "contaminated-app-output"; then
+      printf '%s\n' 'SENSITIVE_INVALID_SENTINEL'
+    fi
+    printf '%s\n' 'invalid_arguments'
+    return 0
+  fi
+
+  if test "$1" = "rm"; then
+    record_docker_operation rm "$2"
+    rm -f "${docker_container_state}"
+    return 0
+  fi
+
+  if test "$1" = "container" && test "$2" = "ls"; then
+    filter_value="$7"
+    filtered_container="${filter_value#id=}"
+    record_docker_operation container-list "${filtered_container}"
+    if test -s "${docker_container_state}"; then
+      printf '%s\n' 'stub-container-id'
+    fi
+    return 0
+  fi
+
+  case "${STUB_INVALID_SCENARIO}" in
+    *)
+      printf '%s\n' 'invalid_arguments'
+      return 125
+      ;;
+  esac
+}
+'''
+    raw_result = subprocess.run(
+        [shutil.which("bash") or "bash", "-s"],
+        cwd=REPO_ROOT,
+        input=(
+            setup
+            + probe_script
+            + "\nprintf '%s\\n' 'STUB_CONTINUED'\n"
+            + "printf 'STUB_CALLS:'\n"
+            + 'cat "${docker_call_count}"\n'
+        ).encode(),
+        capture_output=True,
+        check=False,
+    )
+    return subprocess.CompletedProcess(
+        raw_result.args,
+        raw_result.returncode,
+        raw_result.stdout.decode(errors="replace"),
+        raw_result.stderr.decode(errors="replace"),
+    )
 
 
 class RootSafetyWorkflowTests(unittest.TestCase):
@@ -1545,7 +2412,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
     def test_reviewed_run_scripts_pass_bash_syntax_validation(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        for step_name in (*PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
+        for step_name in (*ALL_PLATFORM_CI_STEPS, SECRET_SCAN_STEP):
             script = step_run_script(workflow, step_name)
             expanded = re.sub(r"\$\{\{.*?\}\}", "reviewed-ci-value", script)
             with self.subTest(step=step_name):
@@ -1590,6 +2457,115 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertNotIn("POSTGRES_PASSWORD=", step)
         self.assertNotIn("docker compose", step)
         self.assertNotIn("docker network disconnect bridge platform-postgres-ci", step)
+
+    def test_platform_postgres_readiness_requires_pid_one_before_pg_isready(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = step_run_script(workflow, PLATFORM_CI_STEPS[0])
+        probe = (
+            "docker exec platform-postgres-ci sh -c '\n"
+            "    postmaster_pid=\n"
+            '    read -r postmaster_pid < "${PGDATA}/postmaster.pid" &&\n'
+            '      test "${postmaster_pid}" = "1" &&\n'
+            "      exec pg_isready --username postgres --dbname platform\n"
+            "  ' >/dev/null 2>&1"
+        )
+
+        self.assertIn(probe, step)
+        self.assertNotIn(
+            "docker exec platform-postgres-ci pg_isready ",
+            step,
+        )
+        self.assertIn("for attempt in $(seq 1 60); do", step)
+        self.assertIn("sleep 1", step)
+        self.assertIn('test "${ready}" -eq 1', step)
+        self.assertLess(step.index("read -r postmaster_pid"), step.index("exec pg_isready"))
+        self.assertLess(
+            step.index('test "${ready}" -eq 1'),
+            step.index("CREATE DATABASE platform_test_ci"),
+        )
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_platform_postgres_readiness_waits_for_final_postmaster_and_fails_closed(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        script_lines = step_run_script(workflow, PLATFORM_CI_STEPS[0]).splitlines()
+        loop_start = script_lines.index("ready=0")
+        loop_end = script_lines.index('test "${ready}" -eq 1', loop_start) + 1
+        readiness_loop = "\n".join(script_lines[loop_start:loop_end]) + "\n"
+        harness = r'''set -u
+fixture_root="$(mktemp -d)"
+trap 'rm -rf "${fixture_root}"' EXIT
+mkdir -p "${fixture_root}/bin" "${fixture_root}/pgdata"
+printf '%s\n' '#!/bin/sh' 'test "$*" = "--username postgres --dbname platform"' \
+  > "${fixture_root}/bin/pg_isready"
+chmod +x "${fixture_root}/bin/pg_isready"
+printf '0\n' > "${fixture_root}/attempt"
+
+docker() {
+  test "$#" -eq 5 || return 91
+  test "$1" = "exec" || return 92
+  test "$2" = "platform-postgres-ci" || return 93
+  test "$3" = "sh" || return 94
+  test "$4" = "-c" || return 95
+  probe_script="$5"
+  attempt="$(( $(cat "${fixture_root}/attempt") + 1 ))"
+  printf '%s\n' "${attempt}" > "${fixture_root}/attempt"
+  case "${PROBE_SCENARIO}:${attempt}" in
+    temp-gap-final:1|temp-only:*)
+      printf '42\n' > "${fixture_root}/pgdata/postmaster.pid"
+      ;;
+    temp-gap-final:2)
+      rm -f "${fixture_root}/pgdata/postmaster.pid"
+      ;;
+    temp-gap-final:3)
+      printf '1\n' > "${fixture_root}/pgdata/postmaster.pid"
+      ;;
+    *)
+      return 96
+      ;;
+  esac
+  env PGDATA="${fixture_root}/pgdata" PATH="${fixture_root}/bin:${PATH}" \
+    sh -c "${probe_script}"
+}
+
+seq() {
+  test "$1" = "1" && test "$2" = "60" || return 97
+  printf '1\n2\n3\n'
+}
+
+sleep() {
+  test "$1" = "1"
+}
+'''
+
+        def run_scenario(scenario: str) -> subprocess.CompletedProcess[bytes]:
+            assertions = (
+                'loop_status=$?\n'
+                'test "$(cat "${fixture_root}/attempt")" = "3"\n'
+                'exit "${loop_status}"\n'
+            )
+            return subprocess.run(
+                [shutil.which("bash") or "bash", "-s"],
+                input=(
+                    f"PROBE_SCENARIO={shlex.quote(scenario)}\n"
+                    + harness
+                    + readiness_loop
+                    + assertions
+                ).encode(),
+                capture_output=True,
+                check=False,
+            )
+
+        final_ready = run_scenario("temp-gap-final")
+        self.assertEqual(final_ready.returncode, 0, final_ready.stderr.decode())
+        self.assertEqual(final_ready.stdout, b"")
+        self.assertEqual(final_ready.stderr, b"")
+
+        temporary_only = run_scenario("temp-only")
+        self.assertNotEqual(temporary_only.returncode, 0)
+        self.assertEqual(temporary_only.stdout, b"")
+        self.assertEqual(temporary_only.stderr, b"")
 
     def test_platform_upgrade_and_backend_selectors_are_executable(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -1686,6 +2662,32 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         for forbidden in ("docker.sock", "ft_userdata/runtime", "docker compose"):
             self.assertNotIn(forbidden, step)
 
+    def test_least_privilege_fixture_reuses_registered_runtime_foreign_keys(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+
+        for fixture_id in ("'ci-instance'", "'ci-attempt'"):
+            self.assertIn(fixture_id, step)
+        for obsolete_id in (
+            "'ci-runtime-spec'",
+            "'ci-state-allocation'",
+            "'ci-adapter-template'",
+        ):
+            self.assertNotIn(obsolete_id, step)
+        self.assertIn(
+            "FROM runtime_instances AS registered_instance\n"
+            "          WHERE registered_instance.instance_id = "
+            "'phase2-spot-paper-probe'",
+            step,
+        )
+        self.assertIn(
+            "JOIN runtime_spec_revisions AS registered_spec\n"
+            "            ON registered_spec.runtime_spec_revision_id = "
+            "registered_instance.runtime_spec_revision_id",
+            step,
+        )
+        self.assertEqual(step.count("FROM runtime_attempts AS fixture_attempt"), 2)
+
     def test_contamination_preserves_production_owners_and_postgres_grantor(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
@@ -1702,10 +2704,13 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         schema_grant = (
             "GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION"
         )
+        schema_usage = "GRANT USAGE ON SCHEMA public TO platform_ci_delegate;"
         self.assertIn(database_grant, step)
         self.assertIn(schema_grant, step)
+        self.assertIn(schema_usage, step)
         self.assertLess(step.index(database_grant), step.index("SET ROLE platform_ci_owner"))
         self.assertLess(step.index(schema_grant), step.index("SET ROLE platform_ci_owner"))
+        self.assertLess(step.index(schema_usage), step.index("SET ROLE platform_ci_delegate"))
         self.assertIn("'CONNECT', 'postgres', false", step)
         self.assertIn("'USAGE', 'pg_database_owner', false", step)
         self.assertNotIn("'schema', 'public', '', role_name, 'USAGE', 'postgres'", step)
@@ -1887,6 +2892,1012 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         mutated = workflow.replace(step, mutated_step, 1)
         mutated += f"\n      - name: Unrelated platform text\n        run: echo '{marker}'\n"
         self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_operator_image_is_built_from_reviewed_provenance_and_alias_verified(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP))
+        for fragment in (
+            "id: reviewed-operator-image",
+            "python tools/image_provenance.py build-operator --print-image-id",
+            'echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"',
+            'docker tag "${image_id}" freqtrade-cn-operator:local',
+            "docker image inspect --format '{{.Id}}' freqtrade-cn-operator:local",
+            'test "${alias_id}" = "${image_id}"',
+        ):
+            self.assertIn(fragment, step)
+        self.assertNotIn("docker pull", step)
+        self.assertLess(
+            workflow.index(f"      - name: {BUILD_IMAGE_STEP}"),
+            workflow.index(f"      - name: {BUILD_OPERATOR_IMAGE_STEP}"),
+        )
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_build_rejects_untrusted_baseline_inventory(self) -> None:
+        for failure in ("image-list", "sort", "image-inspect"):
+            with self.subTest(failure=failure):
+                result, events = run_operator_image_build_with_stubbed_inventory(failure)
+                self.assertNotEqual(
+                    result.returncode,
+                    0,
+                    result.stdout + result.stderr,
+                )
+                self.assertEqual(events, [])
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_build_rejects_an_empty_inspected_id(self) -> None:
+        result, events = run_operator_image_build_with_stubbed_inventory(
+            "image-id-empty"
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, [])
+
+    def test_operator_image_build_uses_explicit_checked_inventory_files(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        build = step_run_script(workflow, BUILD_OPERATOR_IMAGE_STEP)
+        self.assertNotIn("done < <(", build)
+        self.assertNotIn("| sort --unique || true", build)
+        for fragment in (
+            'operator_image_tags_raw_tmp="${operator_image_baseline}.tags.raw.tmp"',
+            'operator_image_tags_tmp="${operator_image_baseline}.tags.tmp"',
+            'docker image ls --format \'{{.Repository}}:{{.Tag}}\' > "${operator_image_tags_raw_tmp}"',
+            'sort --unique "${operator_image_tags_tmp}"',
+            'test -n "${operator_id}"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, build)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_build_accepts_an_empty_tag_inventory(self) -> None:
+        result, events = run_operator_image_build_with_stubbed_inventory("zero-match")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, ["build", "ready"])
+
+    def test_operator_steps_have_fixed_order_after_phase2b_regressions(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        positions = [
+            workflow.index(f"      - name: {name}")
+            for name in ALL_PLATFORM_CI_STEPS
+        ]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_postgres_provisions_operator_secret_and_runs_zero_skip_selectors(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        start = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[0]))
+        self.assertIn("platform_operator_db_password \\", start)
+        self.assertIn(
+            '--mount type=bind,src="${platform_ci_dir}/platform_operator_db_password",dst=/run/secrets/platform_operator_db_password,readonly',
+            start,
+        )
+        postgres = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[2]))
+        for selector in (
+            "tests/platform/test_template_repository_postgres.py",
+            "tests/platform/test_runtime_registration_repository_postgres.py",
+        ):
+            self.assertIn(selector, postgres)
+        self.assertIn("if skipped:", postgres)
+        self.assertIn("platform PostgreSQL selectors skipped tests", postgres)
+
+    def test_operator_acceptance_uses_normal_local_checkout_and_repeats_typed_commands(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        required = (
+            'operator_root="${RUNNER_TEMP}/platform-operator"',
+            'operator_checkout="${operator_root}/freqtrade-cn"',
+            'git clone --no-local --no-checkout "${GITHUB_WORKSPACE}" "${operator_checkout}"',
+            'git checkout --detach "${GITHUB_SHA}"',
+            "protocol.file.allow=always",
+            "submodule update --init --recursive",
+            'test -z "$(git status --porcelain --untracked-files=no)"',
+            'sudo chown 1000:1000 "${operator_checkout}"',
+            'sudo chown -R 1000:1000 "${operator_checkout}/.git"',
+            'sudo chown -R 1000:1000 "${operator_checkout}/ops/adapter-templates"',
+            'sudo chown -R 1000:1000 "${operator_checkout}/ops/runtime-policies"',
+            "docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-template validate",
+            "docker network inspect --format '{{.Internal}}' freqtrade-cn_platform-db",
+            "docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci",
+            "runtime-template publish --actor platform-operator",
+            "runtime-registry register-paper-probe --actor platform-operator",
+            "runtime-registry compile --actor platform-operator",
+            "runtime-registry status --instance-id phase2-spot-paper-probe",
+            "runtime-registry status --image forbidden",
+            'test "${invalid_status}" = "2"',
+            'test "${invalid_output}" = "invalid_arguments"',
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        for prefix in ("validate", "publish", "register", "compile"):
+            self.assertIn(
+                f'test "${{{prefix}_first}}" = "${{{prefix}_second}}"',
+                step,
+            )
+        self.assertIn('if test "${status_first}" != "${status_second}"; then', step)
+        self.assertNotIn('chown -R 1000:1000 "${GITHUB_WORKSPACE}"', step)
+        self.assertNotIn('chown -R 1000:1000 "${operator_root}"', step)
+        self.assertNotIn('"${operator_root}/validate.json"', step)
+        self.assertNotIn("--project-directory", step)
+        self.assertNotIn("COMPOSE_FILE=", step)
+        self.assertNotIn("git@", step)
+        self.assertNotIn("https://", step)
+
+    def test_operator_acceptance_restores_the_observed_database_network_baseline(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        before = 'operator_database_networks_before="$(docker inspect'
+        connect = "docker network connect --alias platform-postgres"
+        disconnect = "docker network disconnect freqtrade-cn_platform-db"
+        after = 'operator_database_networks="$(docker inspect'
+        equality = 'test "${operator_database_networks}" = "${operator_database_networks_before}"'
+        for fragment in (before, connect, disconnect, after, equality):
+            self.assertIn(fragment, step)
+        positions = [step.index(fragment) for fragment in (before, connect, disconnect, after, equality)]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('test "${operator_database_networks}" = "freqtrade-platform-ci"', step)
+        reordered = workflow.replace(before, "topology-baseline-placeholder", 1)
+        reordered = reordered.replace(connect, before, 1)
+        reordered = reordered.replace("topology-baseline-placeholder", connect, 1)
+        self.assertIn(
+            "operator database topology restoration order differs",
+            validate_root_safety_workflow(reordered),
+        )
+
+    def test_operator_cleanup_restores_postgres_topology_and_removes_temp_resources(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        acceptance = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        for fragment in (
+            "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
+            "docker network rm freqtrade-cn_platform-db",
+            'rm -rf "${operator_root}"',
+            'test ! -e "${operator_root}"',
+        ):
+            self.assertIn(fragment, acceptance)
+        cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
+        for fragment in (
+            "--filter label=com.docker.compose.service=platform-operator",
+            "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
+            "docker network rm freqtrade-cn_platform-db",
+            'operator_root="${RUNNER_TEMP}/platform-operator"',
+            'sudo rm -rf "${operator_root}"',
+        ):
+            self.assertIn(fragment, cleanup)
+
+    def test_operator_privilege_gate_uses_real_login_and_reconciles_contamination(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        for fragment in (
+            'operator_pgpass="${platform_ci_dir}/operator.pgpass"',
+            'PGPASSFILE="${operator_pgpass}"',
+            "--host 127.0.0.1 --port 55432",
+            "--username platform_operator --dbname platform",
+            "adapter_template_revisions",
+            "state_allocations",
+            "secret_references",
+            "runtime_spec_revisions",
+            "runtime_audit_events",
+            "has_table_privilege(",
+            "'MAINTAIN'",
+            "CREATE FUNCTION public.platform_operator_owned_probe()",
+            "OWNER TO platform_operator",
+            'test "${owner_reconcile_status}" -ne 0',
+            "ALTER FUNCTION public.platform_operator_owned_probe() OWNER TO postgres",
+            "CREATE FUNCTION public.platform_operator_public_null_probe()",
+            "GRANT EXECUTE ON FUNCTION public.platform_operator_owned_probe()",
+            "GRANT MAINTAIN ON TABLE public.runtime_instances TO platform_operator",
+            "GRANT TEMPORARY, CREATE ON DATABASE platform TO PUBLIC",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE postgres",
+            "direct_operator_table_acl=",
+            "direct_column_acl_count=",
+            "public_effective_acl_count=",
+            'test "${null_acl_effective}" = "t|t"',
+            'test "${residual_operator_authority}" = "f|f|f|f|f|f"',
+            'test "${public_default_acl_count}" = "0"',
+            'expect_operator_denied maintain "REINDEX TABLE public.runtime_instances"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        self.assertNotIn("SET ROLE platform_operator", step)
+        self.assertNotIn("PGPASSWORD", step)
+        self.assertNotIn("operator_password=", step)
+        self.assertNotIn("docker exec --env", step)
+        self.assertNotIn("does not exist", step)
+        self.assertNotIn("FROM secret_versions", step)
+        self.assertNotIn("VACUUM public.runtime_instances", step)
+        self.assertIn("SELECT * FROM secret_version_metadata", step)
+        self.assertIn("direct_operator_table_acl=", step)
+        self.assertIn('test "${direct_operator_table_acl}" = "14|14|0"', step)
+        self.assertIn('test "${direct_column_acl_count}" = "0"', step)
+        self.assertIn("public_effective_acl_count=", step)
+        self.assertIn('test "${public_effective_acl_count}" = "0"', step)
+        self.assertLess(
+            step.index("ALTER DEFAULT PRIVILEGES FOR ROLE postgres"),
+            step.index("CREATE FUNCTION public.platform_operator_public_null_probe()"),
+        )
+
+    def test_operator_privilege_gate_reports_fixed_post_reconcile_checkpoints(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        checkpoints = (
+            (
+                'test "${operator_membership_count}" = "0"',
+                "operator_membership_checkpoint_complete",
+                "operator_default_acl_count=",
+            ),
+            (
+                'test "${operator_default_acl_count}" = "0"',
+                "operator_default_acl_checkpoint_complete",
+                "direct_operator_database_acl_difference=",
+            ),
+            (
+                'test "${direct_operator_database_acl_difference}" = "0"',
+                "operator_database_acl_checkpoint_complete",
+                "direct_operator_schema_acl_difference=",
+            ),
+            (
+                'test "${direct_operator_schema_acl_difference}" = "0"',
+                "operator_schema_acl_checkpoint_complete",
+                "direct_operator_relation_acl_difference=",
+            ),
+            (
+                'test "${direct_operator_relation_acl_difference}" = "0"',
+                "operator_relation_acl_checkpoint_complete",
+                "direct_operator_sequence_acl_count=",
+            ),
+            (
+                'test "${direct_operator_sequence_acl_count}" = "0"',
+                "operator_sequence_acl_checkpoint_complete",
+                "direct_operator_column_acl_count=",
+            ),
+            (
+                'test "${direct_operator_column_acl_count}" = "0"',
+                "operator_column_acl_checkpoint_complete",
+                "direct_operator_routine_acl_count=",
+            ),
+            (
+                'test "${direct_operator_routine_acl_count}" = "0"',
+                "operator_routine_acl_checkpoint_complete",
+                "residual_operator_authority=",
+            ),
+            (
+                'test "${residual_operator_authority}" = "f|f|f|f|f|f"',
+                "operator_residual_authority_checkpoint_complete",
+                "public_default_acl_count=",
+            ),
+            (
+                'test "${public_default_acl_count}" = "0"',
+                "operator_public_default_acl_checkpoint_complete",
+                "public_effective_acl_count=",
+            ),
+            (
+                'test "${public_effective_acl_count}" = "0"',
+                "operator_public_effective_acl_checkpoint_complete",
+                "expect_operator_denied sequence",
+            ),
+        )
+
+        for assertion, marker, next_gate in checkpoints:
+            with self.subTest(marker=marker):
+                self.assertEqual(step.count(marker), 1)
+                marker_line = next(line for line in step.splitlines() if marker in line)
+                self.assertEqual(
+                    marker_line.strip(),
+                    f"printf '%s\\n' '{marker}' >&2",
+                )
+                self.assertNotIn("${", marker_line)
+                self.assertLess(step.index(assertion), step.index(marker))
+                self.assertLess(step.index(marker), step.index(next_gate))
+
+        denial_marker = "operator_final_denial_probes_complete"
+        self.assertEqual(step.count(denial_marker), 1)
+        denial_marker_line = next(
+            line for line in step.splitlines() if denial_marker in line
+        )
+        self.assertEqual(
+            denial_marker_line.strip(),
+            f"printf '%s\\n' '{denial_marker}' >&2",
+        )
+        self.assertNotIn("${", denial_marker_line)
+        for denial_probe in (
+            "expect_operator_denied sequence",
+            "expect_operator_denied routine",
+            'expect_operator_denied maintain "REINDEX TABLE public.runtime_instances"',
+            'expect_operator_denied secret-version-after "SELECT * FROM secret_version_metadata"',
+            'expect_operator_denied lifecycle-after "SELECT * FROM runtime_lifecycle_jobs"',
+        ):
+            with self.subTest(denial_probe=denial_probe):
+                self.assertLess(step.index(denial_probe), step.index(denial_marker))
+
+    def test_operator_login_uses_a_private_cleaned_libpq_passfile(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        for fragment in (
+            'operator_pgpass="${platform_ci_dir}/operator.pgpass"',
+            'Path(sys.argv[1]).read_text(encoding="utf-8")',
+            "os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)",
+            'test "$(stat --format \'%a\' "${operator_pgpass}")" = "600"',
+            "cleanup_operator_pgpass() {",
+            'rm -f "${operator_pgpass}"',
+            "trap cleanup_operator_pgpass EXIT",
+            'PGPASSFILE="${operator_pgpass}" psql',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        for forbidden in (
+            "PGPASSWORD",
+            "operator_password=",
+            "--env PGPASSWORD",
+            '$(cat "${platform_ci_dir}/platform_operator_db_password")',
+            '$(tr -d \'\\r\\n\' < "${platform_ci_dir}/platform_operator_db_password")',
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, step)
+
+    def test_operator_privilege_gate_has_exact_catalog_authority_inventories(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
+        required = (
+            "operator_membership_count=",
+            "pg_auth_members",
+            'test "${operator_membership_count}" = "0"',
+            "operator_default_acl_count=",
+            "pg_default_acl",
+            'test "${operator_default_acl_count}" = "0"',
+            "direct_operator_database_acl_difference=",
+            "direct_operator_schema_acl_difference=",
+            "direct_operator_relation_acl_difference=",
+            "direct_operator_sequence_acl_count=",
+            "direct_operator_routine_acl_count=",
+            "EXCEPT ALL",
+            "'platform'",
+            "'CONNECT'",
+            "'public'",
+            "'USAGE'",
+            'test "${direct_operator_database_acl_difference}" = "0"',
+            'test "${direct_operator_schema_acl_difference}" = "0"',
+            'test "${direct_operator_relation_acl_difference}" = "0"',
+            'test "${direct_operator_sequence_acl_count}" = "0"',
+            'test "${direct_operator_routine_acl_count}" = "0"',
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+
+    def test_operator_acceptance_requires_exact_output_schemas_and_fixed_ids(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        for fragment in (
+            "validate_keys = {",
+            "publish_keys = {",
+            "registration_keys = {",
+            "if set(validate) != validate_keys",
+            "if set(publish) != publish_keys",
+            "if set(register) != registration_keys",
+            'validate["strategy_class_name"] != "SampleStrategy"',
+            'register["catalog_revision_id"] != "builtin-market-catalog-v2"',
+            'register["state_allocation_id"] != "state-phase2-spot-paper-probe-v1"',
+            'f"template-{validate[\'template_payload_digest\']}"',
+            'runtime_spec_revision_id.removeprefix("runtime-spec-")',
+            'runtime_spec_revision_id.startswith("runtime-spec-")',
+            "secret-phase2-spot-paper-probe-api-password-v1",
+            "secret-phase2-spot-paper-probe-jwt-secret-v1",
+            "secret-phase2-spot-paper-probe-ws-token-v1",
+            "commit_pattern.fullmatch",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        for fragment in OPERATOR_OUTPUT_CONTRACT:
+            with self.subTest(mutation=fragment):
+                mutated = workflow.replace(fragment, "removed-output-contract", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_operator_output_validator_accepts_canonical_public_metadata(self) -> None:
+        root_commit, documents = canonical_operator_documents()
+
+        result = run_operator_output_validator(documents, root_commit)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_operator_output_validator_rejects_sensitive_fields_and_paths_without_reflection(
+        self,
+    ) -> None:
+        root_commit, canonical_documents = canonical_operator_documents()
+        forbidden_fields = (
+            "password",
+            "secret_value",
+            "dsn",
+            "timestamp",
+            "created_at",
+            "updated_at",
+        )
+        for forbidden_field in forbidden_fields:
+            with self.subTest(forbidden_field=forbidden_field):
+                documents = json.loads(json.dumps(canonical_documents))
+                documents[0]["nested"] = {forbidden_field: "private-sentinel"}
+
+                result = run_operator_output_validator(documents, root_commit)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr,
+                    "operator output exposes forbidden data\n",
+                )
+                self.assertNotIn("private-sentinel", result.stderr)
+
+        for forbidden_path in ("/opt/private-sentinel", "/run/private-sentinel"):
+            with self.subTest(forbidden_path=forbidden_path):
+                documents = json.loads(json.dumps(canonical_documents))
+                documents[0]["nested"] = [{"safe_key": forbidden_path}]
+
+                result = run_operator_output_validator(documents, root_commit)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr,
+                    "operator output exposes forbidden data\n",
+                )
+                self.assertNotIn("private-sentinel", result.stderr)
+
+    def test_operator_status_gate_has_fixed_safe_diagnostics(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+
+        normalized_step = "\n".join(line.strip() for line in step.splitlines())
+        guards = (
+            (
+                'if ! status_first="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"; then',
+                "operator_status_first_query_failed",
+            ),
+            (
+                'if ! status_second="$(docker compose --profile platform-operator run --rm --no-deps -T platform-operator runtime-registry status --instance-id phase2-spot-paper-probe)"; then',
+                "operator_status_second_query_failed",
+            ),
+            (
+                'if test "${status_first}" != "${status_second}"; then',
+                "operator_status_output_not_deterministic",
+            ),
+        )
+        for guard_line, diagnostic in guards:
+            with self.subTest(diagnostic=diagnostic):
+                guard = "\n".join(
+                    (
+                        guard_line,
+                        f"printf '%s\\n' '{diagnostic}' >&2",
+                        "exit 1",
+                        "fi",
+                    )
+                )
+                self.assertEqual(step.count(diagnostic), 1)
+                self.assertIn(guard, normalized_step)
+                diagnostic_line = next(
+                    line for line in step.splitlines() if diagnostic in line
+                )
+                self.assertEqual(
+                    diagnostic_line.strip(),
+                    f"printf '%s\\n' '{diagnostic}' >&2",
+                )
+                self.assertNotIn("${", diagnostic_line)
+
+    def test_operator_invalid_probe_gate_has_fixed_safe_diagnostics(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        normalized_step = "\n".join(line.strip() for line in step.splitlines())
+
+        tokens = (
+            "operator_status_phase_complete",
+            "operator_invalid_arguments_create_failed",
+            "operator_invalid_arguments_container_id_contract_failed",
+            "operator_invalid_arguments_wait_failed",
+            "operator_invalid_arguments_log_capture_failed",
+            "operator_invalid_arguments_cleanup_failed",
+            "operator_invalid_arguments_absence_check_failed",
+            "operator_invalid_arguments_cleanup_incomplete",
+            "operator_invalid_arguments_exit_status_failed",
+            "operator_invalid_arguments_output_contract_failed",
+            "operator_invalid_arguments_phase_complete",
+        )
+        for token in tokens:
+            with self.subTest(token=token):
+                self.assertEqual(step.count(token), 1)
+                diagnostic_line = next(
+                    line for line in step.splitlines() if token in line
+                )
+                self.assertEqual(
+                    diagnostic_line.strip(),
+                    f"printf '%s\\n' '{token}' >&2",
+                )
+                self.assertNotIn("${", diagnostic_line)
+
+        for status_name, diagnostic in (
+            ("invalid_create_status", "operator_invalid_arguments_create_failed"),
+            ("invalid_wait_status", "operator_invalid_arguments_wait_failed"),
+            ("invalid_log_status", "operator_invalid_arguments_log_capture_failed"),
+            ("invalid_cleanup_status", "operator_invalid_arguments_cleanup_failed"),
+            ("invalid_absence_status", "operator_invalid_arguments_absence_check_failed"),
+        ):
+            self.assertIn(
+                f'if ! test "${{{status_name}}}" -eq 0; then\n'
+                f"printf '%s\\n' '{diagnostic}' >&2\nexit 1\nfi",
+                normalized_step,
+            )
+
+        self.assertIn(
+            "\n".join(
+                (
+                    'if ! test "${invalid_status}" = "2"; then',
+                    "printf '%s\\n' 'operator_invalid_arguments_exit_status_failed' >&2",
+                    "exit 1",
+                    "fi",
+                )
+            ),
+            normalized_step,
+        )
+        self.assertIn(
+            "docker compose --profile platform-operator run --detach --name",
+            normalized_step,
+        )
+        self.assertIn(
+            'invalid_container="platform-operator-invalid-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${invalid_probe_index}-ci"',
+            step,
+        )
+        self.assertEqual(
+            step.count(
+                'docker container ls --all --quiet --no-trunc --filter "id=${invalid_container_id}"'
+            ),
+            1,
+        )
+        self.assertIn(
+            'invalid_status="$(docker wait "${invalid_container_id}" 2>/dev/null)"',
+            step,
+        )
+        self.assertIn(
+            'invalid_output="$(docker logs "${invalid_container_id}" 2>&1)"',
+            step,
+        )
+        self.assertIn('docker rm "${invalid_container_id}" >/dev/null 2>&1', step)
+        self.assertIn(
+            '[[ ! "${invalid_container_id}" =~ ^[0-9a-f]{64}$ ]]',
+            step,
+        )
+        self.assertNotIn("invalid_existing=", step)
+        self.assertNotIn('name=^/${invalid_container}$', step)
+        self.assertNotIn(
+            "run --rm --no-deps -T platform-operator ${invalid_arguments}",
+            step,
+        )
+        self.assertLess(
+            step.index('docker rm "${invalid_container_id}"'),
+            step.index("operator_invalid_arguments_exit_status_failed"),
+        )
+        self.assertLess(
+            step.index('docker rm "${invalid_container_id}"'),
+            step.index("operator_invalid_arguments_output_contract_failed"),
+        )
+        self.assertIn(
+            "\n".join(
+                (
+                    'if ! test "${invalid_output}" = "invalid_arguments"; then',
+                    "printf '%s\\n' 'operator_invalid_arguments_output_contract_failed' >&2",
+                    "exit 1",
+                    "fi",
+                )
+            ),
+            normalized_step,
+        )
+        self.assertLess(
+            step.index('operator-status.json"'),
+            step.index("operator_status_phase_complete"),
+        )
+        self.assertLess(
+            step.index("operator_status_phase_complete"),
+            step.index("for invalid_arguments in"),
+        )
+        self.assertLess(
+            step.index("operator_invalid_arguments_exit_status_failed"),
+            step.index("operator_invalid_arguments_output_contract_failed"),
+        )
+        self.assertLess(
+            step.index("operator_invalid_arguments_output_contract_failed"),
+            step.index("operator_invalid_arguments_phase_complete"),
+        )
+        self.assertLess(
+            step.index("operator_invalid_arguments_phase_complete"),
+            step.index("python - "),
+        )
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_invalid_probe_gate_classifies_failures_without_reflection(
+        self,
+    ) -> None:
+        scenarios = (
+            (
+                "create-fail-foreign-container",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_create_failed",
+                ),
+            ),
+            (
+                "invalid-container-id",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_container_id_contract_failed",
+                ),
+            ),
+            (
+                "wrong-status",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_exit_status_failed",
+                ),
+            ),
+            (
+                "contaminated-app-output",
+                1,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_output_contract_failed",
+                ),
+            ),
+            (
+                "compose-noise-exact-app-output",
+                0,
+                (
+                    "operator_status_phase_complete",
+                    "operator_invalid_arguments_phase_complete",
+                ),
+            ),
+        )
+        all_tokens = {
+            "operator_status_phase_complete",
+            "operator_invalid_arguments_create_failed",
+            "operator_invalid_arguments_container_id_contract_failed",
+            "operator_invalid_arguments_wait_failed",
+            "operator_invalid_arguments_log_capture_failed",
+            "operator_invalid_arguments_cleanup_failed",
+            "operator_invalid_arguments_absence_check_failed",
+            "operator_invalid_arguments_cleanup_incomplete",
+            "operator_invalid_arguments_exit_status_failed",
+            "operator_invalid_arguments_output_contract_failed",
+            "operator_invalid_arguments_phase_complete",
+        }
+        for scenario, returncode, expected_stderr in scenarios:
+            with self.subTest(scenario=scenario):
+                result = run_operator_invalid_probe_with_stubbed_docker(scenario)
+                self.assertEqual(
+                    result.returncode,
+                    returncode,
+                    result.stdout + result.stderr,
+                )
+                self.assertNotIn("SENSITIVE_INVALID_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_INVALID_SENTINEL", result.stderr)
+                self.assertNotIn("SENSITIVE_COMPOSE_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_COMPOSE_SENTINEL", result.stderr)
+                self.assertNotIn("SENSITIVE_CONTAINER_ID_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_CONTAINER_ID_SENTINEL", result.stderr)
+                self.assertEqual(
+                    tuple(
+                        line
+                        for line in result.stderr.splitlines()
+                        if line in all_tokens
+                    ),
+                    expected_stderr,
+                )
+                self.assertEqual("STUB_CONTINUED" in result.stdout, returncode == 0)
+                trace = tuple(
+                    line
+                    for line in result.stdout.splitlines()
+                    if line.startswith(
+                        ("container-list:", "compose:", "wait:", "logs:", "rm:")
+                    )
+                )
+                expected_container_id = (
+                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                )
+                if scenario in ("wrong-status", "contaminated-app-output"):
+                    self.assertEqual(
+                        trace,
+                        (
+                            f"compose:{expected_container_id}",
+                            f"wait:{expected_container_id}",
+                            f"logs:{expected_container_id}",
+                            f"rm:{expected_container_id}",
+                            f"container-list:{expected_container_id}",
+                        ),
+                    )
+                if scenario == "create-fail-foreign-container":
+                    self.assertEqual(trace, ("compose:no-id",))
+                    self.assertIn(
+                        "STUB_STATE:ffffffffffffffffffffffffffffffff"
+                        "ffffffffffffffffffffffffffffffff\n",
+                        result.stdout,
+                    )
+                if scenario == "invalid-container-id":
+                    self.assertEqual(trace, ("compose:invalid-id",))
+                if returncode == 0:
+                    self.assertIn("STUB_CALLS:17\n", result.stdout)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_status_gate_classifies_failures_without_reflecting_output(
+        self,
+    ) -> None:
+        scenarios = (
+            (
+                "first-fail",
+                1,
+                "operator_status_first_query_failed",
+                ("upstream-status-call-1",),
+            ),
+            (
+                "second-fail",
+                1,
+                "operator_status_second_query_failed",
+                ("upstream-status-call-1", "upstream-status-call-2"),
+            ),
+            (
+                "mismatch",
+                1,
+                "operator_status_output_not_deterministic",
+                ("upstream-status-call-1", "upstream-status-call-2"),
+            ),
+        )
+        diagnostics = {
+            "operator_status_first_query_failed",
+            "operator_status_second_query_failed",
+            "operator_status_output_not_deterministic",
+        }
+        for scenario, returncode, diagnostic, upstream_lines in scenarios:
+            with self.subTest(scenario=scenario):
+                result = run_operator_status_with_stubbed_docker(scenario)
+                self.assertEqual(result.returncode, returncode)
+                self.assertNotIn("SENSITIVE_STATUS_SENTINEL", result.stdout)
+                self.assertNotIn("SENSITIVE_STATUS_SENTINEL", result.stderr)
+                stderr_lines = result.stderr.splitlines()
+                self.assertEqual(
+                    [line for line in stderr_lines if line in diagnostics],
+                    [diagnostic],
+                )
+                self.assertEqual(
+                    [line for line in stderr_lines if line.startswith("upstream-")],
+                    list(upstream_lines),
+                )
+
+        success = run_operator_status_with_stubbed_docker("success")
+        self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+        self.assertEqual(
+            success.stdout,
+            'STUB_ARTIFACT:{"state":"stable"}\n',
+        )
+        self.assertFalse(diagnostics.intersection(success.stderr.splitlines()))
+        self.assertEqual(
+            [
+                line
+                for line in success.stderr.splitlines()
+                if line.startswith("upstream-")
+            ],
+            ["upstream-status-call-1", "upstream-status-call-2"],
+        )
+
+    def test_operator_cleanup_removes_all_reviewed_image_tags_and_asserts_absence(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
+        for fragment in (
+            'reviewed_operator_image_id="${{ steps.reviewed-operator-image.outputs.image_id }}"',
+            "--format '{{.Repository}}:{{.Tag}}'",
+            "grep --extended-regexp '^freqtrade-cn-operator:'",
+            'docker image rm "${operator_tag}"',
+            'docker tag "${operator_id}" "${operator_tag}"',
+            'docker image rm --force "${operator_id}"',
+            'docker image inspect "${operator_id}"',
+            'remove_operator_image_id "${reviewed_operator_image_id}"',
+            'cmp "${operator_image_baseline}" "${operator_image_current}"',
+        ):
+            self.assertIn(fragment, cleanup)
+
+    def test_operator_image_cleanup_uses_prebuild_baseline_when_output_is_empty(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        build = active_step_text(named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP))
+        cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
+        baseline = '${RUNNER_TEMP}/platform-operator-images.before'
+        self.assertIn(baseline, build)
+        self.assertLess(
+            build.index(baseline),
+            build.index("python tools/image_provenance.py build-operator"),
+        )
+        for fragment in (
+            'operator_image_baseline_tmp="${operator_image_baseline}.tmp"',
+            'operator_image_ids_baseline_tmp="${operator_image_ids_baseline}.tmp"',
+            "platform-operator-images.ready",
+            'mv "${operator_image_baseline_tmp}" "${operator_image_baseline}"',
+            'mv "${operator_image_ids_baseline_tmp}" "${operator_image_ids_baseline}"',
+            'mv "${operator_image_baseline_ready_tmp}" "${operator_image_baseline_ready}"',
+        ):
+            self.assertIn(fragment, build)
+        for fragment in (
+            baseline,
+            "platform-operator-images.ready",
+            "platform-operator-images.current",
+            "platform-operator-images.created",
+            "platform-operator-image-ids.created",
+            "comm -13",
+            "docker image rm \"${operator_tag}\"",
+            'docker image rm --force "${operator_id}"',
+            "cmp",
+        ):
+            self.assertIn(fragment, cleanup)
+        baseline_branch = cleanup.index('if test -f "${operator_image_baseline}"')
+        self.assertIn('test -f "${operator_image_ids_baseline}"', cleanup)
+        self.assertIn('test -f "${operator_image_baseline_ready}"', cleanup)
+        membership_branch = cleanup.index("reviewed_id_membership_status=0")
+        mutation_branch = cleanup.index('docker image rm "${operator_tag}"')
+        self.assertLess(baseline_branch, membership_branch)
+        self.assertLess(membership_branch, mutation_branch)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_image_cleanup_ignores_incomplete_baseline(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cleanup = step_run_script(workflow, PLATFORM_CI_STEPS[-1]).replace(
+            "${{ steps.reviewed-operator-image.outputs.image_id }}", ""
+        )
+        stub = r'''
+RUNNER_TEMP="$(mktemp -d)"
+trap 'rm -rf "${RUNNER_TEMP}"' EXIT
+baseline_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+printf 'freqtrade-cn-operator:preexisting|%s\n' "${baseline_id}" \
+  > "${RUNNER_TEMP}/platform-operator-images.before"
+image_mutations="${RUNNER_TEMP}/image-mutations"
+: > "${image_mutations}"
+
+docker() {
+  if test "$1" = "ps"; then return 0; fi
+  if test "$1" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "disconnect"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "rm"; then return 0; fi
+  if test "$1" = "network" && test "$2" = "inspect"; then
+    printf 'Error response from daemon: No such network: %s\n' "$3" >&2
+    return 1
+  fi
+  if test "$1" = "image" && test "$2" = "ls"; then
+    printf '%s\n' 'freqtrade-cn-operator:preexisting'
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "inspect"; then
+    printf '%s\n' "${baseline_id}"
+    return 0
+  fi
+  if test "$1" = "image" && test "$2" = "rm"; then
+    printf 'image-rm:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  if test "$1" = "tag"; then
+    printf 'tag:%s\n' "$*" >> "${image_mutations}"
+    return 0
+  fi
+  return 99
+}
+'''
+        result = subprocess.run(
+            [shutil.which("bash") or "bash", "-s"],
+            cwd=REPO_ROOT,
+            input=(stub + cleanup + 'test ! -s "${image_mutations}"\n').encode(),
+            capture_output=True,
+            check=False,
+        )
+        output = (result.stdout + result.stderr).decode(errors="replace")
+        self.assertEqual(result.returncode, 0, output)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_fails_closed_when_docker_queries_fail(self) -> None:
+        for failure in (
+            "docker-ps",
+            "docker-ps-final",
+            "network-inspect",
+            "image-list",
+            "image-list-final",
+            "image-inspect",
+            "image-inspect-final",
+        ):
+            with self.subTest(failure=failure):
+                result, events = run_cleanup_with_stubbed_docker_failure(failure)
+                self.assertNotEqual(
+                    result.returncode,
+                    0,
+                    result.stdout + result.stderr,
+                )
+                self.assertTrue(
+                    any(event.startswith("cleanup:rm") for event in events),
+                    events,
+                )
+                if failure in {"image-list", "image-inspect"}:
+                    image_mutations = [
+                        event
+                        for event in events
+                        if event.startswith(("image-rm:", "tag:"))
+                    ]
+                    self.assertEqual(image_mutations, [])
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_restores_a_complete_image_baseline(self) -> None:
+        result, events, final_mapping, image_list_count = (
+            run_cleanup_with_stateful_images("restore")
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        old_id = "sha256:" + "a" * 64
+        new_id = "sha256:" + "b" * 64
+        self.assertIn(
+            "image-rm:image rm freqtrade-cn-operator:created",
+            events,
+        )
+        self.assertIn(f"tag:tag {old_id} freqtrade-cn-operator:preexisting", events)
+        self.assertIn(f"image-rm:image rm --force {new_id}", events)
+        self.assertEqual(
+            final_mapping,
+            f"freqtrade-cn-operator:preexisting|{old_id}",
+        )
+        self.assertEqual(image_list_count, 2)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_rejects_reviewed_id_membership_query_errors_before_mutation(
+        self,
+    ) -> None:
+        result, events, final_mapping, image_list_count = (
+            run_cleanup_with_stateful_images("reviewed-membership-error")
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, [])
+        self.assertEqual(final_mapping, "")
+        self.assertEqual(image_list_count, 1)
+
+    @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
+    def test_operator_cleanup_accepts_empty_docker_query_results(self) -> None:
+        result, events, final_mapping, image_list_count = (
+            run_cleanup_with_stateful_images("empty")
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(events, [])
+        self.assertEqual(final_mapping, "")
+        self.assertEqual(image_list_count, 2)
+
+    def test_operator_contract_rejects_missing_executable_and_sql_evidence(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        fragments = (
+            *WORKFLOW_EXECUTABLE_CONTRACT[OPERATOR_CI_STEPS[0]],
+            *WORKFLOW_EXECUTABLE_CONTRACT[OPERATOR_CI_STEPS[1]],
+            "CREATE FUNCTION public.platform_operator_owned_probe()",
+            "GRANT MAINTAIN ON TABLE public.runtime_instances TO platform_operator",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE postgres",
+        )
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                mutated = workflow.replace(fragment, "removed-operator-contract", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_operator_contract_rejects_comment_and_dead_branch_substitution(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        marker = "docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci"
+        step = named_workflow_step(workflow, OPERATOR_CI_STEPS[0])
+        commented_step = step.replace(marker, f"# {marker}", 1)
+        commented = workflow.replace(step, commented_step, 1)
+        self.assertTrue(validate_root_safety_workflow(commented))
+
+        removed = workflow.replace(marker, "removed-operator-network-connect", 1)
+        dead = removed.replace(
+            '          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"',
+            '          if false; then\n'
+            f'            {marker}\n'
+            '          fi\n'
+            '          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"',
+            1,
+        )
+        self.assertTrue(validate_root_safety_workflow(dead))
 
     def test_platform_runbook_keeps_production_start_fail_closed(self) -> None:
         self.assertTrue(PLATFORM_RUNBOOK_PATH.is_file())

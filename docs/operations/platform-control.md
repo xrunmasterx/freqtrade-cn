@@ -17,7 +17,7 @@ Runtime Access proxying, or start, stop, retry, or retire HTTP operations.
 
 ## Architecture and trust boundaries
 
-The control plane has two fixed services. `platform-postgres` is reachable only
+The control plane has two fixed long-running services. `platform-postgres` is reachable only
 on the internal `platform-db` network. `platform-control` joins that database
 network plus the dedicated `platform-ingress` bridge, connects as the
 least-privileged `platform_control` database role, binds inside its container in
@@ -28,6 +28,41 @@ network. Platform-control runs as UID/GID 1000 with a read-only root filesystem,
 all capabilities dropped, and `no-new-privileges`. It receives no Docker socket,
 repository root, runtime state, Bot configuration, strategy, research data,
 trading secret, or general secret-root mount.
+
+`platform-operator` is a one-shot command carrier in its own
+`platform-operator` profile. It is never started by the long-running `platform`
+profile. It receives only the internal database network, its operator database
+credential, the complete `.git` metadata directory, and the reviewed template,
+policy, and three paper-probe artifact paths. All repository mounts are read-only;
+the full worktree, runtime state, secret roots, trading configuration, Docker
+socket, host ports, and lifecycle authority are absent.
+
+Normal use starts with a normal recursive checkout; linked-worktree `.git`
+indirection is unsupported. The mounted `.git` and reviewed paths must be
+readable by UID 1000 and ownership-compatible with Git. CI prepares ownership
+only inside its temporary checkout before running the carrier. PostgreSQL must
+already be healthy before any database-backed command.
+
+First run `python tools/image_provenance.py build-operator --print-image-id` and
+capture its single verified image ID. Only after that command succeeds, create
+the fixed Compose alias and invoke the typed surface:
+
+```text
+docker image tag <verified-image-id> freqtrade-cn-operator:local
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-template validate
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-template publish --actor platform-operator
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-registry compile --actor platform-operator
+docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-registry status --instance-id phase2-spot-paper-probe
+```
+
+`freqtrade-cn-operator:local` is only an alias of a verified image ID; it is not
+a trusted provenance identity. The service uses `pull_policy: never`, so a
+missing alias must fail rather than pull an image.
+
+The image owns the reviewed root commit and CLI entrypoint. Docker administrators
+remain platform root: they can replace an image, entrypoint, mount, or environment
+and are outside the operator service isolation claim. Operators must use only the
+reviewed invocation and typed CLI arguments above.
 
 `platform-ingress` is a non-internal bridge, not a one-way ingress ACL. The
 loopback publication restricts host-side inbound access, but the bridge also
@@ -55,20 +90,28 @@ global uniqueness. The platform inventory is exactly:
 - `ft_userdata/secrets/platform/postgres_admin_password`
 - `ft_userdata/secrets/platform/platform_control_db_password`
 - `ft_userdata/secrets/platform/platform_supervisor_db_password`
+- `ft_userdata/secrets/platform/platform_operator_db_password`
 - `ft_userdata/secrets/platform/api_password`
 - `ft_userdata/secrets/platform/jwt_secret_key`
 
 Secret values are consumed through files. They must not be copied into ordinary
 environment variables, DSNs, command arguments, logs, or artifacts. The admin
 password is reserved for database administration and migration. The control and
-supervisor database passwords belong only to their fixed roles. The API password
-and JWT key belong only to platform-control authentication.
+supervisor database passwords belong only to their fixed roles. The operator
+database password belongs only to `platform_operator`. It is mounted read-only
+into `platform-postgres` for role reconciliation and into the one-shot
+`platform-operator` carrier as `database_password`; no long-running service
+receives it. The API password and JWT key belong only to
+platform-control authentication.
 
 Database-role password rotation is deliberately deferred in Phase 2A because it
 requires a coordinated database transaction and service handoff. Do not add the
-platform inventory to the legacy `rotate-secrets` route. A reviewed Supervisor
-or infrastructure launcher must define rotation, restart, verification, and
-rollback as one operation before production use.
+platform inventory to the legacy `rotate-secrets` route. The one narrow staging
+exception is fixed: `rotate-secrets --service platform-operator` rotates only
+`platform_operator_db_password`. This selector names one credential group; it
+does not grant Docker or database authority. A reviewed Supervisor or
+infrastructure launcher must define rotation, restart,
+verification, and rollback as one operation before production use.
 
 ## Migration and reconciliation contract
 
@@ -80,18 +123,28 @@ Credentials must never be rendered in output. After the upgrade:
 1. Verify the database revision equals the unique Alembic head.
 2. Rerun `docker/postgres/init-platform-roles.sh` as the bootstrap superuser so
    grants are applied after all migrated tables exist.
-3. Verify both fixed roles have the exact negative role attributes, no inbound
+3. Verify all three fixed roles have the exact negative role attributes, no inbound
    or outbound memberships, and no residual delegated column ACLs.
 4. Verify effective privileges and actual allowed and denied SQL operations.
 
 The initializer is idempotent. It removes at most one terminal LF or CRLF from
 password files, preserves all other characters, resets dangerous role
-attributes and memberships, removes database/schema/table/sequence/column
-authority with downstream cascades, then applies the exact allowlist. Residual
-column revocation executes as each ACL's recorded original grantor. It also
-revokes `TEMPORARY` and `CREATE` on `platform` from `PUBLIC`, so neither fixed
-role inherits database DDL or temporary-table authority through PostgreSQL's
-default grants.
+attributes and memberships, fails closed if a fixed role owns an object or the
+operator owns/receives default authority, removes database/schema/table/sequence/
+column authority with downstream cascades, then applies the exact allowlist. Residual
+ACL revocation executes as each ACL's recorded original grantor, including grants to
+PostgreSQL's `PUBLIC` pseudo-role whose catalog grantee is OID 0. Null ACLs are
+expanded with PostgreSQL 17's hard-wired defaults before reconciliation.
+
+This dedicated cluster revokes `PUBLIC` CONNECT, CREATE, and TEMPORARY authority on
+every database. In `platform`, it also removes `PUBLIC` authority from every
+non-system schema and its relations, sequences, columns, functions, and procedures;
+`pg_*` schemas and `information_schema` are not altered. PostgreSQL defaults for
+future objects created by `postgres` are hardened globally for routines and within
+`public` for tables, sequences, and routines. Remaining `PUBLIC` or operator default
+ACLs fail closed. The initializer then grants only the reviewed `platform`/`public`
+and table allowlists, so none of the fixed roles inherits database DDL or
+temporary-table authority through `PUBLIC`.
 
 ## Least privilege
 
@@ -103,12 +156,32 @@ It cannot update lifecycle state such as `runtime_instances.desired_state`.
 
 `platform_supervisor` receives CONNECT/USAGE, SELECT on the seven tables, and
 INSERT/UPDATE on the six Registry tables. Neither role receives DELETE,
-TRUNCATE, DDL, role-management, database-owner, broad default-table, or
+TRUNCATE, MAINTAIN, DDL, role-management, database-owner, broad default-table, or
 platform-control lifecycle authority. Root Safety checks the effective database
 matrix for both roles as `CONNECT=true`, `CREATE=false`, `TEMP=false`, then
 checks exact schema, table, column, sequence, ownership, membership, grantable,
 and residual-ACL inventories. Positive and negative SQL probes connect as each
 fixed identity; administrator `SET ROLE` is not acceptance evidence.
+
+`platform_operator` receives only CONNECT on `platform`, USAGE on `public`, and
+SELECT plus INSERT on the seven fixed registration tables:
+`platform_catalog_revisions`, `adapter_template_revisions`, `state_allocations`,
+`secret_references`, `runtime_spec_revisions`, `runtime_instances`, and
+`runtime_audit_events`. It receives no sequence privilege, UPDATE, DELETE,
+TRUNCATE, REFERENCES, TRIGGER, MAINTAIN, secret-version authority, or lifecycle/Runtime
+Access table authority. The initializer skips absent allowlisted tables and is
+rerunnable after Alembic creates them.
+
+Root Safety probes PostgreSQL 17 effective privileges, including authority
+inherited through `PUBLIC`, using each fixed login identity rather than relying on
+named-role ACL rows or administrator `SET ROLE` alone. Its database, schema, table,
+column, sequence, routine, and default-ACL checks must cover both explicit ACLs and
+hard-wired defaults represented by null catalog ACLs.
+Root Safety must contaminate fixed roles with routine ownership, direct routine
+`EXECUTE`, and table `MAINTAIN` authority. It must prove that a rerun fails closed
+while a fixed role owns the routine; after an administrator restores ownership, a
+rerun must remove the direct `EXECUTE` and `MAINTAIN` grants and each affected fixed
+login must be denied those operations.
 
 ## CI-only acceptance evidence
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 import stat
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -224,6 +226,140 @@ class BootstrapRuntimeTests(unittest.TestCase):
                 for directory in ("home", "logs", "data", "backtest_results"):
                     self.assertTrue((state_root / directory).is_dir())
 
+    def test_init_creates_and_hardens_managed_state_root_without_touching_children(self) -> None:
+        managed_root = self.root / bootstrap_runtime.MANAGED_STATE_ROOT
+        managed_root.mkdir(parents=True)
+        child = managed_root / "existing-allocation"
+        child.mkdir()
+        marker = child / "keep"
+        marker.write_text("unchanged", encoding="utf-8")
+
+        with mock.patch.object(
+            bootstrap_runtime,
+            "_harden_managed_state_directory",
+        ) as harden:
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        harden.assert_called_once_with(
+            managed_root,
+            bootstrap_runtime._expected_runtime_identity()["FREQTRADE_RUNTIME_UID"],
+        )
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
+    def test_verify_checks_managed_state_root_without_enumerating_children(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        managed_root = self.root / bootstrap_runtime.MANAGED_STATE_ROOT
+        child = managed_root / "existing-allocation"
+        child.mkdir()
+        marker = child / "keep"
+        marker.write_text("unchanged", encoding="utf-8")
+
+        with mock.patch.object(
+            bootstrap_runtime,
+            "_verify_managed_state_directory",
+        ) as verify:
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+        verify.assert_called_once_with(
+            managed_root,
+            bootstrap_runtime._expected_runtime_identity()["FREQTRADE_RUNTIME_UID"],
+        )
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+
+    def test_managed_state_posix_helpers_require_exact_owner_and_modes(self) -> None:
+        directory = self.root / "managed-directory"
+        directory.mkdir()
+        identity = self.root / "managed-identity"
+        identity.write_bytes(b"")
+        runtime_uid = 1001
+        statuses = {
+            directory: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=runtime_uid),
+            identity: SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=runtime_uid,
+                st_nlink=1,
+            ),
+        }
+
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(os, "lstat", side_effect=lambda path: statuses[path]),
+        ):
+            bootstrap_runtime._verify_managed_state_directory(directory, runtime_uid)
+            bootstrap_runtime._verify_managed_state_identity_file(identity, runtime_uid)
+
+        statuses[directory] = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o750,
+            st_uid=runtime_uid,
+        )
+        with (
+            mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
+            mock.patch.object(os, "lstat", side_effect=lambda path: statuses[path]),
+            self.assertRaisesRegex(ValueError, "managed state directory"),
+        ):
+            bootstrap_runtime._verify_managed_state_directory(directory, runtime_uid)
+
+    def test_managed_state_windows_helpers_use_owner_only_acl(self) -> None:
+        directory = self.root / "managed-directory"
+        directory.mkdir()
+        identity = self.root / "managed-identity"
+        identity.write_bytes(b"")
+
+        with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
+            bootstrap_runtime._harden_managed_state_directory(directory, 1000)
+            bootstrap_runtime._verify_managed_state_directory(directory, 1000)
+            bootstrap_runtime._harden_managed_state_identity_file(identity, 1000)
+            bootstrap_runtime._verify_managed_state_identity_file(identity, 1000)
+
+        self.assertEqual(
+            self.mock_windows_acl.call_args_list[-4:],
+            [
+                mock.call("harden", directory),
+                mock.call("verify", directory),
+                mock.call("harden", identity),
+                mock.call("verify", identity),
+            ],
+        )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink-parent integration")
+    def test_init_rejects_symlinked_managed_state_parent_without_following_it(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.root / "ft_userdata").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(ValueError, "managed state"):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        self.assertFalse((outside / "runtime/instances").exists())
+
+    def test_init_rejects_reparse_managed_state_parent(self) -> None:
+        parent = self.root / "ft_userdata/runtime"
+        parent.mkdir(parents=True)
+        real_lstat = os.lstat
+
+        def reparse_parent(path: Path) -> os.stat_result:
+            status = real_lstat(path)
+            if Path(path) != parent:
+                return status
+            return mock.Mock(
+                st_mode=status.st_mode,
+                st_uid=getattr(status, "st_uid", 0),
+                st_nlink=status.st_nlink,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x0400,
+                ),
+            )
+
+        with (
+            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_parent),
+            self.assertRaisesRegex(ValueError, "managed state"),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        self.assertFalse((parent / "instances").exists())
+
     def test_init_never_creates_state_strategy_directory(self) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -404,6 +540,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -499,6 +636,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file") as harden,
+            mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
         self.assertEqual(harden.call_args_list, [mock.call(environment, 1001), mock.call(override, 1001)])
@@ -825,6 +963,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -833,6 +972,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_verify_managed_state_directory"),
             mock.patch.object(
                 bootstrap_runtime, "_verify_secret_permissions"
             ) as verify_secret,
@@ -857,6 +997,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
             mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
             mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
+            mock.patch.object(bootstrap_runtime, "_verify_managed_state_directory"),
             mock.patch.object(bootstrap_runtime, "_verify_secret_permissions"),
             mock.patch.object(
                 bootstrap_runtime,
@@ -943,6 +1084,17 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         platform_root = self.root / "ft_userdata/secrets/platform"
         self.assertEqual(
+            bootstrap_runtime.PLATFORM_SECRET_SPECS,
+            {
+                "postgres_admin_password": 32,
+                "platform_control_db_password": 32,
+                "platform_supervisor_db_password": 32,
+                "platform_operator_db_password": 32,
+                "api_password": 32,
+                "jwt_secret_key": 48,
+            },
+        )
+        self.assertEqual(
             {path.name for path in platform_root.iterdir()},
             set(bootstrap_runtime.PLATFORM_SECRET_SPECS),
         )
@@ -957,6 +1109,102 @@ class BootstrapRuntimeTests(unittest.TestCase):
         ]
         self.assertEqual(len(platform_values), len(set(platform_values)))
         self.assertFalse(set(platform_values) & set(legacy_values))
+
+    def test_operator_secret_init_and_verify_use_shared_hardening_without_output(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                bootstrap_runtime,
+                "_harden_secret_permissions",
+                wraps=bootstrap_runtime._harden_secret_permissions,
+            ) as harden,
+            redirect_stdout(output),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        operator_secret = (
+            self.root
+            / "ft_userdata/secrets/platform/platform_operator_db_password"
+        )
+        value = operator_secret.read_text(encoding="utf-8").rstrip("\n")
+        self.assertGreaterEqual(len(value), 32)
+        self.assertEqual(operator_secret.read_text(encoding="utf-8"), value + "\n")
+        harden.assert_any_call(operator_secret)
+
+        with (
+            mock.patch.object(
+                bootstrap_runtime,
+                "_verify_secret_permissions",
+                wraps=bootstrap_runtime._verify_secret_permissions,
+            ) as verify_permissions,
+            redirect_stdout(output),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+        verify_permissions.assert_any_call(
+            operator_secret,
+            bootstrap_runtime._expected_runtime_identity()["FREQTRADE_RUNTIME_UID"],
+        )
+        self.assertNotIn(value, output.getvalue())
+
+    def test_operator_secret_init_and_verify_reject_reparse_points(self) -> None:
+        operator_secret = (
+            self.root
+            / "ft_userdata/secrets/platform/platform_operator_db_password"
+        )
+        operator_secret.parent.mkdir(parents=True)
+        operator_secret.write_text("existing-operator-secret-value-long-enough\n", encoding="utf-8")
+        real_lstat = os.lstat
+
+        def reparse_operator(path: Path) -> os.stat_result:
+            status = real_lstat(path)
+            if Path(path) != operator_secret:
+                return status
+            return mock.Mock(
+                st_mode=status.st_mode,
+                st_uid=getattr(status, "st_uid", 0),
+                st_nlink=status.st_nlink,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x0400,
+                ),
+            )
+
+        with (
+            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_operator),
+            self.assertRaisesRegex(ValueError, "invalid runtime secret file"),
+        ):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+
+        operator_secret.unlink()
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        with (
+            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_operator),
+            self.assertRaisesRegex(ValueError, "platform runtime secret"),
+        ):
+            bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+    def test_operator_secret_init_and_verify_reject_symlinks(self) -> None:
+        outside = self.root / "outside-operator-secret"
+        outside.write_text("outside-operator-secret-value-long-enough\n", encoding="utf-8")
+        operator_secret = (
+            self.root
+            / "ft_userdata/secrets/platform/platform_operator_db_password"
+        )
+        operator_secret.parent.mkdir(parents=True)
+        try:
+            operator_secret.symlink_to(outside)
+        except OSError as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+
+        with self.assertRaisesRegex(ValueError, "invalid runtime secret file"):
+            bootstrap_runtime.init_runtime(self.root, self.manifest)
+        with self.assertRaisesRegex(ValueError, "platform runtime secret"):
+            bootstrap_runtime.verify_runtime(
+                self.root,
+                self.manifest,
+                verify_platform_secrets=True,
+            )
 
     def test_init_hardens_but_never_overwrites_existing_platform_secret(self) -> None:
         path = self.root / "ft_userdata/secrets/platform/api_password"
@@ -999,6 +1247,39 @@ class BootstrapRuntimeTests(unittest.TestCase):
         bootstrap_runtime.init_runtime(self.root, self.manifest)
         with self.assertRaisesRegex(ValueError, "unknown runtime service"):
             bootstrap_runtime.rotate_secrets(self.root, self.manifest, {"platform"})
+
+    def test_rotate_platform_operator_changes_only_operator_database_secret(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        platform_root = self.root / "ft_userdata/secrets/platform"
+        before = {
+            filename: (platform_root / filename).read_bytes()
+            for filename in bootstrap_runtime.PLATFORM_SECRET_SPECS
+        }
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            bootstrap_runtime.rotate_secrets(
+                self.root,
+                self.manifest,
+                {"platform-operator"},
+            )
+
+        after = {
+            filename: (platform_root / filename).read_bytes()
+            for filename in bootstrap_runtime.PLATFORM_SECRET_SPECS
+        }
+        self.assertNotEqual(
+            before["platform_operator_db_password"],
+            after["platform_operator_db_password"],
+        )
+        self.assertEqual(
+            {key: value for key, value in before.items() if key != "platform_operator_db_password"},
+            {key: value for key, value in after.items() if key != "platform_operator_db_password"},
+        )
+        self.assertTrue(after["platform_operator_db_password"].endswith(b"\n"))
+        value = after["platform_operator_db_password"].rstrip(b"\n")
+        self.assertGreaterEqual(len(value), 32)
+        self.assertNotIn(value.decode("ascii"), output.getvalue())
 
 
 if __name__ == "__main__":

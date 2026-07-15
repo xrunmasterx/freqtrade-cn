@@ -537,6 +537,30 @@ class RuntimeComposeContractTests(unittest.TestCase):
         self.assertIn("direct secret environment is forbidden", text)
         self.assertNotIn("forbidden-value", text)
 
+    def test_rejects_operator_database_secret_on_every_runtime_service(self) -> None:
+        for service_name in ("freqtrade", "freqtrade-futures", "freqtrade-research"):
+            with self.subTest(service=service_name):
+                _, compose = build_safe_contract(self.root)
+                compose["secrets"]["platform_operator_db_password"] = {
+                    "name": "freqtrade-cn_platform_operator_db_password",
+                    "file": str(
+                        (
+                            self.root
+                            / "ft_userdata/secrets/platform/platform_operator_db_password"
+                        ).resolve()
+                    ),
+                }
+                compose["services"][service_name]["secrets"].append(
+                    {
+                        "source": "platform_operator_db_password",
+                        "target": "platform_operator_db_password",
+                    }
+                )
+
+                text = "\n".join(self.validate(compose=compose))
+                self.assertIn("Compose secrets differ from runtime contract", text)
+                self.assertIn("API secret mapping differs from runtime contract", text)
+
     def test_rejects_secret_entry_schema_duplicates_and_non_strings(self) -> None:
         cases = (
             {"source": "freqtrade_api_password", "target": "api_password", "uid": "0"},

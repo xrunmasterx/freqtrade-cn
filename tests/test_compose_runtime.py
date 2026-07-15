@@ -1001,6 +1001,15 @@ class ComposeRuntimeTests(unittest.TestCase):
                 "json",
                 "--quiet",
             ],
+            [
+                "--profile",
+                "platform",
+                "--profile",
+                "platform-operator",
+                "config",
+                "--format",
+                "json",
+            ],
         )
         for arguments in accepted:
             with self.subTest(arguments=arguments):
@@ -1011,6 +1020,7 @@ class ComposeRuntimeTests(unittest.TestCase):
             ["--profile", "platform", "config", "platform-control"],
             ["--profile", "platform", "config", "--format", "yaml"],
             ["--profile", "platform", "--profile", "trading", "config"],
+            ["--profile", "platform-operator", "--profile", "platform", "config"],
             ["--profile", "trading", "--profile", "platform", "config"],
             ["--profile", "platform", "config", "--quiet", "--quiet"],
             ["config"],
@@ -1041,8 +1051,22 @@ class ComposeRuntimeTests(unittest.TestCase):
 
     def test_render_platform_compose_parses_strict_json_object(self) -> None:
         completed = subprocess.CompletedProcess([], 0, '{"services":{}}', "")
-        with mock.patch.object(compose_runtime, "run_compose", return_value=completed):
+        with mock.patch.object(
+            compose_runtime, "run_compose", return_value=completed
+        ) as run:
             self.assertEqual(compose_runtime.render_platform_compose(root=self.root), {"services": {}})
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "--profile",
+                "platform",
+                "--profile",
+                "platform-operator",
+                "config",
+                "--format",
+                "json",
+            ],
+        )
 
         for output in ("[]", "null", "{broken"):
             with self.subTest(output=output), mock.patch.object(
