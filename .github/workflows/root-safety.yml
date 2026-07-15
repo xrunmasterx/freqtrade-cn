@@ -1090,7 +1090,7 @@ jobs:
             "SELECT nextval('public.platform_operator_forbidden_sequence')"
           expect_operator_denied routine \
             "SELECT public.platform_operator_owned_probe()"
-          expect_operator_denied maintain "VACUUM public.runtime_instances"
+          expect_operator_denied maintain "REINDEX TABLE public.runtime_instances"
           expect_operator_denied secret-version-after "SELECT * FROM secret_version_metadata"
           expect_operator_denied lifecycle-after "SELECT * FROM runtime_lifecycle_jobs"
           printf '%s\n' 'operator_final_denial_probes_complete' >&2

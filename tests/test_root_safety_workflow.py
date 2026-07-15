@@ -571,7 +571,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test "${public_effective_acl_count}" = "0"',
         "expect_operator_denied sequence",
         "expect_operator_denied routine",
-        'expect_operator_denied maintain "VACUUM public.runtime_instances"',
+        'expect_operator_denied maintain "REINDEX TABLE public.runtime_instances"',
     ),
     PLATFORM_CI_STEPS[4]: (
         "docker network disconnect bridge platform-postgres-ci",
@@ -3062,7 +3062,7 @@ sleep() {
             'test "${null_acl_effective}" = "t|t"',
             'test "${residual_operator_authority}" = "f|f|f|f|f|f"',
             'test "${public_default_acl_count}" = "0"',
-            'expect_operator_denied maintain "VACUUM public.runtime_instances"',
+            'expect_operator_denied maintain "REINDEX TABLE public.runtime_instances"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, step)
@@ -3072,6 +3072,7 @@ sleep() {
         self.assertNotIn("docker exec --env", step)
         self.assertNotIn("does not exist", step)
         self.assertNotIn("FROM secret_versions", step)
+        self.assertNotIn("VACUUM public.runtime_instances", step)
         self.assertIn("SELECT * FROM secret_version_metadata", step)
         self.assertIn("direct_operator_table_acl=", step)
         self.assertIn('test "${direct_operator_table_acl}" = "14|14|0"', step)
@@ -3169,7 +3170,7 @@ sleep() {
         for denial_probe in (
             "expect_operator_denied sequence",
             "expect_operator_denied routine",
-            'expect_operator_denied maintain "VACUUM public.runtime_instances"',
+            'expect_operator_denied maintain "REINDEX TABLE public.runtime_instances"',
             'expect_operator_denied secret-version-after "SELECT * FROM secret_version_metadata"',
             'expect_operator_denied lifecycle-after "SELECT * FROM runtime_lifecycle_jobs"',
         ):
