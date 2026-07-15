@@ -2678,10 +2678,13 @@ sleep() {
         schema_grant = (
             "GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION"
         )
+        schema_usage = "GRANT USAGE ON SCHEMA public TO platform_ci_delegate;"
         self.assertIn(database_grant, step)
         self.assertIn(schema_grant, step)
+        self.assertIn(schema_usage, step)
         self.assertLess(step.index(database_grant), step.index("SET ROLE platform_ci_owner"))
         self.assertLess(step.index(schema_grant), step.index("SET ROLE platform_ci_owner"))
+        self.assertLess(step.index(schema_usage), step.index("SET ROLE platform_ci_delegate"))
         self.assertIn("'CONNECT', 'postgres', false", step)
         self.assertIn("'USAGE', 'pg_database_owner', false", step)
         self.assertNotIn("'schema', 'public', '', role_name, 'USAGE', 'postgres'", step)

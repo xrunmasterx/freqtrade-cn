@@ -1120,6 +1120,7 @@ jobs:
           CREATE SCHEMA platform_ci_private AUTHORIZATION platform_ci_owner;
           GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION;
           GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION;
+          GRANT USAGE ON SCHEMA public TO platform_ci_delegate;
           GRANT DELETE ON TABLE public.platform_ci_acl_table
             TO platform_ci_delegate WITH GRANT OPTION;
           GRANT UPDATE ON SEQUENCE public.platform_ci_acl_sequence
