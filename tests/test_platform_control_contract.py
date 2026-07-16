@@ -326,6 +326,7 @@ class PlatformControlContractTests(unittest.TestCase):
             "tools/runtime_driver.py",
             "tools/runtime_launch_policy.py",
             "tools/runtime_templates.py",
+            "tools/bootstrap_runtime.py",
             "tools/runtime_artifacts.py",
             "tools/runtime_registry_cli.py",
         ):
