@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 if __package__:
     from tools.bootstrap_runtime import build_compose_identity, verify_runtime
@@ -65,9 +65,15 @@ RUNTIME_CONTROL_PATHS = (
 )
 
 LaunchService = Callable[[str, Path], subprocess.CompletedProcess[str]]
+SnapshotValidator = Callable[[Path], None]
+ValidationCallback = Callable[[], None]
 
 
 class UnsupportedArguments(ValueError):
+    pass
+
+
+class ComposeActionUncertain(OSError):
     pass
 
 
@@ -203,48 +209,13 @@ def parse_compose_arguments(arguments: Sequence[str], services: set[str]) -> lis
 def _validate_launch(
     root: Path,
     manifest: dict[str, Any],
-    command_prefix: list[str],
-    override: str,
     environment: dict[str, str],
     service: str,
     image_id: str,
     snapshot: Path,
     commit_identity: CommitIdentity,
 ) -> None:
-    if validate_tracked_configs(root):
-        raise ValueError("tracked runtime configuration failed validation")
-    controls = subprocess.run(
-        ["git", "diff", "--quiet", "HEAD", "--", *RUNTIME_CONTROL_PATHS],
-        cwd=root,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if controls.returncode != 0:
-        raise ValueError("runtime control files differ from HEAD")
-    rendered = subprocess.run(
-        [
-            *command_prefix,
-            "--profile",
-            "trading",
-            "--profile",
-            "research",
-            "config",
-            "--format",
-            "json",
-        ],
-        cwd=root,
-        env=environment,
-        input=override,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if rendered.returncode != 0:
-        raise ValueError("compose preflight render failed")
     try:
-        snapshot.write_text(rendered.stdout, encoding="utf-8")
         compose = json.loads(snapshot.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, RecursionError):
         raise ValueError("compose preflight snapshot failed") from None
@@ -269,6 +240,24 @@ def _validate_launch(
     )
     if controls.returncode != 0:
         raise ValueError("runtime control files changed before launch")
+
+
+def _validate_launch_pre_render(
+    root: Path,
+    environment: dict[str, str],
+) -> None:
+    if validate_tracked_configs(root):
+        raise ValueError("tracked runtime configuration failed validation")
+    controls = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", *RUNTIME_CONTROL_PATHS],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if controls.returncode != 0:
+        raise ValueError("runtime control files differ from HEAD")
 
 
 def _run_verified_compose(
@@ -379,65 +368,106 @@ def _launch_override(
 def _run_validated_snapshot_launch(
     *,
     service: str,
+    project_name: str,
     root: Path,
-    manifest: dict[str, Any],
-    image_id: str,
-    commit_identity: CommitIdentity,
+    compose_command: Sequence[str],
+    compose_files: Sequence[Path],
+    profiles: Sequence[str],
     override: str,
+    environment: Mapping[str, str],
+    validate_pre_render: ValidationCallback,
+    validate_rendered_snapshot: SnapshotValidator,
+    validate_pre_action: ValidationCallback,
+    action_arguments: Sequence[str],
+    render_timeout_seconds: int | None,
+    action_timeout_seconds: int | None,
+    capture_output: bool,
+    temporary_directory: Path | None = None,
+    process_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    render_command = [
-        "docker",
-        "compose",
-        "--project-name",
-        "freqtrade-cn",
-        "-f",
-        str(root / "docker-compose.yml"),
-        "-f",
-        "-",
-    ]
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
-    }
-    with tempfile.TemporaryDirectory(prefix="compose-launch-") as directory:
-        snapshot = Path(directory) / "compose.validated.json"
-        _validate_launch(
-            root,
-            manifest,
-            render_command,
-            override,
-            environment,
+    if type(compose_command) is not tuple or any(
+        type(token) is not str or not token for token in compose_command
+    ):
+        raise ValueError("compose command is invalid")
+    if compose_command != ("docker", "compose") and (
+        len(compose_command) != 1 or not Path(compose_command[0]).is_absolute()
+    ):
+        raise ValueError("compose command is invalid")
+    approved_actions = (
+        (
+            "up",
+            "--detach",
+            "--wait",
+            "--wait-timeout",
+            str(COMPOSE_WAIT_TIMEOUT_SECONDS),
+            "--force-recreate",
+            "--no-build",
+            "--no-deps",
             service,
-            image_id,
-            snapshot,
-            commit_identity,
-        )
-        return subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                "freqtrade-cn",
-                "-f",
-                str(snapshot),
-                "up",
-                "--detach",
-                "--wait",
-                "--wait-timeout",
-                str(COMPOSE_WAIT_TIMEOUT_SECONDS),
-                "--force-recreate",
-                "--no-build",
-                "--no-deps",
-                service,
-            ],
+        ),
+        (
+            "create",
+            "--no-recreate",
+            "--no-build",
+            "--pull",
+            "never",
+            service,
+        ),
+    )
+    if type(action_arguments) is not tuple or action_arguments not in approved_actions:
+        raise ValueError("compose action is invalid")
+    runner = subprocess.run if process_runner is None else process_runner
+    render_command = [*compose_command, "--project-name", project_name]
+    for compose_file in compose_files:
+        render_command.extend(("-f", str(compose_file)))
+    render_command.extend(("-f", "-"))
+    for profile in profiles:
+        render_command.extend(("--profile", profile))
+    render_command.extend(("config", "--format", "json"))
+    validate_pre_render()
+    with tempfile.TemporaryDirectory(
+        prefix="compose-launch-",
+        dir=temporary_directory,
+    ) as directory:
+        snapshot = Path(directory) / "compose.validated.json"
+        rendered = runner(
+            render_command,
             cwd=root,
             env=environment,
-            input=None,
+            input=override,
             text=True,
-            capture_output=False,
+            capture_output=True,
             check=False,
+            timeout=render_timeout_seconds,
         )
+        if rendered.returncode != 0:
+            raise ValueError("compose preflight render failed")
+        try:
+            snapshot.write_text(rendered.stdout, encoding="utf-8")
+        except OSError:
+            raise ValueError("compose preflight snapshot failed") from None
+        validate_rendered_snapshot(snapshot)
+        validate_pre_action()
+        try:
+            return runner(
+                [
+                    *compose_command,
+                    "--project-name",
+                    project_name,
+                    "-f",
+                    str(snapshot),
+                    *action_arguments,
+                ],
+                cwd=root,
+                env=environment,
+                input=None,
+                text=True,
+                capture_output=capture_output,
+                check=False,
+                timeout=action_timeout_seconds,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ComposeActionUncertain() from None
 
 
 def _launch_inspected_image(
@@ -449,13 +479,49 @@ def _launch_inspected_image(
 ) -> subprocess.CompletedProcess[str]:
     identity = verify_runtime(root, manifest, verify_platform_secrets=False)
     override = _launch_override(manifest, identity, service, image_id)
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("FREQTRADE_RUNTIME_") and not key.startswith("COMPOSE_")
+    }
+
+    def validate_rendered(snapshot: Path) -> None:
+        _validate_launch(
+            root,
+            manifest,
+            environment,
+            service,
+            image_id,
+            snapshot,
+            commit_identity,
+        )
+
     return _run_validated_snapshot_launch(
         service=service,
+        project_name="freqtrade-cn",
         root=root,
-        manifest=manifest,
-        image_id=image_id,
-        commit_identity=commit_identity,
+        compose_command=("docker", "compose"),
+        compose_files=(root / "docker-compose.yml",),
+        profiles=("trading", "research"),
         override=override,
+        environment=environment,
+        validate_pre_render=lambda: _validate_launch_pre_render(root, environment),
+        validate_rendered_snapshot=validate_rendered,
+        validate_pre_action=lambda: None,
+        action_arguments=(
+            "up",
+            "--detach",
+            "--wait",
+            "--wait-timeout",
+            str(COMPOSE_WAIT_TIMEOUT_SECONDS),
+            "--force-recreate",
+            "--no-build",
+            "--no-deps",
+            service,
+        ),
+        render_timeout_seconds=None,
+        action_timeout_seconds=None,
+        capture_output=False,
     )
 
 
