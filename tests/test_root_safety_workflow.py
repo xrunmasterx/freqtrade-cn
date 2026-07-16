@@ -841,7 +841,7 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     for fragment in (
         "current_user = 'platform_supervisor'",
         "current_database() = 'platform'",
-        "(SELECT min(version_num) FROM public.alembic_version) = '20260717_0007'",
+        "(SELECT min(version_num) FROM public.alembic_version) = '20260717_0008'",
     ):
         if fragment not in raw_active_sql_payload:
             errors.append(f"least-privilege SQL payload missing: {fragment}")
@@ -4318,6 +4318,10 @@ docker() {
         for statement in (
             "Task 7A Offline Foundation",
             "runtime_supervisor_not_enabled",
+            "Task 7B internal persisted-authority assembly seam",
+            "PRODUCTION_ASSEMBLY_ENABLED = False",
+            "INTERNAL_PERSISTED_ASSEMBLY_SEAM_AVAILABLE = True",
+            "HOST_RUNTIME_MUTATION_BRIDGE_ENABLED = False",
             "Task 7A rejects every valid invocation with exit code 78",
             "before Backend imports, database credentials, a connection or a lifecycle Job",
             "registration status only",

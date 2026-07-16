@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import ContextManager, Protocol
 
 
-EXPECTED_PLATFORM_SCHEMA_REVISION = "20260717_0007"
+EXPECTED_PLATFORM_SCHEMA_REVISION = "20260717_0008"
 _EXPECTED_ROLE = "platform_supervisor"
 _EXPECTED_DATABASE = "platform"
 _AUTHORITY_QUERY = """
