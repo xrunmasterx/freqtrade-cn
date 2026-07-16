@@ -888,7 +888,9 @@ class RuntimeStateTests(unittest.TestCase):
     def test_resume_provisioning_classifies_partial_without_mutation(self) -> None:
         allocation = self.state_root / "runtime-1"
         allocation.mkdir()
+        os.chmod(allocation, 0o700)
         (allocation / "home").mkdir()
+        os.chmod(allocation / "home", 0o700)
         before = tuple(sorted(path.name for path in allocation.iterdir()))
 
         with (
@@ -964,6 +966,7 @@ class RuntimeStateTests(unittest.TestCase):
     ) -> None:
         allocation = self.state_root / "runtime-1"
         allocation.mkdir()
+        os.chmod(allocation, 0o700)
         foreign = allocation / "foreign-evidence"
         foreign.write_text("keep", encoding="utf-8")
         with self.assertRaisesRegex(
@@ -976,6 +979,7 @@ class RuntimeStateTests(unittest.TestCase):
     def test_resume_provisioning_classifies_partial_reparse_as_foreign(self) -> None:
         allocation = self.state_root / "runtime-1"
         allocation.mkdir()
+        os.chmod(allocation, 0o700)
         component = allocation / "home"
         component.mkdir()
 
