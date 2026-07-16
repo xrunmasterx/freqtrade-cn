@@ -43,6 +43,7 @@ from tools.runtime_driver import (
     RuntimeAccessNetworkDriver,
 )
 from tools.runtime_preparation_lease import ActiveLaunchAuthorityLease
+from tools.runtime_supervisor.writer_guard import SupervisorDockerWriterGuard
 from tools.runtime_snapshot import (
     LaunchCompilationAuthority,
     RenderedContainerPolicy,
@@ -648,9 +649,14 @@ class SafeComposeRuntimeDriver:
         temporary_directory: Path,
         authority_resolver: DriverAuthorityResolver,
         platform_control_identity_provider: PlatformControlIdentityProvider,
+        writer_guard: SupervisorDockerWriterGuard,
+        writer_authority: object,
         access_network_driver: RuntimeAccessNetworkDriver | None = None,
         command_runner: ProcessRunner = subprocess.run,
     ) -> None:
+        if type(writer_guard) is not SupervisorDockerWriterGuard:
+            raise DriverPolicyError()
+        writer_guard.require_active(writer_authority)
         self._docker_executable = docker_executable
         self._compose_executable = compose_executable
         self._environment = dict(environment)
@@ -663,6 +669,8 @@ class SafeComposeRuntimeDriver:
         self._platform_control_identity_provider = (
             platform_control_identity_provider
         )
+        self._writer_guard = writer_guard
+        self._writer_authority = writer_authority
         self._access_network_driver = (
             self if access_network_driver is None else access_network_driver
         )
@@ -692,6 +700,7 @@ class SafeComposeRuntimeDriver:
         platform_control: PlatformControlIdentity,
         runtime: RuntimeAccessMemberIdentity | None = None,
     ) -> AccessNetworkObservation:
+        self._require_writer_authority()
         if runtime is not None and type(runtime) is not RuntimeAccessMemberIdentity:
             raise DriverValidationError()
         created = False
@@ -852,6 +861,7 @@ class SafeComposeRuntimeDriver:
         self,
         identity: AccessNetworkIdentity,
     ) -> AccessNetworkObservation:
+        self._require_writer_authority()
         if type(identity) is not AccessNetworkIdentity:
             raise DriverValidationError()
         self._validate_docker_execution_context()
@@ -897,6 +907,7 @@ class SafeComposeRuntimeDriver:
         return observation.inspection
 
     def launch(self, snapshot: LaunchSnapshot) -> DriverInspection:
+        self._require_writer_authority()
         if type(snapshot) is not LaunchSnapshot:
             raise DriverValidationError()
         self._validate_compose_launch_context()
@@ -1011,7 +1022,7 @@ class SafeComposeRuntimeDriver:
                 action_timeout_seconds=_CREATE_TIMEOUT_SECONDS,
                 capture_output=True,
                 temporary_directory=self._temporary_directory,
-                process_runner=self._command_runner,
+                process_runner=self._run_compose_process,
             )
         except ComposeActionUncertain:
             raise AmbiguousDriverOutcome() from None
@@ -1119,6 +1130,7 @@ class SafeComposeRuntimeDriver:
         return observed.inspection
 
     def stop(self, identity: DriverIdentity) -> DriverInspection:
+        self._require_writer_authority()
         if type(identity) is not DriverIdentity:
             raise DriverValidationError()
         self._validate_docker_execution_context()
@@ -1709,17 +1721,31 @@ class SafeComposeRuntimeDriver:
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            return self._command_runner(
-                list(command),
-                cwd=self._working_directory,
-                env=self._environment,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=timeout,
-            )
+            with self._writer_guard.mutation_scope(self._writer_authority):
+                return self._command_runner(
+                    list(command),
+                    cwd=self._working_directory,
+                    env=self._environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout,
+                )
         except (OSError, subprocess.TimeoutExpired):
             raise AmbiguousDriverOutcome() from None
+
+    def _run_compose_process(
+        self,
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if command[0] == str(self._compose_executable) and "create" in command:
+            with self._writer_guard.mutation_scope(self._writer_authority):
+                return self._command_runner(command, **kwargs)
+        return self._command_runner(command, **kwargs)
+
+    def _require_writer_authority(self) -> None:
+        self._writer_guard.require_active(self._writer_authority)
 
     @staticmethod
     def _matches_public_identity(

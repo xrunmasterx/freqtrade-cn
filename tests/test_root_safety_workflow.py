@@ -15,6 +15,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "root-safety.yml"
 PLATFORM_RUNBOOK_PATH = REPO_ROOT / "docs" / "operations" / "platform-control.md"
+RUNTIME_SUPERVISOR_RUNBOOK_PATH = (
+    REPO_ROOT / "docs" / "operations" / "runtime-supervisor.md"
+)
+RUNTIME_SECRETS_RUNBOOK_PATH = REPO_ROOT / "docs" / "operations" / "runtime-secrets.md"
 SETUP_COMPOSE_ACTION = (
     "docker/setup-compose-action@4eb059ff7f16592f9c84d5ca339c53cb7c5064e2"
 )
@@ -51,6 +55,11 @@ RUNTIME_ROOT_COMMAND = (
     "test_actual_research_profile_paths_resolve_below_read_only_input -v"
 )
 BUILD_IMAGE_STEP = "Build integrated image"
+OFFLINE_SUPERVISOR_ACCEPTANCE_STEP = "Run Phase 2C offline supervisor acceptance"
+OFFLINE_SUPERVISOR_ACCEPTANCE_COMMAND = (
+    'python -S -m tools.runtime_supervisor.offline_acceptance --root-commit "${GITHUB_SHA}" '
+    '--image-id "${REVIEWED_IMAGE_ID}"'
+)
 BUILD_OPERATOR_IMAGE_STEP = "Build platform operator image"
 PLATFORM_CI_STEPS = (
     "Start platform PostgreSQL",
@@ -2129,6 +2138,36 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertLess(previous_position, position)
                 previous_position = position
 
+    def test_offline_supervisor_acceptance_immediately_follows_reviewed_image_build(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        build = named_workflow_step(workflow, BUILD_IMAGE_STEP)
+        acceptance = named_workflow_step(
+            workflow,
+            OFFLINE_SUPERVISOR_ACCEPTANCE_STEP,
+        )
+        operator_build = named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP)
+
+        build_position = workflow.index(build)
+        acceptance_position = workflow.index(acceptance)
+        self.assertEqual(build_position + len(build), acceptance_position)
+        self.assertLess(acceptance_position, workflow.index(operator_build))
+        self.assertTrue(
+            step_has_exact_line(
+                acceptance,
+                "          REVIEWED_IMAGE_ID: ${{ steps.reviewed-image.outputs.image_id }}",
+            )
+        )
+        self.assertEqual(
+            step_run_script(workflow, OFFLINE_SUPERVISOR_ACCEPTANCE_STEP).strip(),
+            OFFLINE_SUPERVISOR_ACCEPTANCE_COMMAND,
+        )
+        active_acceptance = active_step_text(acceptance).casefold()
+        for forbidden in ("docker", "compose", "curl"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, active_acceptance)
+
     def test_platform_ci_cleanup_is_unconditional(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         cleanup = named_workflow_step(workflow, PLATFORM_CI_STEPS[-1])
@@ -2639,6 +2678,7 @@ sleep() {
         for selector in (
             "tests/platform/test_platform_migrations.py",
             "tests/platform/test_runtime_repository.py",
+            "tests/platform/test_supervisor_repository.py",
         ):
             self.assertIn(selector, postgres)
         for selector in (
@@ -3050,10 +3090,24 @@ sleep() {
         for selector in (
             "tests/platform/test_template_repository_postgres.py",
             "tests/platform/test_runtime_registration_repository_postgres.py",
+            "tests/platform/test_supervisor_repository.py",
         ):
             self.assertIn(selector, postgres)
         self.assertIn("if skipped:", postgres)
         self.assertIn("platform PostgreSQL selectors skipped tests", postgres)
+
+        statements = executable_shell_statements(
+            step_run_script(workflow, PLATFORM_CI_STEPS[2])
+        )
+        pytest_statements = [
+            statement for statement in statements if statement.startswith("python -m pytest ")
+        ]
+        self.assertEqual(len(pytest_statements), 1)
+        self.assertEqual(
+            pytest_statements[0].count("tests/platform/test_supervisor_repository.py"),
+            1,
+        )
+        self.assertIn("--junitxml=", pytest_statements[0])
 
     def test_operator_acceptance_uses_normal_local_checkout_and_repeats_typed_commands(
         self,
@@ -3608,7 +3662,38 @@ sleep() {
         )
         self.assertLess(
             step.index("operator_invalid_arguments_phase_complete"),
+            step.index("operator_lifecycle_disabled_phase_complete"),
+        )
+        self.assertLess(
+            step.index("operator_lifecycle_disabled_phase_complete"),
             step.index("python - "),
+        )
+
+    def test_operator_lifecycle_mutation_is_disabled_without_creating_a_job(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        normalized = "\n".join(line.strip() for line in step.splitlines())
+
+        for statement in (
+            "runtime-registry start --actor platform-operator",
+            "--instance-id phase2-spot-paper-probe --expected-version 0",
+            "--idempotency-key root-safety-disabled-start",
+            'test "${lifecycle_status}" = "78"',
+            'test "${lifecycle_output}" = "runtime_supervisor_not_enabled"',
+            'test "${lifecycle_jobs_after}" = "${lifecycle_jobs_before}"',
+            "SELECT count(*) FROM runtime_lifecycle_jobs",
+        ):
+            with self.subTest(statement=statement):
+                self.assertIn(statement, normalized)
+        self.assertEqual(
+            step.count("SELECT count(*) FROM runtime_lifecycle_jobs"),
+            2,
+        )
+        self.assertEqual(
+            step.count("operator_lifecycle_disabled_phase_complete"),
+            1,
         )
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is unavailable")
@@ -4022,6 +4107,43 @@ docker() {
             "A Supervisor or dedicated infrastructure launcher must land before production use.",
         ):
             self.assertIn(statement, runbook)
+
+    def test_runtime_supervisor_runbooks_preserve_offline_and_cutover_boundaries(
+        self,
+    ) -> None:
+        self.assertTrue(RUNTIME_SUPERVISOR_RUNBOOK_PATH.is_file())
+        supervisor = RUNTIME_SUPERVISOR_RUNBOOK_PATH.read_text(encoding="utf-8")
+        secrets = RUNTIME_SECRETS_RUNBOOK_PATH.read_text(encoding="utf-8")
+        normalized_supervisor = re.sub(r"\s+", " ", supervisor)
+        normalized_secrets = re.sub(r"\s+", " ", secrets)
+
+        for statement in (
+            "Task 7A Offline Foundation",
+            "runtime_supervisor_not_enabled",
+            "Task 7A rejects every valid invocation with exit code 78",
+            "before Backend imports, database credentials, a connection or a lifecycle Job",
+            "registration status only",
+            "does not expose lifecycle Job status",
+            "one process, one Worker, and one runtime-mutation writer",
+            "A poisoned daemon must be replaced; it must not resume mutation in-process.",
+            "No real order is submitted",
+            "## Seven production blockers",
+            "## Recommended production topology",
+        ):
+            with self.subTest(statement=statement):
+                self.assertIn(statement, normalized_supervisor)
+        self.assertEqual(
+            len(re.findall(r"^\d+\. \*\*", supervisor, flags=re.MULTILINE)),
+            7,
+        )
+        for statement in (
+            "pre-cutover compatibility only",
+            "Supervisor-managed instances must not use direct Compose lifecycle commands",
+            "rejects lifecycle Job creation while the production Supervisor is disabled",
+            "[Runtime Supervisor](runtime-supervisor.md)",
+        ):
+            with self.subTest(statement=statement):
+                self.assertIn(statement, normalized_secrets)
 
 
 if __name__ == "__main__":

@@ -1127,10 +1127,16 @@ def _rendered_labels(snapshot: LaunchSnapshot) -> tuple[RenderedLabel, ...]:
     return tuple(RenderedLabel(name, values[name]) for name in sorted(values))
 
 
-def _expected_rendered(
+def render_container_policy(
     snapshot: LaunchSnapshot,
     authority: LaunchCompilationAuthority,
 ) -> RenderedContainerPolicy:
+    if (
+        type(snapshot) is not LaunchSnapshot
+        or type(authority) is not LaunchCompilationAuthority
+    ):
+        raise DriverValidationError()
+    validate_launch_snapshot(snapshot, authority)
     material_mounts = tuple(
         RenderedMount(
             RenderedMountKind.MATERIAL,
@@ -1213,5 +1219,5 @@ def validate_rendered_snapshot(
         raise DriverValidationError()
     rendered.__post_init__()
     validate_launch_snapshot(snapshot, expected_authority)
-    if rendered != _expected_rendered(snapshot, expected_authority):
+    if rendered != render_container_policy(snapshot, expected_authority):
         raise DriverPolicyError()
