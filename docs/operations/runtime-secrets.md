@@ -12,6 +12,15 @@ current endpoint, stopping a current Bot, or restoring a current database each
 requires explicit operator authorization at the time of execution. Approval for
 one service or maintenance window does not authorize another.
 
+The 8081/8082/8083 services and commands in this runbook are pre-cutover
+compatibility only. Supervisor-managed instances must not use direct Compose
+lifecycle commands. Task 7A also rejects lifecycle Job creation while the
+production Supervisor is disabled, so no pre-cutover trading intent can remain
+pending for later execution. A future reviewed cutover must route mutations
+through typed PostgreSQL jobs and the enabled Supervisor path. See
+[Runtime Supervisor](runtime-supervisor.md) for the current offline foundation,
+production blockers and cutover boundary.
+
 ## Versioned RuntimeAttempt secret resolution
 
 Phase 2B adds the `local-file-v1` provider for an exact set of secrets required
