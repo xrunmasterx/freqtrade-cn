@@ -229,6 +229,7 @@ class LaunchSnapshotTests(unittest.TestCase):
             HealthProfile,
             ReadOnlyMount,
             ResourceLimits,
+            RuntimeNetworkBinding,
             RuntimeUser,
             SecretMount,
             SecretPathEnvironmentBinding,
@@ -291,7 +292,105 @@ class LaunchSnapshotTests(unittest.TestCase):
                 retries=3,
             ),
             "resource_limits": ResourceLimits(1000, 536870912, 256),
+            "network_bindings": (
+                RuntimeNetworkBinding(
+                    role="access",
+                    network_name="runtime-phase2-paper-probe-access",
+                    runtime_alias="runtime-phase2-paper-probe-attempt-1",
+                    policy_digest="d" * 64,
+                    internal=False,
+                    requires_upstream_access=True,
+                    requires_platform_control=True,
+                ),
+                RuntimeNetworkBinding(
+                    role="private",
+                    network_name="runtime-phase2-paper-probe-private",
+                    runtime_alias="runtime-phase2-paper-probe-attempt-1",
+                    policy_digest="e" * 64,
+                    internal=True,
+                    requires_upstream_access=False,
+                    requires_platform_control=False,
+                ),
+            ),
         }
+
+    def test_network_bindings_are_typed_closed_and_match_identity(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            RuntimeNetworkBinding,
+        )
+
+        payload = self.valid_snapshot_payload()
+        access, private = payload["network_bindings"]
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            access.runtime_alias = "other"
+        with self.assertRaisesRegex(
+            DriverValidationError,
+            "^driver_validation_error$",
+        ):
+            RuntimeNetworkBinding.model_validate(dataclasses.asdict(access))
+
+        invalid_bindings = (
+            (dataclasses.asdict(access), private),
+            (
+                access,
+                dataclasses.replace(
+                    private,
+                    role="access",
+                    requires_platform_control=True,
+                ),
+            ),
+            (access,),
+        )
+        for bindings in invalid_bindings:
+            with self.subTest(bindings=bindings):
+                with self.assertRaisesRegex(
+                    DriverValidationError,
+                    "^driver_validation_error$",
+                ):
+                    LaunchSnapshot(**{**payload, "network_bindings": bindings})
+
+        for values in (
+            (True, True, True),
+            (False, False, True),
+            (False, True, False),
+        ):
+            with self.subTest(
+                internal=values[0],
+                upstream=values[1],
+                platform_control=values[2],
+            ):
+                with self.assertRaisesRegex(
+                    DriverValidationError,
+                    "^driver_validation_error$",
+                ):
+                    RuntimeNetworkBinding(
+                        role="access",
+                        network_name="runtime-phase2-paper-probe-access",
+                        runtime_alias="runtime-phase2-paper-probe-attempt-1",
+                        policy_digest="d" * 64,
+                        internal=values[0],
+                        requires_upstream_access=values[1],
+                        requires_platform_control=values[2],
+                    )
+
+        accepted = self.valid_snapshot_payload()
+        accepted["identity"] = dataclasses.replace(
+            accepted["identity"],
+            network_names=("aaa-private", "zzz-access"),
+        )
+        accepted["network_bindings"] = (
+            dataclasses.replace(
+                access,
+                network_name="zzz-access",
+            ),
+            dataclasses.replace(
+                private,
+                network_name="aaa-private",
+            ),
+        )
+        LaunchSnapshot(**accepted)
 
     def test_secret_path_environment_binding_is_frozen_strict_and_canonical(
         self,

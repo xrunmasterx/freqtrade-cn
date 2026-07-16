@@ -5,10 +5,19 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from tools.runtime_driver import (
+    AccessNetworkIdentityError,
+    AccessNetworkMemberMismatch,
+    AmbiguousNetworkOutcome,
     DriverIdentity,
     DriverInspection,
     DriverState,
+    DriverValidationError,
     LaunchSnapshot,
+    NetworkTransportError,
+    PlatformControlIdentityMismatch,
+    RuntimeAccessAttachmentMissing,
+    RuntimeAccessNetworkGate,
+    RuntimeAccessNetworkPlan,
     RuntimeDriver,
 )
 from tools.runtime_supervisor.domain import (
@@ -101,6 +110,12 @@ class PreparationPort(Protocol):
         secrets: object,
     ) -> LaunchSnapshot: ...
 
+    def compile_access_network_plan(
+        self,
+        revalidated: RevalidatedAttempt,
+        container_id: str,
+    ) -> RuntimeAccessNetworkPlan: ...
+
 
 class RuntimeSupervisorReconciler:
     def __init__(
@@ -108,10 +123,12 @@ class RuntimeSupervisorReconciler:
         repository: RepositoryPort,
         preparation: PreparationPort,
         driver: RuntimeDriver,
+        access_network_gate: RuntimeAccessNetworkGate,
     ) -> None:
         self._repository = repository
         self._preparation = preparation
         self._driver = driver
+        self._access_network_gate = access_network_gate
 
     def reconcile(self, job: ReconciliationJob) -> ReconciliationOutcome:
         latest = self._repository.get_latest_attempt_material(job.instance_id)
@@ -184,6 +201,12 @@ class RuntimeSupervisorReconciler:
         decision = decide_reconciliation(job.action, identity, observed)
 
         if decision is ReconciliationDecision.ADOPT:
+            if not self._verify_active_access_network(job, revalidated, observed):
+                return self._block(
+                    job,
+                    identity.attempt_id,
+                    "runtime_access_network_invalid",
+                )
             self._repository.record_healthy(job.job_id, identity.attempt_id)
             return _outcome(job, decision, identity.attempt_id)
         if decision is ReconciliationDecision.CONTINUE_OBSERVING:
@@ -290,7 +313,11 @@ class RuntimeSupervisorReconciler:
             if not begin:
                 current = self._driver.inspect(identity)
                 if current.state is not DriverState.ABSENT:
-                    return self._record_launch_observation(job, identity, current)
+                    return self._record_launch_observation(
+                        job,
+                        revalidated,
+                        current,
+                    )
 
             if begin:
                 if prepared_attempt_id is None:
@@ -315,14 +342,15 @@ class RuntimeSupervisorReconciler:
                 )
 
             observed = self._driver.launch(snapshot)
-            return self._record_launch_observation(job, identity, observed)
+            return self._record_launch_observation(job, revalidated, observed)
 
     def _record_launch_observation(
         self,
         job: ReconciliationJob,
-        identity: DriverIdentity,
+        revalidated: RevalidatedAttempt,
         observed: DriverInspection,
     ) -> ReconciliationOutcome:
+        identity = revalidated.identity
         if observed.state is DriverState.UNKNOWN:
             return self._block(job, identity.attempt_id, "runtime_identity_unknown")
         if observed.state is not DriverState.ABSENT and not identity_matches(
@@ -339,6 +367,12 @@ class RuntimeSupervisorReconciler:
             ReconciliationAction.START, identity, observed
         )
         if decision is ReconciliationDecision.ADOPT:
+            if not self._verify_active_access_network(job, revalidated, observed):
+                return self._block(
+                    job,
+                    identity.attempt_id,
+                    "runtime_access_network_invalid",
+                )
             self._repository.record_healthy(job.job_id, identity.attempt_id)
             return _outcome(job, decision, identity.attempt_id)
         if decision is ReconciliationDecision.CONTINUE_OBSERVING:
@@ -353,6 +387,40 @@ class RuntimeSupervisorReconciler:
             identity.attempt_id,
             "runtime_launch_failed",
         )
+
+    def _verify_active_access_network(
+        self,
+        job: ReconciliationJob,
+        revalidated: RevalidatedAttempt,
+        observed: DriverInspection,
+    ) -> bool:
+        container_id = observed.container_id
+        if container_id is None:
+            return False
+        try:
+            plan = self._preparation.compile_access_network_plan(
+                revalidated,
+                container_id,
+            )
+            if type(plan) is not RuntimeAccessNetworkPlan:
+                raise DriverValidationError()
+            if (
+                plan.runtime_member.runtime_identity != revalidated.identity
+                or plan.runtime_member.container_id != container_id
+            ):
+                raise DriverValidationError()
+            self._access_network_gate.verify_active(plan)
+        except (
+            AccessNetworkIdentityError,
+            AccessNetworkMemberMismatch,
+            AmbiguousNetworkOutcome,
+            DriverValidationError,
+            NetworkTransportError,
+            PlatformControlIdentityMismatch,
+            RuntimeAccessAttachmentMissing,
+        ):
+            return False
+        return True
 
     def _block(
         self,

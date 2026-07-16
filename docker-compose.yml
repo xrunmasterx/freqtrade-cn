@@ -109,6 +109,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    labels:
+      io.freqtrade.platform.role: platform-control
+      io.freqtrade.platform.identity-revision: platform-control-v1
     networks:
       - platform-db
       - platform-ingress

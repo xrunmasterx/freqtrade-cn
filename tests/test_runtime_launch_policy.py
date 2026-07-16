@@ -305,6 +305,30 @@ class RuntimeLaunchPolicyTests(unittest.TestCase):
                 requires_upstream_access=True,
                 requires_platform_control=True,
             )
+        with self.assertRaises(ValueError):
+            NetworkRule(
+                role="private",
+                identity_source=NetworkIdentitySource.INSTANCE_ID,
+                derivation=NetworkNameDerivation.SHA256_PREFIX_V1,
+                prefix="runtime-",
+                digest_characters=24,
+                suffix="-private",
+                internal=False,
+                requires_upstream_access=False,
+                requires_platform_control=False,
+            )
+        with self.assertRaises(ValueError):
+            NetworkRule(
+                role="access",
+                identity_source=NetworkIdentitySource.INSTANCE_ID,
+                derivation=NetworkNameDerivation.SHA256_PREFIX_V1,
+                prefix="runtime-",
+                digest_characters=24,
+                suffix="-access",
+                internal=False,
+                requires_upstream_access=True,
+                requires_platform_control=False,
+            )
 
     def test_paper_probe_policy_is_exact_and_arrays_are_canonical(self) -> None:
         mutations = []

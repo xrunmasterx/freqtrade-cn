@@ -13,7 +13,15 @@ from tools.compose_runtime import (
     _run_validated_snapshot_launch,
 )
 from tools.runtime_driver import (
+    AccessNetworkIdentity,
+    AccessNetworkIdentityError,
+    AccessNetworkLabel,
+    AccessNetworkMember,
+    AccessNetworkMemberMismatch,
+    AccessNetworkObservation,
+    AccessNetworkState,
     AmbiguousDriverOutcome,
+    AmbiguousNetworkOutcome,
     DriverHealth,
     DriverIdentity,
     DriverIdentityMismatch,
@@ -26,6 +34,13 @@ from tools.runtime_driver import (
     HealthObservation,
     HealthProfile,
     LaunchSnapshot,
+    NetworkTransportError,
+    PlatformControlIdentity,
+    PlatformControlIdentityProvider,
+    PlatformControlIdentityMismatch,
+    RuntimeAccessAttachmentMissing,
+    RuntimeAccessMemberIdentity,
+    RuntimeAccessNetworkDriver,
 )
 from tools.runtime_preparation_lease import ActiveLaunchAuthorityLease
 from tools.runtime_snapshot import (
@@ -38,6 +53,15 @@ from tools.runtime_snapshot import (
     validate_launch_snapshot,
     validate_rendered_snapshot,
 )
+from tools.runtime_access_network import (
+    AccessNetworkAction,
+    decide_access_network_preparation,
+    decide_access_network_removal,
+    decide_active_access_network,
+    compile_access_network_identity,
+    compile_runtime_access_member,
+    expected_access_network_labels,
+)
 
 
 _SERVICE_NAME = "runtime"
@@ -46,11 +70,20 @@ _RENDER_TIMEOUT_SECONDS = 30
 _CREATE_TIMEOUT_SECONDS = 60
 _START_TIMEOUT_SECONDS = 60
 _STOP_TIMEOUT_SECONDS = 60
+_NETWORK_MUTATION_TIMEOUT_SECONDS = 60
 _MAX_HEALTH_START_PERIOD_SECONDS = 300
 _MAX_HEALTH_INTERVAL_SECONDS = 300
 _MAX_HEALTH_TIMEOUT_SECONDS = 60
 _MAX_HEALTH_RETRIES = 20
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+_NETWORK_ID = re.compile(r"[0-9a-f]{64}")
+_NETWORK_OBSERVATION_ERRORS = (
+    AccessNetworkIdentityError,
+    AccessNetworkMemberMismatch,
+    DriverValidationError,
+    NetworkTransportError,
+    PlatformControlIdentityMismatch,
+)
 _ALLOWED_ENVIRONMENT_NAMES = frozenset({"DOCKER_CONTEXT", "DOCKER_HOST", "SYSTEMROOT"})
 _FORBIDDEN_ENVIRONMENT_NAMES = frozenset(
     {
@@ -106,6 +139,10 @@ _IDENTITY_LABELS = {
     "spec": "io.freqtrade.runtime.runtime-spec-digest",
     "state": "io.freqtrade.runtime.state-allocation-id",
 }
+_PLATFORM_CONTROL_LABELS = {
+    "io.freqtrade.platform.identity-revision": "platform-control-v1",
+    "io.freqtrade.platform.role": "platform-control",
+}
 
 
 ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -123,7 +160,6 @@ class DriverAuthorityResolver(Protocol):
         identity: DriverIdentity,
         profile_id: str,
     ) -> HealthProfile: ...
-
 
 @dataclass(frozen=True, slots=True)
 class _EngineObservation:
@@ -220,7 +256,13 @@ def _render_snapshot_policy(
     )
 
 
-def _compose_document(rendered: RenderedContainerPolicy) -> str:
+def _compose_document(
+    rendered: RenderedContainerPolicy,
+    snapshot: LaunchSnapshot,
+) -> str:
+    bindings = {binding.network_name: binding for binding in snapshot.network_bindings}
+    if tuple(sorted(bindings)) != rendered.network_names:
+        raise DriverPolicyError()
     service = {
         "cap_drop": list(rendered.cap_drop),
         "command": [],
@@ -239,7 +281,10 @@ def _compose_document(rendered: RenderedContainerPolicy) -> str:
         "image": rendered.image_id,
         "labels": {label.name: label.value for label in rendered.labels},
         "mem_limit": rendered.resource_limits.memory_bytes,
-        "networks": {name: None for name in rendered.network_names},
+        "networks": {
+            name: {"aliases": [bindings[name].runtime_alias]}
+            for name in rendered.network_names
+        },
         "pids_limit": rendered.resource_limits.pids_limit,
         "privileged": False,
         "pull_policy": "never",
@@ -313,9 +358,11 @@ def _parse_actual_render(
         definition = actual_network_definitions[name]
         if (
             type(definition) is not dict
-            or set(definition) != {"external", "name"}
+            or set(definition)
+            not in ({"external", "name"}, {"external", "ipam", "name"})
             or definition.get("external") is not True
             or definition.get("name") != name
+            or ("ipam" in definition and definition["ipam"] != {})
         ):
             raise DriverPolicyError()
     expected_mounts = {str(mount.target): mount for mount in expected.mounts}
@@ -324,18 +371,19 @@ def _parse_actual_render(
         raise DriverPolicyError()
     actual_mounts = []
     for raw_mount in raw_mounts:
-        if (
-            type(raw_mount) is not dict
-            or set(raw_mount) != {"bind", "read_only", "source", "target", "type"}
-            or raw_mount.get("type") != "bind"
-        ):
+        if type(raw_mount) is not dict or raw_mount.get("type") != "bind":
             raise DriverPolicyError()
         source = raw_mount.get("source")
         target = raw_mount.get("target")
         expected_mount = expected_mounts.get(target)
         bind = raw_mount.get("bind")
+        expected_keys = {"bind", "source", "target", "type"}
+        if expected_mount is not None and expected_mount.read_only:
+            expected_keys.add("read_only")
         if (
             expected_mount is None
+            or set(raw_mount) not in (expected_keys, expected_keys | {"read_only"})
+            or raw_mount.get("read_only", False) is not expected_mount.read_only
             or type(source) is not str
             or type(bind) is not dict
             or set(bind) != {"create_host_path"}
@@ -348,7 +396,7 @@ def _parse_actual_render(
                 expected_mount.role,
                 Path(source),
                 PurePosixPath(target),
-                raw_mount.get("read_only"),
+                raw_mount.get("read_only", False),
             )
         )
 
@@ -363,9 +411,13 @@ def _parse_actual_render(
         or type(networks) is not dict
     ):
         raise DriverPolicyError()
+    expected_network_attachments = {
+        binding.network_name: {"aliases": [binding.runtime_alias]}
+        for binding in snapshot.network_bindings
+    }
     if (
         set(health) != {"interval", "retries", "start_period", "test", "timeout"}
-        or any(value not in (None, {}) for value in networks.values())
+        or networks != expected_network_attachments
         or ("name" in document and document["name"] != snapshot.identity.project_name)
     ):
         raise DriverPolicyError()
@@ -380,6 +432,13 @@ def _parse_actual_render(
         cpu_millis = int(Decimal(str(service.get("cpus"))) * 1000)
     except (InvalidOperation, ValueError):
         raise DriverPolicyError() from None
+    memory_bytes = service.get("mem_limit")
+    if type(memory_bytes) is str:
+        if not memory_bytes.isascii() or not memory_bytes.isdecimal():
+            raise DriverPolicyError()
+        memory_bytes = int(memory_bytes)
+    if type(memory_bytes) is not int or memory_bytes <= 0:
+        raise DriverPolicyError()
 
     rendered = RenderedContainerPolicy(
         identity=snapshot.identity,
@@ -406,7 +465,7 @@ def _parse_actual_render(
         ),
         resource_limits=snapshot.resource_limits.__class__(
             cpu_millis=cpu_millis,
-            memory_bytes=service.get("mem_limit"),
+            memory_bytes=memory_bytes,
             pids_limit=service.get("pids_limit"),
         ),
         network_names=tuple(sorted(networks)),
@@ -432,6 +491,147 @@ def _parse_actual_render(
     return rendered
 
 
+class SafePlatformControlIdentityProvider(PlatformControlIdentityProvider):
+    def __init__(
+        self,
+        *,
+        docker_executable: Path,
+        environment: Mapping[str, str],
+        approved_docker_host: str,
+        approved_docker_context: str,
+        approved_system_root: str | None,
+        working_directory: Path,
+        expected_image_id: str,
+        command_runner: ProcessRunner = subprocess.run,
+    ) -> None:
+        self._docker_executable = docker_executable
+        self._environment = dict(environment)
+        self._approved_docker_host = approved_docker_host
+        self._approved_docker_context = approved_docker_context
+        self._approved_system_root = approved_system_root
+        self._working_directory = working_directory
+        self._expected_image_id = expected_image_id
+        self._command_runner = command_runner
+
+    def resolve_platform_control_identity(self) -> PlatformControlIdentity:
+        self._validate_execution_context()
+        listed = self._run_read_only(
+            (
+                str(self._docker_executable),
+                "container",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--filter",
+                "name=^/freqtrade-cn-platform-control$",
+                "--format",
+                "{{.ID}}",
+            )
+        )
+        identifiers = tuple(line for line in listed.stdout.splitlines() if line)
+        if len(identifiers) != 1 or _CONTAINER_ID.fullmatch(identifiers[0]) is None:
+            raise PlatformControlIdentityMismatch()
+        container_id = identifiers[0]
+        inspected = self._run_read_only(
+            (
+                str(self._docker_executable),
+                "container",
+                "inspect",
+                container_id,
+            )
+        )
+        try:
+            payload = json.loads(inspected.stdout)
+            if (
+                type(payload) is not list
+                or len(payload) != 1
+                or type(payload[0]) is not dict
+            ):
+                raise ValueError
+            document = payload[0]
+            config = document.get("Config")
+            labels = config.get("Labels") if type(config) is dict else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise NetworkTransportError() from None
+        if (
+            document.get("Id") != container_id
+            or document.get("Name", "").removeprefix("/")
+            != "freqtrade-cn-platform-control"
+            or document.get("Image") != self._expected_image_id
+            or type(labels) is not dict
+            or labels.get("com.docker.compose.project") != "freqtrade-cn"
+            or labels.get("com.docker.compose.service") != "platform-control"
+            or labels.get("io.freqtrade.platform.role")
+            != _PLATFORM_CONTROL_LABELS["io.freqtrade.platform.role"]
+            or labels.get("io.freqtrade.platform.identity-revision")
+            != _PLATFORM_CONTROL_LABELS["io.freqtrade.platform.identity-revision"]
+        ):
+            raise PlatformControlIdentityMismatch()
+        return PlatformControlIdentity(
+            container_id=container_id,
+            container_name="freqtrade-cn-platform-control",
+            image_id=self._expected_image_id,
+            compose_project="freqtrade-cn",
+            compose_service="platform-control",
+            identity_revision="platform-control-v1",
+        )
+
+    def _validate_execution_context(self) -> None:
+        if (
+            type(self._docker_executable) is not type(Path())
+            or not self._docker_executable.is_absolute()
+            or ".." in self._docker_executable.parts
+            or type(self._working_directory) is not type(Path())
+            or not self._working_directory.is_absolute()
+            or not self._working_directory.is_dir()
+            or self._working_directory.is_symlink()
+            or type(self._environment) is not dict
+            or any(
+                type(name) is not str or type(value) is not str or not value
+                for name, value in self._environment.items()
+            )
+        ):
+            raise DriverPolicyError()
+        folded = {str(name).casefold(): name for name in self._environment}
+        if (
+            len(folded) != len(self._environment)
+            or any(
+                name.casefold() in folded for name in _FORBIDDEN_ENVIRONMENT_NAMES
+            )
+            or any(
+                name.upper() not in _ALLOWED_ENVIRONMENT_NAMES
+                for name in self._environment
+            )
+            or self._approved_docker_host
+            not in ("npipe:////./pipe/docker_engine", "unix:///var/run/docker.sock")
+            or self._environment.get("DOCKER_HOST") != self._approved_docker_host
+            or self._environment.get("DOCKER_CONTEXT")
+            != self._approved_docker_context
+            or self._environment.get("SYSTEMROOT") != self._approved_system_root
+        ):
+            raise DriverPolicyError()
+
+    def _run_read_only(
+        self,
+        command: tuple[str, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            completed = self._command_runner(
+                list(command),
+                cwd=self._working_directory,
+                env=self._environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=_INSPECT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise NetworkTransportError() from None
+        if completed.returncode != 0:
+            raise NetworkTransportError()
+        return completed
+
+
 class SafeComposeRuntimeDriver:
     def __init__(
         self,
@@ -445,6 +645,8 @@ class SafeComposeRuntimeDriver:
         working_directory: Path,
         temporary_directory: Path,
         authority_resolver: DriverAuthorityResolver,
+        platform_control_identity_provider: PlatformControlIdentityProvider,
+        access_network_driver: RuntimeAccessNetworkDriver | None = None,
         command_runner: ProcessRunner = subprocess.run,
     ) -> None:
         self._docker_executable = docker_executable
@@ -456,7 +658,227 @@ class SafeComposeRuntimeDriver:
         self._working_directory = working_directory
         self._temporary_directory = temporary_directory
         self._authority_resolver = authority_resolver
+        self._platform_control_identity_provider = (
+            platform_control_identity_provider
+        )
+        self._access_network_driver = (
+            self if access_network_driver is None else access_network_driver
+        )
         self._command_runner = command_runner
+
+    def inspect_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity | None,
+    ) -> AccessNetworkObservation:
+        if (
+            type(identity) is not AccessNetworkIdentity
+            or type(platform_control) is not PlatformControlIdentity
+            or (runtime is not None and type(runtime) is not RuntimeAccessMemberIdentity)
+        ):
+            raise DriverValidationError()
+        self._validate_docker_execution_context()
+        self._inspect_platform_control(platform_control)
+        if runtime is not None:
+            self._inspect_runtime_member(runtime)
+        return self._inspect_access_network(identity, platform_control, runtime)
+
+    def ensure_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity | None = None,
+    ) -> AccessNetworkObservation:
+        if runtime is not None and type(runtime) is not RuntimeAccessMemberIdentity:
+            raise DriverValidationError()
+        created = False
+        connected = False
+        created_network_id: str | None = None
+        for _step in range(3):
+            try:
+                observed = self.inspect_access_network(
+                    identity,
+                    platform_control,
+                    runtime,
+                )
+            except _NETWORK_OBSERVATION_ERRORS:
+                if created or connected:
+                    raise AmbiguousNetworkOutcome() from None
+                raise
+            if (
+                created_network_id is not None
+                and observed.network_id != created_network_id
+            ):
+                raise AmbiguousNetworkOutcome()
+            action = decide_access_network_preparation(
+                identity,
+                platform_control,
+                observed,
+                runtime,
+            )
+            if action is AccessNetworkAction.READY:
+                return observed
+            if action is AccessNetworkAction.CREATE:
+                if created:
+                    raise AmbiguousNetworkOutcome()
+                try:
+                    final = self.inspect_access_network(
+                        identity,
+                        platform_control,
+                        runtime,
+                    )
+                except _NETWORK_OBSERVATION_ERRORS:
+                    if created or connected:
+                        raise AmbiguousNetworkOutcome() from None
+                    raise
+                if final.state is not AccessNetworkState.ABSENT:
+                    raise AmbiguousNetworkOutcome()
+                command = [
+                    str(self._docker_executable),
+                    "network",
+                    "create",
+                    "--driver",
+                    "bridge",
+                    "--scope",
+                    "local",
+                ]
+                if identity.internal:
+                    command.append("--internal")
+                for label in expected_access_network_labels(identity):
+                    command.extend(("--label", f"{label.name}={label.value}"))
+                command.append(identity.network_name)
+                completed = self._run_network_mutation(tuple(command))
+                if (
+                    completed.returncode != 0
+                    or _NETWORK_ID.fullmatch(completed.stdout.strip()) is None
+                ):
+                    raise AmbiguousNetworkOutcome()
+                created_network_id = completed.stdout.strip()
+                created = True
+                continue
+            if action is AccessNetworkAction.CONNECT_PLATFORM_CONTROL:
+                if connected or observed.network_id is None:
+                    raise AmbiguousNetworkOutcome()
+                try:
+                    final = self.inspect_access_network(
+                        identity,
+                        platform_control,
+                        runtime,
+                    )
+                except _NETWORK_OBSERVATION_ERRORS:
+                    if created or connected:
+                        raise AmbiguousNetworkOutcome() from None
+                    raise
+                if (
+                    final.network_id != observed.network_id
+                    or decide_access_network_preparation(
+                        identity,
+                        platform_control,
+                        final,
+                        runtime,
+                    )
+                    is not AccessNetworkAction.CONNECT_PLATFORM_CONTROL
+                ):
+                    raise AmbiguousNetworkOutcome()
+                try:
+                    self._inspect_platform_control(platform_control)
+                except _NETWORK_OBSERVATION_ERRORS:
+                    if created or connected:
+                        raise AmbiguousNetworkOutcome() from None
+                    raise
+                completed = self._run_network_mutation(
+                    (
+                        str(self._docker_executable),
+                        "network",
+                        "connect",
+                        "--alias",
+                        "platform-control",
+                        observed.network_id,
+                        platform_control.container_id,
+                    )
+                )
+                if completed.returncode != 0:
+                    raise AmbiguousNetworkOutcome()
+                connected = True
+                continue
+            raise AmbiguousNetworkOutcome()
+        raise AmbiguousNetworkOutcome()
+
+    def verify_created_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity,
+    ) -> AccessNetworkObservation:
+        observed = self.inspect_access_network(identity, platform_control, runtime)
+        if (
+            decide_active_access_network(
+                identity,
+                platform_control,
+                runtime,
+                observed,
+            )
+            is not AccessNetworkAction.READY
+        ):
+            raise RuntimeAccessAttachmentMissing()
+        platform_member = next(
+            member
+            for member in observed.members
+            if member.container_id == platform_control.container_id
+        )
+        if platform_member.endpoint_id is None:
+            raise RuntimeAccessAttachmentMissing()
+        return observed
+
+    def verify_active_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity,
+    ) -> AccessNetworkObservation:
+        observed = self.verify_created_access_network(
+            identity,
+            platform_control,
+            runtime,
+        )
+        if any(member.endpoint_id is None for member in observed.members):
+            raise RuntimeAccessAttachmentMissing()
+        return observed
+
+    def remove_access_network_if_empty(
+        self,
+        identity: AccessNetworkIdentity,
+    ) -> AccessNetworkObservation:
+        if type(identity) is not AccessNetworkIdentity:
+            raise DriverValidationError()
+        self._validate_docker_execution_context()
+        observed = self._inspect_access_network(identity, None, None)
+        action = decide_access_network_removal(identity, observed)
+        if action is AccessNetworkAction.ALREADY_ABSENT:
+            return observed
+        if action is not AccessNetworkAction.REMOVE or observed.network_id is None:
+            raise AmbiguousNetworkOutcome()
+        final = self._inspect_access_network(identity, None, None)
+        if final != observed:
+            raise AmbiguousNetworkOutcome()
+        completed = self._run_network_mutation(
+            (
+                str(self._docker_executable),
+                "network",
+                "rm",
+                observed.network_id,
+            )
+        )
+        if completed.returncode != 0:
+            raise AmbiguousNetworkOutcome()
+        try:
+            removed = self._inspect_access_network(identity, None, None)
+        except _NETWORK_OBSERVATION_ERRORS:
+            raise AmbiguousNetworkOutcome() from None
+        if removed.state is not AccessNetworkState.ABSENT:
+            raise AmbiguousNetworkOutcome()
+        return AccessNetworkObservation.absent()
 
     def inspect(self, identity: DriverIdentity) -> DriverInspection:
         if type(identity) is not DriverIdentity:
@@ -495,7 +917,21 @@ class SafeComposeRuntimeDriver:
             validate_launch_snapshot(snapshot, authority)
             expected_render = _render_snapshot_policy(snapshot, authority)
             validate_rendered_snapshot(expected_render, snapshot, authority)
-        except (DriverValidationError, DriverPolicyError):
+            platform_control = (
+                self._platform_control_identity_provider.resolve_platform_control_identity()
+            )
+            if type(platform_control) is not PlatformControlIdentity:
+                raise DriverPolicyError()
+            access_identity = compile_access_network_identity(snapshot)
+        except (
+            AccessNetworkIdentityError,
+            AccessNetworkMemberMismatch,
+            AmbiguousNetworkOutcome,
+            DriverValidationError,
+            DriverPolicyError,
+            NetworkTransportError,
+            PlatformControlIdentityMismatch,
+        ):
             raise
         except Exception:
             raise DriverPolicyError() from None
@@ -507,7 +943,15 @@ class SafeComposeRuntimeDriver:
             try:
                 actual_render = _parse_actual_render(path, snapshot, authority)
                 validate_rendered_snapshot(actual_render, snapshot, authority)
-            except (DriverValidationError, DriverPolicyError):
+            except (
+                AccessNetworkIdentityError,
+                AccessNetworkMemberMismatch,
+                AmbiguousNetworkOutcome,
+                DriverValidationError,
+                DriverPolicyError,
+                NetworkTransportError,
+                PlatformControlIdentityMismatch,
+            ):
                 raise
             except Exception:
                 raise DriverPolicyError() from None
@@ -520,7 +964,20 @@ class SafeComposeRuntimeDriver:
                     raise DriverPolicyError()
                 validate_rendered_snapshot(actual_render, snapshot, authority)
                 lease.revalidate_for_runtime_action()
-            except (DriverValidationError, DriverPolicyError):
+                self._access_network_driver.ensure_access_network(
+                    access_identity,
+                    platform_control,
+                )
+                lease.revalidate_for_runtime_action()
+            except (
+                AccessNetworkIdentityError,
+                AccessNetworkMemberMismatch,
+                AmbiguousNetworkOutcome,
+                DriverValidationError,
+                DriverPolicyError,
+                NetworkTransportError,
+                PlatformControlIdentityMismatch,
+            ):
                 raise
             except Exception:
                 raise DriverPolicyError() from None
@@ -535,7 +992,7 @@ class SafeComposeRuntimeDriver:
                 compose_command=(str(self._compose_executable),),
                 compose_files=(),
                 profiles=(),
-                override=_compose_document(expected_render),
+                override=_compose_document(expected_render, snapshot),
                 environment=self._environment,
                 validate_pre_render=self._validate_compose_launch_context,
                 validate_rendered_snapshot=validate_actual,
@@ -560,7 +1017,16 @@ class SafeComposeRuntimeDriver:
             raise DriverTransportError() from None
         except OSError:
             raise DriverTransportError() from None
-        except (DriverValidationError, DriverPolicyError, DriverObjectOccupied):
+        except (
+            AccessNetworkIdentityError,
+            AccessNetworkMemberMismatch,
+            AmbiguousNetworkOutcome,
+            DriverValidationError,
+            DriverPolicyError,
+            DriverObjectOccupied,
+            NetworkTransportError,
+            PlatformControlIdentityMismatch,
+        ):
             raise
         except ValueError:
             raise DriverPolicyError() from None
@@ -585,6 +1051,15 @@ class SafeComposeRuntimeDriver:
         if container_id is None:
             raise AmbiguousDriverOutcome()
         try:
+            runtime_member = compile_runtime_access_member(snapshot, container_id)
+            self._access_network_driver.verify_created_access_network(
+                access_identity,
+                platform_control,
+                runtime_member,
+            )
+        except Exception:
+            raise AmbiguousDriverOutcome() from None
+        try:
             final_created = self._inspect_engine(snapshot.identity)
         except DriverTransportError:
             raise AmbiguousDriverOutcome() from None
@@ -608,6 +1083,11 @@ class SafeComposeRuntimeDriver:
                 raise DriverPolicyError()
             validate_rendered_snapshot(actual_render, snapshot, authority)
             lease.revalidate_for_runtime_action()
+            self._access_network_driver.verify_created_access_network(
+                access_identity,
+                platform_control,
+                runtime_member,
+            )
         except Exception:
             raise AmbiguousDriverOutcome() from None
         started = self._run_mutation(
@@ -626,6 +1106,14 @@ class SafeComposeRuntimeDriver:
             snapshot.launch_authority_digest,
         ):
             raise AmbiguousDriverOutcome()
+        try:
+            self._access_network_driver.verify_active_access_network(
+                access_identity,
+                platform_control,
+                runtime_member,
+            )
+        except Exception:
+            raise AmbiguousDriverOutcome() from None
         return observed.inspection
 
     def stop(self, identity: DriverIdentity) -> DriverInspection:
@@ -635,7 +1123,7 @@ class SafeComposeRuntimeDriver:
         observation = self._inspect_engine(identity)
         if observation is None:
             return DriverInspection.absent()
-        if not self._matches_runtime(observation, identity):
+        if not self._matches_immutable_runtime(observation, identity):
             raise DriverIdentityMismatch()
         if observation.inspection.state is DriverState.EXITED:
             return observation.inspection
@@ -645,7 +1133,7 @@ class SafeComposeRuntimeDriver:
             container_id is None
             or final_observation is None
             or final_observation.inspection.container_id != container_id
-            or not self._matches_runtime(final_observation, identity)
+            or not self._matches_immutable_runtime(final_observation, identity)
         ):
             raise DriverIdentityMismatch()
         self._validate_docker_execution_context()
@@ -661,7 +1149,7 @@ class SafeComposeRuntimeDriver:
             raise AmbiguousDriverOutcome() from None
         if terminal is None:
             return DriverInspection.absent()
-        if not self._matches_runtime(terminal, identity):
+        if not self._matches_immutable_runtime(terminal, identity):
             raise DriverIdentityMismatch()
         if terminal.inspection.state is not DriverState.EXITED:
             raise AmbiguousDriverOutcome()
@@ -808,6 +1296,291 @@ class SafeComposeRuntimeDriver:
             or self._temporary_directory.is_symlink()
         ):
             raise DriverPolicyError()
+
+    def _inspect_platform_control(
+        self,
+        identity: PlatformControlIdentity,
+    ) -> dict:
+        document = self._container_document_by_id(identity.container_id)
+        config = document.get("Config")
+        labels = config.get("Labels") if type(config) is dict else None
+        if (
+            document.get("Id") != identity.container_id
+            or document.get("Name", "").removeprefix("/") != identity.container_name
+            or document.get("Image") != identity.image_id
+            or type(labels) is not dict
+            or labels.get("com.docker.compose.project") != identity.compose_project
+            or labels.get("com.docker.compose.service") != identity.compose_service
+            or labels.get("io.freqtrade.platform.role")
+            != _PLATFORM_CONTROL_LABELS["io.freqtrade.platform.role"]
+            or labels.get("io.freqtrade.platform.identity-revision")
+            != identity.identity_revision
+        ):
+            raise PlatformControlIdentityMismatch()
+        return document
+
+    def _inspect_runtime_member(
+        self,
+        runtime: RuntimeAccessMemberIdentity,
+    ) -> dict:
+        document = self._container_document_by_id(runtime.container_id)
+        try:
+            observation = self._observation_from_document(document)
+        except DriverTransportError:
+            raise NetworkTransportError() from None
+        if (
+            observation.inspection.container_id != runtime.container_id
+            or not self._matches_runtime(observation, runtime.runtime_identity)
+            or observation.compose_project != runtime.compose_project
+            or observation.compose_service != runtime.compose_service
+        ):
+            raise AccessNetworkIdentityError()
+        return document
+
+    def _container_document_by_id(self, container_id: str) -> dict:
+        if type(container_id) is not str or _CONTAINER_ID.fullmatch(container_id) is None:
+            raise DriverValidationError()
+        completed = self._run_network_read_only(
+            (
+                str(self._docker_executable),
+                "container",
+                "inspect",
+                container_id,
+            )
+        )
+        try:
+            payload = json.loads(completed.stdout)
+            if (
+                type(payload) is not list
+                or len(payload) != 1
+                or type(payload[0]) is not dict
+                or payload[0].get("Id") != container_id
+            ):
+                raise ValueError
+            return payload[0]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise NetworkTransportError() from None
+
+    def _inspect_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity | None,
+        runtime: RuntimeAccessMemberIdentity | None,
+    ) -> AccessNetworkObservation:
+        listed = self._run_network_read_only(
+            (
+                str(self._docker_executable),
+                "network",
+                "ls",
+                "--no-trunc",
+                "--filter",
+                f"name=^{re.escape(identity.network_name)}$",
+                "--format",
+                "{{.ID}}",
+            )
+        )
+        identifiers = tuple(line for line in listed.stdout.splitlines() if line)
+        if not identifiers:
+            return AccessNetworkObservation.absent()
+        if len(identifiers) != 1 or _NETWORK_ID.fullmatch(identifiers[0]) is None:
+            raise NetworkTransportError()
+        network_id = identifiers[0]
+        inspected = self._run_network_read_only(
+            (
+                str(self._docker_executable),
+                "network",
+                "inspect",
+                network_id,
+            )
+        )
+        try:
+            payload = json.loads(inspected.stdout)
+            if (
+                type(payload) is not list
+                or len(payload) != 1
+                or type(payload[0]) is not dict
+                or payload[0].get("Id") != network_id
+            ):
+                raise ValueError
+            document = payload[0]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise NetworkTransportError() from None
+
+        active = document.get("Containers")
+        labels = document.get("Labels")
+        options = document.get("Options")
+        ipam = document.get("IPAM")
+        config_from = document.get("ConfigFrom")
+        if (
+            type(active) is not dict
+            or type(labels) is not dict
+            or options
+            not in (
+                {},
+                {
+                    "com.docker.network.enable_ipv4": "true",
+                    "com.docker.network.enable_ipv6": "false",
+                },
+            )
+            or type(ipam) is not dict
+            or ipam.get("Driver") != "default"
+            or ipam.get("Options") not in (None, {})
+            or type(ipam.get("Config")) is not list
+            or config_from not in (None, {}, {"Network": ""})
+            or ("EnableIPv4" in document and document["EnableIPv4"] is not True)
+            or ("EnableIPv6" in document and document["EnableIPv6"] is not False)
+        ):
+            raise NetworkTransportError()
+        for config in ipam["Config"]:
+            if (
+                type(config) is not dict
+                or not set(config) <= {"Gateway", "Subnet"}
+                or type(config.get("Subnet")) is not str
+                or ("Gateway" in config and type(config["Gateway"]) is not str)
+            ):
+                raise NetworkTransportError()
+
+        configured = self._run_network_read_only(
+            (
+                str(self._docker_executable),
+                "container",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--filter",
+                f"network={network_id}",
+                "--format",
+                "{{.ID}}\t{{.Names}}",
+            )
+        )
+        configured_names: dict[str, str] = {}
+        for line in configured.stdout.splitlines():
+            if not line:
+                continue
+            parts = line.split("\t")
+            if (
+                len(parts) != 2
+                or _CONTAINER_ID.fullmatch(parts[0]) is None
+                or not parts[1]
+                or parts[0] in configured_names
+            ):
+                raise NetworkTransportError()
+            configured_names[parts[0]] = parts[1]
+        active_ids = set(active)
+        if (
+            any(_CONTAINER_ID.fullmatch(value) is None for value in active_ids)
+            or not active_ids <= set(configured_names)
+        ):
+            raise NetworkTransportError()
+
+        known = {
+            value.container_id: value
+            for value in (platform_control, runtime)
+            if value is not None
+        }
+        members: list[AccessNetworkMember] = []
+        for container_id in sorted(configured_names):
+            active_endpoint = active.get(container_id)
+            if active_endpoint is not None and type(active_endpoint) is not dict:
+                raise NetworkTransportError()
+            endpoint_id = (
+                active_endpoint.get("EndpointID") if active_endpoint is not None else None
+            )
+            if (
+                active_endpoint is not None
+                and active_endpoint.get("Name") != configured_names[container_id]
+            ):
+                raise NetworkTransportError()
+            if endpoint_id == "":
+                endpoint_id = None
+            if (
+                endpoint_id is not None
+                and (
+                    type(endpoint_id) is not str
+                    or _CONTAINER_ID.fullmatch(endpoint_id) is None
+                )
+            ):
+                raise NetworkTransportError()
+            aliases: tuple[str, ...] | None = None
+            dns_names: tuple[str, ...] | None = None
+            if container_id in known:
+                container_document = (
+                    self._inspect_platform_control(platform_control)
+                    if platform_control is not None
+                    and container_id == platform_control.container_id
+                    else self._inspect_runtime_member(runtime)
+                )
+                settings = container_document.get("NetworkSettings")
+                networks = settings.get("Networks") if type(settings) is dict else None
+                endpoint = networks.get(identity.network_name) if type(networks) is dict else None
+                if (
+                    type(endpoint) is not dict
+                    or endpoint.get("NetworkID") != network_id
+                ):
+                    raise AccessNetworkIdentityError()
+                configured_endpoint_id = endpoint.get("EndpointID")
+                if configured_endpoint_id == "":
+                    configured_endpoint_id = None
+                if configured_endpoint_id != endpoint_id:
+                    raise AccessNetworkIdentityError()
+                aliases = self._network_names_tuple(endpoint.get("Aliases"))
+                dns_names = self._network_names_tuple(endpoint.get("DNSNames"))
+            members.append(
+                AccessNetworkMember(
+                    container_id=container_id,
+                    container_name=configured_names[container_id],
+                    endpoint_id=endpoint_id,
+                    aliases=aliases,
+                    dns_names=dns_names,
+                )
+            )
+
+        return AccessNetworkObservation(
+            state=AccessNetworkState.PRESENT,
+            network_id=network_id,
+            observed_name=document.get("Name"),
+            observed_driver=document.get("Driver"),
+            observed_scope=document.get("Scope"),
+            observed_internal=document.get("Internal"),
+            observed_attachable=document.get("Attachable"),
+            observed_ingress=document.get("Ingress"),
+            observed_config_only=document.get("ConfigOnly"),
+            observed_labels=tuple(
+                AccessNetworkLabel(name, labels[name]) for name in sorted(labels)
+            ),
+            members=tuple(members),
+        )
+
+    @staticmethod
+    def _network_names_tuple(value: object) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if type(value) is not list or any(type(item) is not str for item in value):
+            raise NetworkTransportError()
+        if len(value) != len(set(value)):
+            raise NetworkTransportError()
+        return tuple(sorted(set(value)))
+
+    def _run_network_read_only(
+        self,
+        command: tuple[str, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return self._run_read_only(command)
+        except DriverTransportError:
+            raise NetworkTransportError() from None
+
+    def _run_network_mutation(
+        self,
+        command: tuple[str, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return self._run_mutation(
+                command,
+                timeout=_NETWORK_MUTATION_TIMEOUT_SECONDS,
+            )
+        except AmbiguousDriverOutcome:
+            raise AmbiguousNetworkOutcome() from None
 
     def _inspect_engine(
         self,
@@ -958,7 +1731,18 @@ class SafeComposeRuntimeDriver:
             and inspection.observed_runtime_spec_digest == identity.runtime_spec_digest
             and inspection.observed_state_allocation_id == identity.state_allocation_id
             and inspection.observed_image_id == identity.image_id
-            and inspection.observed_network_names == identity.network_names
+        )
+
+    @classmethod
+    def _matches_immutable_runtime(
+        cls,
+        observation: _EngineObservation,
+        identity: DriverIdentity,
+    ) -> bool:
+        return (
+            cls._matches_public_identity(observation.inspection, identity)
+            and observation.compose_project == identity.project_name
+            and observation.compose_service == _SERVICE_NAME
         )
 
     @classmethod
@@ -968,9 +1752,9 @@ class SafeComposeRuntimeDriver:
         identity: DriverIdentity,
     ) -> bool:
         return (
-            cls._matches_public_identity(observation.inspection, identity)
-            and observation.compose_project == identity.project_name
-            and observation.compose_service == _SERVICE_NAME
+            cls._matches_immutable_runtime(observation, identity)
+            and observation.inspection.observed_network_names
+            == identity.network_names
         )
 
     @classmethod

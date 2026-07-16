@@ -107,6 +107,11 @@ class DriverHealth(StrEnum):
     UNKNOWN = "unknown"
 
 
+class AccessNetworkState(StrEnum):
+    ABSENT = "absent"
+    PRESENT = "present"
+
+
 @dataclass(frozen=True, slots=True)
 class DriverIdentity(_StrictValue):
     project_name: str
@@ -141,6 +146,272 @@ class DriverIdentity(_StrictValue):
         ):
             raise DriverValidationError()
         if names != tuple(sorted(set(names))):
+            raise DriverValidationError()
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformControlIdentity(_StrictValue):
+    container_id: str
+    container_name: str
+    image_id: str
+    compose_project: str
+    compose_service: str
+    identity_revision: str
+
+    @classmethod
+    def model_validate(cls, value: object) -> "PlatformControlIdentity":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.container_id) is not str
+            or _CONTAINER_ID.fullmatch(self.container_id) is None
+            or type(self.image_id) is not str
+            or _IMAGE_ID.fullmatch(self.image_id) is None
+            or self.compose_service != "platform-control"
+            or self.identity_revision != "platform-control-v1"
+        ):
+            raise DriverValidationError()
+        for value in (
+            self.container_name,
+            self.compose_project,
+            self.compose_service,
+            self.identity_revision,
+        ):
+            _require_identifier(value)
+
+
+@dataclass(frozen=True, slots=True)
+class AccessNetworkIdentity(_StrictValue):
+    instance_id: str
+    network_name: str
+    policy_digest: str
+    internal: bool
+    requires_upstream_access: bool
+    requires_platform_control: bool
+
+    @classmethod
+    def model_validate(cls, value: object) -> "AccessNetworkIdentity":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.instance_id)
+        _require_identifier(self.network_name)
+        if (
+            type(self.policy_digest) is not str
+            or _DIGEST.fullmatch(self.policy_digest) is None
+            or type(self.internal) is not bool
+            or type(self.requires_upstream_access) is not bool
+            or type(self.requires_platform_control) is not bool
+            or self.internal is self.requires_upstream_access
+            or not self.requires_platform_control
+        ):
+            raise DriverValidationError()
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeAccessMemberIdentity(_StrictValue):
+    container_id: str
+    runtime_identity: DriverIdentity
+    compose_service: str
+    runtime_alias: str
+
+    @classmethod
+    def model_validate(cls, value: object) -> "RuntimeAccessMemberIdentity":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.container_id) is not str
+            or _CONTAINER_ID.fullmatch(self.container_id) is None
+            or type(self.runtime_identity) is not DriverIdentity
+            or self.compose_service != "runtime"
+        ):
+            raise DriverValidationError()
+        for value in (self.compose_service, self.runtime_alias):
+            _require_identifier(value)
+
+    @property
+    def container_name(self) -> str:
+        return self.runtime_identity.container_name
+
+    @property
+    def compose_project(self) -> str:
+        return self.runtime_identity.project_name
+
+    @property
+    def attempt_id(self) -> str:
+        return self.runtime_identity.attempt_id
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeAccessNetworkPlan(_StrictValue):
+    access_identity: AccessNetworkIdentity
+    runtime_member: RuntimeAccessMemberIdentity
+
+    @classmethod
+    def model_validate(cls, value: object) -> "RuntimeAccessNetworkPlan":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.access_identity) is not AccessNetworkIdentity
+            or type(self.runtime_member) is not RuntimeAccessMemberIdentity
+            or self.access_identity.instance_id
+            != self.runtime_member.runtime_identity.instance_id
+            or self.access_identity.network_name
+            not in self.runtime_member.runtime_identity.network_names
+        ):
+            raise DriverValidationError()
+
+
+@dataclass(frozen=True, slots=True)
+class AccessNetworkLabel(_StrictValue):
+    name: str
+    value: str
+
+    @classmethod
+    def model_validate(cls, value: object) -> "AccessNetworkLabel":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.name)
+        if (
+            type(self.value) is not str
+            or not self.value
+            or len(self.value) > 256
+            or _CONTROL_CHARACTER.search(self.value)
+        ):
+            raise DriverValidationError()
+
+
+@dataclass(frozen=True, slots=True)
+class AccessNetworkMember(_StrictValue):
+    container_id: str
+    container_name: str
+    endpoint_id: str | None
+    aliases: tuple[str, ...] | None
+    dns_names: tuple[str, ...] | None
+
+    @classmethod
+    def model_validate(cls, value: object) -> "AccessNetworkMember":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.container_id) is not str
+            or _CONTAINER_ID.fullmatch(self.container_id) is None
+            or (
+                self.endpoint_id is not None
+                and (
+                    type(self.endpoint_id) is not str
+                    or _CONTAINER_ID.fullmatch(self.endpoint_id) is None
+                )
+            )
+        ):
+            raise DriverValidationError()
+        _require_identifier(self.container_name)
+        for values in (self.aliases, self.dns_names):
+            if values is None:
+                continue
+            entries = _require_tuple(values, allow_empty=True)
+            if any(
+                type(value) is not str
+                or not value
+                or _CONTROL_CHARACTER.search(value)
+                for value in entries
+            ):
+                raise DriverValidationError()
+            if entries != tuple(sorted(set(entries))):
+                raise DriverValidationError()
+
+
+@dataclass(frozen=True, slots=True)
+class AccessNetworkObservation(_StrictValue):
+    state: AccessNetworkState
+    network_id: str | None
+    observed_name: str | None
+    observed_driver: str | None
+    observed_scope: str | None
+    observed_internal: bool | None
+    observed_attachable: bool | None
+    observed_ingress: bool | None
+    observed_config_only: bool | None
+    observed_labels: tuple[AccessNetworkLabel, ...]
+    members: tuple[AccessNetworkMember, ...]
+
+    @classmethod
+    def model_validate(cls, value: object) -> "AccessNetworkObservation":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    @classmethod
+    def absent(cls) -> "AccessNetworkObservation":
+        return cls(
+            state=AccessNetworkState.ABSENT,
+            network_id=None,
+            observed_name=None,
+            observed_driver=None,
+            observed_scope=None,
+            observed_internal=None,
+            observed_attachable=None,
+            observed_ingress=None,
+            observed_config_only=None,
+            observed_labels=(),
+            members=(),
+        )
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not AccessNetworkState:
+            raise DriverValidationError()
+        labels = _require_tuple(self.observed_labels, allow_empty=True)
+        members = _require_tuple(self.members, allow_empty=True)
+        if (
+            any(type(label) is not AccessNetworkLabel for label in labels)
+            or tuple(label.name for label in labels)
+            != tuple(sorted(set(label.name for label in labels)))
+            or any(type(member) is not AccessNetworkMember for member in members)
+            or tuple(member.container_id for member in members)
+            != tuple(sorted(set(member.container_id for member in members)))
+        ):
+            raise DriverValidationError()
+        observed_values = (
+            self.observed_name,
+            self.observed_driver,
+            self.observed_scope,
+            self.observed_internal,
+            self.observed_attachable,
+            self.observed_ingress,
+            self.observed_config_only,
+        )
+        if self.state is AccessNetworkState.ABSENT:
+            if (
+                self.network_id is not None
+                or any(value is not None for value in observed_values)
+                or labels
+                or members
+            ):
+                raise DriverValidationError()
+            return
+        if (
+            type(self.network_id) is not str
+            or _CONTAINER_ID.fullmatch(self.network_id) is None
+            or any(type(value) is not str or not value for value in observed_values[:3])
+            or any(type(value) is not bool for value in observed_values[3:])
+        ):
             raise DriverValidationError()
 
 
@@ -353,6 +624,37 @@ class SecretPathEnvironmentBinding(_StrictValue):
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeNetworkBinding(_StrictValue):
+    role: str
+    network_name: str
+    runtime_alias: str
+    policy_digest: str
+    internal: bool
+    requires_upstream_access: bool
+    requires_platform_control: bool
+
+    @classmethod
+    def model_validate(cls, value: object) -> "RuntimeNetworkBinding":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        for value in (self.role, self.network_name, self.runtime_alias):
+            _require_identifier(value)
+        if (
+            type(self.policy_digest) is not str
+            or _DIGEST.fullmatch(self.policy_digest) is None
+            or type(self.internal) is not bool
+            or type(self.requires_upstream_access) is not bool
+            or type(self.requires_platform_control) is not bool
+            or self.internal is self.requires_upstream_access
+            or (self.role == "access" and not self.requires_platform_control)
+        ):
+            raise DriverValidationError()
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeUser(_StrictValue):
     uid: int
     gid: int
@@ -399,6 +701,7 @@ class LaunchSnapshot(_StrictValue):
     internal_ports: tuple[int, ...]
     health_profile: HealthProfile
     resource_limits: ResourceLimits
+    network_bindings: tuple[RuntimeNetworkBinding, ...]
 
     @property
     def secret_path_environment(
@@ -495,6 +798,22 @@ class LaunchSnapshot(_StrictValue):
         if ports != tuple(sorted(set(ports))):
             raise DriverValidationError()
 
+        network_bindings = _require_tuple(self.network_bindings, allow_empty=False)
+        if any(
+            type(binding) is not RuntimeNetworkBinding
+            for binding in network_bindings
+        ):
+            raise DriverValidationError()
+        binding_roles = tuple(binding.role for binding in network_bindings)
+        binding_names = tuple(binding.network_name for binding in network_bindings)
+        if (
+            binding_roles != tuple(sorted(set(binding_roles)))
+            or binding_roles.count("access") != 1
+            or len(binding_names) != len(set(binding_names))
+            or tuple(sorted(binding_names)) != self.identity.network_names
+        ):
+            raise DriverValidationError()
+
 
 class _FixedDriverError(RuntimeError):
     code = "driver_error"
@@ -523,6 +842,30 @@ class DriverTransportError(_FixedDriverError):
     code = "driver_transport_error"
 
 
+class AccessNetworkIdentityError(_FixedDriverError):
+    code = "access_network_identity_mismatch"
+
+
+class AccessNetworkMemberMismatch(_FixedDriverError):
+    code = "access_network_member_mismatch"
+
+
+class PlatformControlIdentityMismatch(_FixedDriverError):
+    code = "platform_control_identity_mismatch"
+
+
+class RuntimeAccessAttachmentMissing(_FixedDriverError):
+    code = "runtime_access_attachment_missing"
+
+
+class AmbiguousNetworkOutcome(_FixedDriverError):
+    code = "ambiguous_network_outcome"
+
+
+class NetworkTransportError(_FixedDriverError):
+    code = "network_transport_error"
+
+
 class RuntimeDriver(Protocol):
     def inspect(self, identity: DriverIdentity) -> DriverInspection: ...
 
@@ -535,3 +878,46 @@ class RuntimeDriver(Protocol):
         identity: DriverIdentity,
         profile_id: str,
     ) -> HealthObservation: ...
+
+
+class RuntimeAccessNetworkDriver(Protocol):
+    def inspect_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity | None,
+    ) -> AccessNetworkObservation: ...
+
+    def ensure_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity | None = None,
+    ) -> AccessNetworkObservation: ...
+
+    def verify_created_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity,
+    ) -> AccessNetworkObservation: ...
+
+    def verify_active_access_network(
+        self,
+        identity: AccessNetworkIdentity,
+        platform_control: PlatformControlIdentity,
+        runtime: RuntimeAccessMemberIdentity,
+    ) -> AccessNetworkObservation: ...
+
+    def remove_access_network_if_empty(
+        self,
+        identity: AccessNetworkIdentity,
+    ) -> AccessNetworkObservation: ...
+
+
+class PlatformControlIdentityProvider(Protocol):
+    def resolve_platform_control_identity(self) -> PlatformControlIdentity: ...
+
+
+class RuntimeAccessNetworkGate(Protocol):
+    def verify_active(self, plan: RuntimeAccessNetworkPlan) -> None: ...

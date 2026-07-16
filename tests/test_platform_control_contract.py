@@ -415,6 +415,13 @@ class PlatformControlContractTests(unittest.TestCase):
 
     def test_platform_control_has_no_docker_or_runtime_state_mount(self) -> None:
         service = self.compose["services"]["platform-control"]
+        self.assertEqual(
+            service["labels"],
+            {
+                "io.freqtrade.platform.identity-revision": "platform-control-v1",
+                "io.freqtrade.platform.role": "platform-control",
+            },
+        )
         volumes = service.get("volumes", [])
         rendered_volumes = json.dumps(volumes, sort_keys=True)
         self.assertNotIn("docker.sock", rendered_volumes)
