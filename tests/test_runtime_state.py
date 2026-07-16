@@ -71,11 +71,29 @@ class RuntimeStateTests(unittest.TestCase):
         values.update(changes)
         return runtime_state.ExistingStateAllocation(**values)
 
+    def make_provisioning(
+        self, **changes: object
+    ) -> runtime_state.ProvisioningStateAllocation:
+        values: dict[str, object] = {
+            "state_allocation_id": "allocation-1",
+            "instance_id": "runtime-1",
+            "layout_id": "freqtrade-state-v1",
+            "provider_id": "managed-local-v1",
+            "relative_path": "ft_userdata/runtime/instances/runtime-1",
+            "kind": "fresh",
+            "status": "provisioning",
+            "generation": 1,
+            "restore_source_bundle_id": None,
+        }
+        values.update(changes)
+        return runtime_state.ProvisioningStateAllocation(**values)
+
     def provider(
         self,
         reservation: (
             runtime_state.StateAllocationReservation
             | runtime_state.ExistingStateAllocation
+            | runtime_state.ProvisioningStateAllocation
             | None
         ) = None,
         *,
@@ -103,6 +121,18 @@ class RuntimeStateTests(unittest.TestCase):
     ) -> runtime_state.ProvisionedState:
         provider = self.provider(allocation or self.make_existing())
         return provider.verify_existing(
+            "runtime-1",
+            "allocation-1",
+            "freqtrade-state-v1",
+        )
+
+    def resume_provisioning(
+        self,
+        allocation: runtime_state.ProvisioningStateAllocation | None = None,
+        provider: runtime_state.ManagedStateProvider | None = None,
+    ) -> runtime_state.ProvisionedState:
+        selected = provider or self.provider(allocation or self.make_provisioning())
+        return selected.resume_provisioning(
             "runtime-1",
             "allocation-1",
             "freqtrade-state-v1",
@@ -224,6 +254,15 @@ class RuntimeStateTests(unittest.TestCase):
         )
         self.assertEqual(
             verify_parameters,
+            ("self", "instance_id", "allocation_id", "layout_id"),
+        )
+        resume_parameters = tuple(
+            inspect.signature(
+                runtime_state.ManagedStateProvider.resume_provisioning
+            ).parameters
+        )
+        self.assertEqual(
+            resume_parameters,
             ("self", "instance_id", "allocation_id", "layout_id"),
         )
         for name in (
@@ -537,6 +576,31 @@ class RuntimeStateTests(unittest.TestCase):
         with self.assertRaises((AttributeError, TypeError)):
             allocation.unexpected = "authority"  # type: ignore[attr-defined]
 
+    def test_provisioning_allocation_is_a_closed_frozen_value(self) -> None:
+        allocation = self.make_provisioning()
+
+        self.assertEqual(
+            tuple(
+                field.name
+                for field in fields(runtime_state.ProvisioningStateAllocation)
+            ),
+            (
+                "state_allocation_id",
+                "instance_id",
+                "layout_id",
+                "provider_id",
+                "relative_path",
+                "kind",
+                "status",
+                "generation",
+                "restore_source_bundle_id",
+            ),
+        )
+        with self.assertRaises((AttributeError, TypeError)):
+            allocation.status = "ready"  # type: ignore[misc]
+        with self.assertRaises((AttributeError, TypeError)):
+            allocation.unexpected = "authority"  # type: ignore[attr-defined]
+
     def test_provider_methods_reject_the_other_allocation_lifecycle(self) -> None:
         existing_provider = self.provider(self.make_existing())
         with self.assertRaisesRegex(
@@ -554,6 +618,634 @@ class RuntimeStateTests(unittest.TestCase):
                 "allocation-1",
                 "freqtrade-state-v1",
             )
+
+        provisioning_provider = self.provider(self.make_provisioning())
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_reservation_invalid$",
+        ):
+            self.provision(provisioning_provider)
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_existing_invalid$",
+        ):
+            provisioning_provider.verify_existing(
+                "runtime-1",
+                "allocation-1",
+                "freqtrade-state-v1",
+            )
+        for provider in (
+            self.provider(),
+            self.provider(self.make_existing()),
+        ):
+            with self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_invalid$",
+            ):
+                self.resume_provisioning(provider=provider)
+
+    def test_invalid_provisioning_allocation_rejects_before_filesystem_io(self) -> None:
+        mutations = (
+            {"state_allocation_id": "../allocation"},
+            {"instance_id": "Runtime-1"},
+            {"layout_id": "other-layout"},
+            {"provider_id": "other-provider"},
+            {"relative_path": "ft_userdata/runtime/instances/other"},
+            {"kind": "restored"},
+            {"status": "ready"},
+            {"generation": 0},
+            {"generation": True},
+            {"restore_source_bundle_id": "bundle-1"},
+        )
+        missing_root = self.base / "missing-provisioning-root"
+        for changes in mutations:
+            with self.subTest(changes=changes):
+                provider = self.provider(
+                    self.make_provisioning(**changes),
+                    state_root=missing_root,
+                )
+                with self.assertRaisesRegex(
+                    runtime_state.StateProvisionError,
+                    "^state_provisioning_invalid$",
+                ):
+                    self.resume_provisioning(provider=provider)
+        provider = self.provider(self.make_provisioning(), state_root=missing_root)
+        for arguments in (
+            ("runtime-2", "allocation-1", "freqtrade-state-v1"),
+            ("runtime-1", "allocation-2", "freqtrade-state-v1"),
+            ("runtime-1", "allocation-1", "other-layout"),
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(
+                    runtime_state.StateProvisionError,
+                    "^state_provisioning_invalid$",
+                ):
+                    provider.resume_provisioning(*arguments)
+        self.assertFalse(missing_root.exists())
+
+    def test_resume_provisioning_creates_missing_layout_and_issues_closable_lease(
+        self,
+    ) -> None:
+        provider = self.provider(self.make_provisioning())
+
+        proof = self.resume_provisioning(provider=provider)
+
+        self.assertEqual(
+            {path.name for path in (self.state_root / "runtime-1").iterdir()},
+            {"home", "logs", "data", ".allocation-allocation-1"},
+        )
+        lease = provider.acquire_mount_lease("attempt-1", proof)
+        with lease:
+            self.assertEqual(lease.mount.source, self.state_root / "runtime-1")
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_lease_invalid$",
+        ):
+            _ = lease.mount
+
+    def test_resume_provisioning_verifies_complete_layout_without_mutation(self) -> None:
+        expected = self.provision()
+        provider = self.provider(self.make_provisioning())
+        allocation = self.state_root / "runtime-1"
+        before = {
+            path.relative_to(self.state_root): (
+                path.stat().st_dev,
+                path.stat().st_ino,
+                path.stat().st_mode,
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+            )
+            for path in (allocation, *allocation.iterdir())
+        }
+
+        with (
+            mock.patch.object(runtime_state.os, "mkdir") as mkdir,
+            mock.patch.object(runtime_state.os, "rename") as rename,
+            mock.patch.object(runtime_state.os, "chmod") as chmod,
+            mock.patch.object(runtime_state, "_publish_no_replace") as publish,
+            mock.patch.object(runtime_state, "_quarantine_owned_allocation") as quarantine,
+        ):
+            actual = self.resume_provisioning(provider=provider)
+
+        after = {
+            path.relative_to(self.state_root): (
+                path.stat().st_dev,
+                path.stat().st_ino,
+                path.stat().st_mode,
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+            )
+            for path in (allocation, *allocation.iterdir())
+        }
+        self.assertEqual(actual, expected)
+        self.assertEqual(after, before)
+        lease = provider.acquire_mount_lease("attempt-resume", actual)
+        lease.close()
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_lease_invalid$",
+        ):
+            _ = lease.mount
+        for mutation in (mkdir, rename, chmod, publish, quarantine):
+            mutation.assert_not_called()
+
+    def test_resume_provisioning_rejects_allocation_rename_substitution(self) -> None:
+        self.provision()
+        replacement_reservation = self.make_reservation(
+            state_allocation_id="allocation-2",
+            instance_id="runtime-2",
+            relative_path="ft_userdata/runtime/instances/runtime-2",
+        )
+        self.provider(replacement_reservation).provision(
+            "runtime-2",
+            "allocation-2",
+            "freqtrade-state-v1",
+        )
+        allocation = self.state_root / "runtime-1"
+        replacement = self.state_root / "runtime-2"
+        displaced = self.state_root / "displaced-runtime-1"
+        original_verify = runtime_state._verify_existing_layout
+
+        def substitute(*args: object, **kwargs: object):
+            os.rename(allocation, displaced)
+            os.rename(replacement, allocation)
+            os.rename(
+                allocation / ".allocation-allocation-2",
+                allocation / ".allocation-allocation-1",
+            )
+            return original_verify(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_verify_existing_layout",
+                side_effect=substitute,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_verification_failed$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertTrue(displaced.is_dir())
+        self.assertTrue(allocation.is_dir())
+        self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
+
+    def test_resume_provisioning_rejects_component_rename_substitution(self) -> None:
+        self.provision()
+        component = self.state_root / "runtime-1/home"
+        displaced = self.base / "displaced-home"
+        original_verify = runtime_state._verify_existing_layout
+
+        def substitute(*args: object, **kwargs: object):
+            os.rename(component, displaced)
+            os.mkdir(component, 0o700)
+            if os.name == "posix":
+                os.chmod(component, 0o700)
+            return original_verify(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_verify_existing_layout",
+                side_effect=substitute,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_verification_failed$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertTrue(displaced.is_dir())
+        self.assertTrue(component.is_dir())
+        self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
+
+    def test_resume_provisioning_rejects_marker_rename_substitution(self) -> None:
+        self.provision()
+        marker = self.state_root / "runtime-1/.allocation-allocation-1"
+        displaced = self.base / "displaced-marker"
+        original_verify = runtime_state._verify_existing_layout
+
+        def substitute(*args: object, **kwargs: object):
+            os.rename(marker, displaced)
+            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(descriptor)
+            if os.name == "posix":
+                os.chmod(marker, 0o600)
+            return original_verify(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_verify_existing_layout",
+                side_effect=substitute,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_verification_failed$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertTrue(displaced.is_file())
+        self.assertTrue(marker.is_file())
+        self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
+
+    def test_resume_provisioning_rejects_marker_owner_metadata_drift(self) -> None:
+        self.provision()
+        marker = self.state_root / "runtime-1/.allocation-allocation-1"
+        status = os.lstat(marker)
+        drifted = mock.Mock(
+            st_dev=status.st_dev,
+            st_ino=status.st_ino,
+            st_mode=status.st_mode,
+            st_uid=getattr(status, "st_uid", 0) + 1,
+            st_gid=getattr(status, "st_gid", 0),
+            st_file_attributes=getattr(status, "st_file_attributes", None),
+            st_reparse_tag=getattr(status, "st_reparse_tag", None),
+            st_nlink=status.st_nlink,
+            st_size=status.st_size,
+        )
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_verified_identity_file_status",
+                return_value=drifted,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_verification_failed$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertTrue(marker.is_file())
+        self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
+
+    def test_resume_provisioning_classifies_partial_without_mutation(self) -> None:
+        allocation = self.state_root / "runtime-1"
+        allocation.mkdir()
+        (allocation / "home").mkdir()
+        before = tuple(sorted(path.name for path in allocation.iterdir()))
+
+        with (
+            mock.patch.object(runtime_state.os, "rename") as rename,
+            mock.patch.object(runtime_state, "_publish_no_replace") as publish,
+            mock.patch.object(runtime_state, "_quarantine_owned_allocation") as quarantine,
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_partial$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertEqual(tuple(sorted(path.name for path in allocation.iterdir())), before)
+        rename.assert_not_called()
+        publish.assert_not_called()
+        quarantine.assert_not_called()
+
+    def test_resume_provisioning_partial_requires_managed_directory_evidence(self) -> None:
+        allocation = self.state_root / "runtime-1"
+        allocation.mkdir()
+        (allocation / "home").mkdir()
+
+        for target in (allocation, allocation / "home"):
+            with self.subTest(target=target):
+
+                def reject_target(path: Path, _runtime_uid: int) -> None:
+                    if Path(path) == target:
+                        raise OSError("acl unavailable")
+
+                with (
+                    mock.patch.object(
+                        runtime_state,
+                        "_verify_managed_state_directory",
+                        side_effect=reject_target,
+                    ),
+                    self.assertRaisesRegex(
+                        runtime_state.StateProvisionError,
+                        "^state_provisioning_verification_failed$",
+                    ),
+                ):
+                    self.resume_provisioning()
+
+        self.assertTrue((allocation / "home").is_dir())
+        self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
+
+    def test_resume_provisioning_partial_marker_requires_managed_file_evidence(
+        self,
+    ) -> None:
+        allocation = self.state_root / "runtime-1"
+        allocation.mkdir()
+        marker = allocation / ".allocation-allocation-1"
+        marker.touch()
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_verify_managed_state_identity_file",
+                side_effect=OSError("acl unavailable"),
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_verification_failed$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertTrue(marker.is_file())
+        self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
+
+    def test_resume_provisioning_classifies_foreign_and_reparse_without_mutation(
+        self,
+    ) -> None:
+        allocation = self.state_root / "runtime-1"
+        allocation.mkdir()
+        foreign = allocation / "foreign-evidence"
+        foreign.write_text("keep", encoding="utf-8")
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_provisioning_foreign$",
+        ):
+            self.resume_provisioning()
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "keep")
+
+    def test_resume_provisioning_classifies_partial_reparse_as_foreign(self) -> None:
+        allocation = self.state_root / "runtime-1"
+        allocation.mkdir()
+        component = allocation / "home"
+        component.mkdir()
+
+        real_lstat = os.lstat
+
+        def reparse_component(path: Path) -> os.stat_result:
+            status = real_lstat(path)
+            if Path(path) != component:
+                return status
+            return mock.Mock(
+                st_mode=status.st_mode,
+                st_dev=status.st_dev,
+                st_ino=status.st_ino,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x0400,
+                ),
+            )
+
+        with (
+            mock.patch.object(runtime_state.os, "lstat", side_effect=reparse_component),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_foreign$",
+            ),
+        ):
+            self.resume_provisioning()
+        self.assertTrue(component.is_dir())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX allocation symlink recovery")
+    def test_resume_provisioning_rejects_allocation_symlink_without_root_escape(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        evidence = outside / "keep"
+        evidence.write_text("foreign", encoding="utf-8")
+        (self.state_root / "runtime-1").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_provisioning_foreign$",
+        ):
+            self.resume_provisioning()
+
+        self.assertEqual(evidence.read_text(encoding="utf-8"), "foreign")
+        self.assertFalse((outside / "home").exists())
+
+    def test_resume_provisioning_classifies_quarantine_without_mutation(self) -> None:
+        quarantine = self.state_root / ".allocation-1.quarantine"
+        quarantine.mkdir()
+        evidence = quarantine / "keep"
+        evidence.write_text("quarantined", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_provisioning_quarantined$",
+        ):
+            self.resume_provisioning()
+
+        self.assertEqual(evidence.read_text(encoding="utf-8"), "quarantined")
+        self.assertFalse((self.state_root / "runtime-1").exists())
+
+    def test_resume_provisioning_maps_owned_creation_failure_to_quarantine(self) -> None:
+        calls = 0
+        real_sync = runtime_state._sync_directory
+
+        def fail_first_sync(path: Path, *args: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("creation fault")
+            real_sync(path, *args)
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_sync_directory",
+                side_effect=fail_first_sync,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_quarantined$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertFalse((self.state_root / "runtime-1").exists())
+        self.assertTrue(
+            (self.state_root / ".allocation-1.quarantine/runtime-1").is_dir()
+        )
+
+    def test_resume_missing_rejects_marker_metadata_drift_and_quarantines_owned(
+        self,
+    ) -> None:
+        identity = self.state_root / "runtime-1/.allocation-allocation-1"
+        published = False
+        real_lstat = runtime_state.os.lstat
+        real_publish = runtime_state._publish_no_replace
+
+        def publish(source: Path, destination: Path) -> None:
+            nonlocal published
+            real_publish(source, destination)
+            published = True
+
+        def drift_identity(path: Path) -> os.stat_result:
+            status = real_lstat(path)
+            if not published or Path(path) != identity:
+                return status
+            return mock.Mock(
+                st_dev=status.st_dev,
+                st_ino=status.st_ino,
+                st_mode=status.st_mode,
+                st_uid=getattr(status, "st_uid", 0),
+                st_gid=getattr(status, "st_gid", 0) + 1,
+                st_file_attributes=getattr(status, "st_file_attributes", 0),
+                st_reparse_tag=getattr(status, "st_reparse_tag", 0),
+                st_nlink=status.st_nlink,
+                st_size=status.st_size,
+            )
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_publish_no_replace",
+                side_effect=publish,
+            ),
+            mock.patch.object(
+                runtime_state.os,
+                "lstat",
+                side_effect=drift_identity,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_quarantined$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertFalse((self.state_root / "runtime-1").exists())
+        self.assertTrue(
+            (self.state_root / ".allocation-1.quarantine/runtime-1").is_dir()
+        )
+
+    def test_resume_missing_rejects_component_metadata_drift_and_quarantines_owned(
+        self,
+    ) -> None:
+        component = self.state_root / "runtime-1/home"
+        calls = 0
+        real_validate = runtime_state._validated_directory_status
+
+        def drift_component(path: Path, runtime_uid: int) -> os.stat_result:
+            nonlocal calls
+            status = real_validate(path, runtime_uid)
+            if Path(path) != component:
+                return status
+            calls += 1
+            if calls == 1:
+                return status
+            return mock.Mock(
+                st_dev=status.st_dev,
+                st_ino=status.st_ino,
+                st_mode=status.st_mode,
+                st_uid=getattr(status, "st_uid", 0),
+                st_gid=getattr(status, "st_gid", 0) + 1,
+                st_file_attributes=getattr(status, "st_file_attributes", 0),
+                st_reparse_tag=getattr(status, "st_reparse_tag", 0),
+            )
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_validated_directory_status",
+                side_effect=drift_component,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_provisioning_quarantined$",
+            ),
+        ):
+            self.resume_provisioning()
+
+        self.assertFalse((self.state_root / "runtime-1").exists())
+        self.assertTrue(
+            (self.state_root / ".allocation-1.quarantine/runtime-1").is_dir()
+        )
+
+    def test_resume_provisioning_transient_verification_failure_is_not_quarantine(
+        self,
+    ) -> None:
+        self.provision()
+        allocation = self.state_root / "runtime-1"
+        before = tuple(sorted(path.name for path in allocation.iterdir()))
+        real_lstat = runtime_state.os.lstat
+
+        def transient_component_lstat(path: Path) -> os.stat_result:
+            if Path(path) == allocation / "home":
+                raise PermissionError("transient")
+            return real_lstat(path)
+
+        failures = (
+            mock.patch.object(
+                runtime_state,
+                "_verify_existing_layout",
+                side_effect=OSError("transient"),
+            ),
+            mock.patch.object(
+                runtime_state.os,
+                "lstat",
+                side_effect=transient_component_lstat,
+            ),
+        )
+        for failure in failures:
+            with self.subTest(failure=failure.attribute):
+                with (
+                    failure,
+                    mock.patch.object(runtime_state.os, "rename") as rename,
+                    mock.patch.object(
+                        runtime_state, "_quarantine_owned_allocation"
+                    ) as quarantine,
+                    self.assertRaisesRegex(
+                        runtime_state.StateProvisionError,
+                        "^state_provisioning_verification_failed$",
+                    ),
+                ):
+                    self.resume_provisioning()
+
+                self.assertEqual(
+                    tuple(sorted(path.name for path in allocation.iterdir())), before
+                )
+                self.assertFalse(
+                    (self.state_root / ".allocation-1.quarantine").exists()
+                )
+                rename.assert_not_called()
+                quarantine.assert_not_called()
+
+    def test_windows_resume_hardens_only_missing_layout_and_verifies_existing(self) -> None:
+        with (
+            mock.patch.object(runtime_state, "_is_windows", return_value=True),
+            mock.patch.object(
+                runtime_state, "_harden_managed_state_directory"
+            ) as harden_directory,
+            mock.patch.object(
+                runtime_state, "_verify_managed_state_directory"
+            ) as verify_directory,
+            mock.patch.object(
+                runtime_state, "_harden_managed_state_identity_file"
+            ) as harden_identity,
+            mock.patch.object(
+                runtime_state, "_verify_managed_state_identity_file"
+            ) as verify_identity,
+        ):
+            created = self.resume_provisioning()
+            self.assertEqual(created.durability, "atomic-process-crash")
+            self.assertGreaterEqual(harden_directory.call_count, 4)
+            harden_identity.assert_called_once()
+            self.assertGreaterEqual(verify_directory.call_count, 5)
+            verify_identity.assert_called()
+
+            harden_directory.reset_mock()
+            harden_identity.reset_mock()
+            verify_directory.reset_mock()
+            verify_identity.reset_mock()
+
+            resumed = self.resume_provisioning()
+
+        self.assertEqual(resumed, created)
+        harden_directory.assert_not_called()
+        harden_identity.assert_not_called()
+        self.assertGreaterEqual(verify_directory.call_count, 5)
+        verify_identity.assert_called()
 
     def test_invalid_existing_allocation_rejects_before_filesystem_io(self) -> None:
         mutations = (
@@ -799,6 +1491,14 @@ class RuntimeStateTests(unittest.TestCase):
                     st_dev=status.st_dev,
                     st_ino=status.st_ino,
                     st_mode=status.st_mode,
+                    st_uid=getattr(status, "st_uid", None),
+                    st_gid=getattr(status, "st_gid", None),
+                    st_file_attributes=getattr(
+                        status,
+                        "st_file_attributes",
+                        None,
+                    ),
+                    st_reparse_tag=getattr(status, "st_reparse_tag", None),
                     st_nlink=status.st_nlink,
                     st_size=status.st_size + 1,
                 )

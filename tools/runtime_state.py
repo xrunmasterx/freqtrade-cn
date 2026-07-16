@@ -34,6 +34,11 @@ _PROVISION_ERROR: Final = "state_provision_failed"
 _QUARANTINE_ERROR: Final = "state_quarantine_failed"
 _EXISTING_ERROR: Final = "state_existing_invalid"
 _VERIFY_EXISTING_ERROR: Final = "state_existing_verification_failed"
+_PROVISIONING_ERROR: Final = "state_provisioning_invalid"
+_PROVISIONING_PARTIAL_ERROR: Final = "state_provisioning_partial"
+_PROVISIONING_FOREIGN_ERROR: Final = "state_provisioning_foreign"
+_PROVISIONING_QUARANTINED_ERROR: Final = "state_provisioning_quarantined"
+_VERIFY_PROVISIONING_ERROR: Final = "state_provisioning_verification_failed"
 _LEASE_ERROR: Final = "state_lease_invalid"
 _LEASE_VERIFICATION_ERROR: Final = "state_lease_verification_failed"
 
@@ -57,6 +62,19 @@ class StateAllocationReservation:
 
 @dataclass(frozen=True, slots=True)
 class ExistingStateAllocation:
+    state_allocation_id: str
+    instance_id: str
+    layout_id: str
+    provider_id: str
+    relative_path: str
+    kind: str
+    status: str
+    generation: int
+    restore_source_bundle_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProvisioningStateAllocation:
     state_allocation_id: str
     instance_id: str
     layout_id: str
@@ -207,7 +225,11 @@ class ManagedStateProvider:
 
     def __init__(
         self,
-        reservation: StateAllocationReservation | ExistingStateAllocation,
+        reservation: (
+            StateAllocationReservation
+            | ExistingStateAllocation
+            | ProvisioningStateAllocation
+        ),
         *,
         runtime_uid: int,
         state_root: Path = DEFAULT_STATE_ROOT,
@@ -238,6 +260,22 @@ class ManagedStateProvider:
             raise StateProvisionError(_RESERVATION_ERROR)
 
         root_status = _validate_root(self._state_root, self._runtime_uid)
+        return self._provision_missing(
+            reservation,
+            root_status,
+            instance_id,
+            allocation_id,
+            layout_id,
+        )
+
+    def _provision_missing(
+        self,
+        allocation_record: StateAllocationReservation | ProvisioningStateAllocation,
+        root_status: os.stat_result,
+        instance_id: str,
+        allocation_id: str,
+        layout_id: str,
+    ) -> ProvisionedState:
         allocation = self._state_root / instance_id
         quarantine = self._state_root / f".{allocation_id}.quarantine"
         if os.path.lexists(allocation) or os.path.lexists(quarantine):
@@ -285,7 +323,10 @@ class ManagedStateProvider:
                 allocation,
                 self._runtime_uid,
             )
-            if not _same_identity(allocation_status, final_allocation_status):
+            if not _same_directory_identity(
+                allocation_status,
+                final_allocation_status,
+            ):
                 raise OSError
             verified_layout = _verify_existing_layout(
                 self._state_root,
@@ -311,9 +352,195 @@ class ManagedStateProvider:
             state_allocation_id=allocation_id,
             instance_id=instance_id,
             layout_id=layout_id,
-            provider_id=reservation.provider_id,
-            generation=reservation.generation,
-            relative_path=reservation.relative_path,
+            provider_id=allocation_record.provider_id,
+            generation=allocation_record.generation,
+            relative_path=allocation_record.relative_path,
+            durability=(
+                "atomic-process-crash" if _is_windows() else "power-loss-posix"
+            ),
+        )
+        return self._remember_proof(state, verified_layout)
+
+    def resume_provisioning(
+        self,
+        instance_id: str,
+        allocation_id: str,
+        layout_id: str,
+    ) -> ProvisionedState:
+        allocation_record = self._reservation
+        if not _provisioning_is_valid(
+            allocation_record,
+            self._runtime_uid,
+            instance_id,
+            allocation_id,
+            layout_id,
+        ):
+            raise StateProvisionError(_PROVISIONING_ERROR)
+
+        try:
+            root_status = _validate_root(self._state_root, self._runtime_uid)
+        except StateProvisionError:
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+
+        allocation = self._state_root / instance_id
+        quarantine = self._state_root / f".{allocation_id}.quarantine"
+        if os.path.lexists(quarantine):
+            raise StateProvisionError(_PROVISIONING_QUARANTINED_ERROR)
+
+        try:
+            allocation_status = os.lstat(allocation)
+        except FileNotFoundError:
+            try:
+                return self._provision_missing(
+                    allocation_record,
+                    root_status,
+                    instance_id,
+                    allocation_id,
+                    layout_id,
+                )
+            except StateProvisionError as error:
+                if os.path.lexists(quarantine) and not os.path.lexists(allocation):
+                    raise StateProvisionError(_PROVISIONING_QUARANTINED_ERROR) from None
+                if str(error) == _EXISTS_ERROR:
+                    raise StateProvisionError(_PROVISIONING_FOREIGN_ERROR) from None
+                raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+        except OSError:
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+
+        try:
+            _require_directory(allocation_status)
+        except OSError:
+            raise StateProvisionError(_PROVISIONING_FOREIGN_ERROR) from None
+        try:
+            verified_allocation_status = _validated_directory_status(
+                allocation,
+                self._runtime_uid,
+            )
+        except (OSError, RuntimeError, StateProvisionError, ValueError):
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+        if not _same_directory_identity(
+            allocation_status,
+            verified_allocation_status,
+        ):
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR)
+        allocation_status = verified_allocation_status
+
+        identity_name = f".allocation-{allocation_id}"
+        expected_names = {*_LAYOUT_DIRECTORIES, identity_name}
+        try:
+            _require_root_identity(self._state_root, root_status, self._runtime_uid)
+            _require_contained_allocation(self._state_root, allocation)
+            with os.scandir(allocation) as entries:
+                actual_names = {entry.name for entry in entries}
+        except (OSError, RuntimeError, StateProvisionError, ValueError):
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+
+        if not actual_names <= expected_names:
+            raise StateProvisionError(_PROVISIONING_FOREIGN_ERROR)
+
+        component_names = tuple(
+            name for name in _LAYOUT_DIRECTORIES if name in actual_names
+        )
+        try:
+            observed_component_statuses = {
+                name: os.lstat(allocation / name) for name in component_names
+            }
+            observed_identity_status = (
+                os.lstat(allocation / identity_name)
+                if identity_name in actual_names
+                else None
+            )
+        except OSError:
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+
+        try:
+            for status in observed_component_statuses.values():
+                _require_directory(status)
+            if observed_identity_status is not None:
+                _require_empty_identity_file(observed_identity_status)
+        except OSError:
+            raise StateProvisionError(_PROVISIONING_FOREIGN_ERROR) from None
+
+        try:
+            component_statuses = {
+                name: _validated_directory_status(
+                    allocation / name,
+                    self._runtime_uid,
+                )
+                for name in component_names
+            }
+            identity_status = (
+                _verified_identity_file_status(
+                    allocation / identity_name,
+                    self._runtime_uid,
+                )
+                if observed_identity_status is not None
+                else None
+            )
+        except (OSError, RuntimeError, StateProvisionError, ValueError):
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+        if any(
+            not _same_directory_identity(
+                observed_component_statuses[name],
+                component_statuses[name],
+            )
+            for name in component_names
+        ) or (
+            observed_identity_status is not None
+            and (
+                identity_status is None
+                or not _same_managed_file_identity(
+                    observed_identity_status,
+                    identity_status,
+                )
+            )
+        ):
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR)
+
+        if actual_names < expected_names:
+            raise StateProvisionError(_PROVISIONING_PARTIAL_ERROR)
+
+        try:
+            verified_layout = _verify_existing_layout(
+                self._state_root,
+                root_status,
+                instance_id,
+                allocation_id,
+                self._runtime_uid,
+            )
+        except (OSError, RuntimeError, StateProvisionError, ValueError):
+            if os.path.lexists(quarantine):
+                raise StateProvisionError(_PROVISIONING_QUARANTINED_ERROR) from None
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR) from None
+        final_component_statuses = dict(verified_layout.component_statuses)
+        if (
+            identity_status is None
+            or not _same_directory_identity(
+                allocation_status,
+                verified_layout.allocation_status,
+            )
+            or set(final_component_statuses) != set(component_statuses)
+            or any(
+                not _same_directory_identity(
+                    component_statuses[name],
+                    final_component_statuses[name],
+                )
+                for name in component_statuses
+            )
+            or not _same_managed_file_identity(
+                identity_status,
+                verified_layout.identity_status,
+            )
+        ):
+            raise StateProvisionError(_VERIFY_PROVISIONING_ERROR)
+
+        state = ProvisionedState(
+            state_allocation_id=allocation_id,
+            instance_id=instance_id,
+            layout_id=layout_id,
+            provider_id=allocation_record.provider_id,
+            generation=allocation_record.generation,
+            relative_path=allocation_record.relative_path,
             durability=(
                 "atomic-process-crash" if _is_windows() else "power-loss-posix"
             ),
@@ -617,6 +844,46 @@ def _existing_is_valid(
     )
 
 
+def _provisioning_is_valid(
+    allocation: object,
+    runtime_uid: object,
+    instance_id: object,
+    allocation_id: object,
+    layout_id: object,
+) -> bool:
+    if type(allocation) is not ProvisioningStateAllocation:
+        return False
+    identifiers = (
+        allocation.state_allocation_id,
+        allocation.instance_id,
+        allocation.layout_id,
+        allocation.provider_id,
+        instance_id,
+        allocation_id,
+        layout_id,
+    )
+    if not all(
+        isinstance(value, str) and _IDENTIFIER_PATTERN.fullmatch(value)
+        for value in identifiers
+    ):
+        return False
+    expected_relative_path = f"ft_userdata/runtime/instances/{allocation.instance_id}"
+    return (
+        allocation.state_allocation_id == allocation_id
+        and allocation.instance_id == instance_id
+        and allocation.layout_id == layout_id == _LAYOUT_ID
+        and allocation.provider_id == _PROVIDER_ID
+        and allocation.relative_path == expected_relative_path
+        and allocation.kind == "fresh"
+        and allocation.status == "provisioning"
+        and type(allocation.generation) is int
+        and allocation.generation >= 1
+        and allocation.restore_source_bundle_id is None
+        and type(runtime_uid) is int
+        and runtime_uid >= 0
+    )
+
+
 def _validate_root(state_root: Path, runtime_uid: int) -> os.stat_result:
     try:
         after = _verified_root_ancestry(state_root, runtime_uid)
@@ -689,12 +956,12 @@ def _create_layout(
         _verify_managed_state_identity_file(temporary, runtime_uid)
         named = os.lstat(temporary)
         _require_empty_identity_file(named)
-        if not _same_snapshot(opened, named):
+        if not _same_managed_file_identity(opened, named):
             raise OSError
         _sync_descriptor(descriptor)
         after = os.fstat(descriptor)
         _require_empty_identity_file(after)
-        if not _same_snapshot(opened, after):
+        if not _same_managed_file_identity(opened, after):
             raise OSError
         synced_status = after
     finally:
@@ -704,7 +971,10 @@ def _create_layout(
     _publish_no_replace(temporary, identity)
     identity_status = os.lstat(identity)
     _require_empty_identity_file(identity_status)
-    if synced_status is None or not _same_snapshot(synced_status, identity_status):
+    if synced_status is None or not _same_managed_file_identity(
+        synced_status,
+        identity_status,
+    ):
         raise OSError
     _verify_managed_state_identity_file(identity, runtime_uid)
     statuses[identity_name] = identity_status
@@ -726,7 +996,7 @@ def _validate_final_layout(
     if os.path.lexists(state_root / f".{allocation_id}.quarantine"):
         raise OSError
     current_allocation = _validated_directory_status(allocation, runtime_uid)
-    if not _same_identity(allocation_status, current_allocation):
+    if not _same_directory_identity(allocation_status, current_allocation):
         raise OSError
     try:
         allocation.resolve(strict=True).relative_to(state_root.resolve(strict=True))
@@ -741,13 +1011,16 @@ def _validate_final_layout(
 
     for name in _LAYOUT_DIRECTORIES:
         status = _validated_directory_status(allocation / name, runtime_uid)
-        if not _same_identity(component_statuses[name], status):
+        if not _same_directory_identity(component_statuses[name], status):
             raise OSError
 
     identity = allocation / identity_name
     status = os.lstat(identity)
     _require_empty_identity_file(status)
-    if not _same_identity(component_statuses[identity_name], status):
+    if not _same_managed_file_identity(
+        component_statuses[identity_name],
+        status,
+    ):
         raise OSError
     _verify_managed_state_identity_file(identity, runtime_uid)
     descriptor: int | None = None
@@ -755,7 +1028,10 @@ def _validate_final_layout(
         descriptor = os.open(identity, _read_only_flags())
         opened = os.fstat(descriptor)
         _require_empty_identity_file(opened)
-        if not _same_snapshot(status, opened) or os.read(descriptor, 1) != b"":
+        if (
+            not _same_managed_file_identity(status, opened)
+            or os.read(descriptor, 1) != b""
+        ):
             raise OSError
     finally:
         if descriptor is not None:
@@ -794,7 +1070,10 @@ def _verify_existing_layout(
     _verify_managed_state_identity_file(identity, runtime_uid)
     verified_identity_status = os.lstat(identity)
     _require_empty_identity_file(verified_identity_status)
-    if not _same_snapshot(identity_status, verified_identity_status):
+    if not _same_managed_file_identity(
+        identity_status,
+        verified_identity_status,
+    ):
         raise OSError
 
     descriptor: int | None = None
@@ -802,23 +1081,26 @@ def _verify_existing_layout(
         descriptor = os.open(identity, _read_only_flags())
         opened_before = os.fstat(descriptor)
         _require_empty_identity_file(opened_before)
-        if not _same_snapshot(verified_identity_status, opened_before):
+        if not _same_managed_file_identity(
+            verified_identity_status,
+            opened_before,
+        ):
             raise OSError
         if os.read(descriptor, 1) != b"":
             raise OSError
         opened_after = os.fstat(descriptor)
         _require_empty_identity_file(opened_after)
-        if not _same_snapshot(opened_before, opened_after):
+        if not _same_managed_file_identity(opened_before, opened_after):
             raise OSError
 
         named_after = os.lstat(identity)
         _require_empty_identity_file(named_after)
-        if not _same_snapshot(opened_after, named_after):
+        if not _same_managed_file_identity(opened_after, named_after):
             raise OSError
         _verify_managed_state_identity_file(identity, runtime_uid)
         named_verified = os.lstat(identity)
         _require_empty_identity_file(named_verified)
-        if not _same_snapshot(named_after, named_verified):
+        if not _same_managed_file_identity(named_after, named_verified):
             raise OSError
     finally:
         if descriptor is not None:
@@ -829,12 +1111,12 @@ def _verify_existing_layout(
     if os.path.lexists(state_root / f".{allocation_id}.quarantine"):
         raise OSError
     final_allocation_status = _validated_directory_status(allocation, runtime_uid)
-    if not _same_snapshot(allocation_status, final_allocation_status):
+    if not _same_directory_identity(allocation_status, final_allocation_status):
         raise OSError
     final_component_statuses: dict[str, os.stat_result] = {}
     for name, expected in component_statuses.items():
         current = _validated_directory_status(allocation / name, runtime_uid)
-        if not _same_identity(expected, current):
+        if not _same_directory_identity(expected, current):
             raise OSError
         final_component_statuses[name] = current
 
@@ -843,9 +1125,15 @@ def _verify_existing_layout(
     _verify_managed_state_identity_file(identity, runtime_uid)
     identity_after_permission = os.lstat(identity)
     _require_empty_identity_file(identity_after_permission)
-    if not _same_snapshot(final_identity_status, identity_after_permission):
+    if not _same_managed_file_identity(
+        final_identity_status,
+        identity_after_permission,
+    ):
         raise OSError
-    if not _same_snapshot(verified_identity_status, identity_after_permission):
+    if not _same_managed_file_identity(
+        verified_identity_status,
+        identity_after_permission,
+    ):
         raise OSError
 
     with os.scandir(allocation) as entries:
@@ -935,6 +1223,46 @@ def _validated_directory_status(path: Path, runtime_uid: int) -> os.stat_result:
     return after
 
 
+def _verified_identity_file_status(
+    path: Path,
+    runtime_uid: int,
+) -> os.stat_result:
+    status = os.lstat(path)
+    _require_empty_identity_file(status)
+    _verify_managed_state_identity_file(path, runtime_uid)
+    verified = os.lstat(path)
+    _require_empty_identity_file(verified)
+    if not _same_managed_file_identity(status, verified):
+        raise OSError
+
+    descriptor: int | None = None
+    opened_after: os.stat_result | None = None
+    try:
+        descriptor = os.open(path, _read_only_flags())
+        opened_before = os.fstat(descriptor)
+        _require_empty_identity_file(opened_before)
+        if not _same_managed_file_identity(verified, opened_before):
+            raise OSError
+        if os.read(descriptor, 1) != b"":
+            raise OSError
+        opened_after = os.fstat(descriptor)
+        _require_empty_identity_file(opened_after)
+        if not _same_managed_file_identity(opened_before, opened_after):
+            raise OSError
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    named_after = os.lstat(path)
+    _require_empty_identity_file(named_after)
+    if opened_after is None or not _same_managed_file_identity(
+        opened_after,
+        named_after,
+    ):
+        raise OSError
+    return named_after
+
+
 def _require_directory(status: os.stat_result) -> None:
     if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
         raise OSError
@@ -983,6 +1311,26 @@ def _same_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
+def _same_managed_file_identity(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_uid",
+        "st_gid",
+        "st_file_attributes",
+        "st_reparse_tag",
+        "st_nlink",
+        "st_size",
+    )
+    return all(
+        getattr(left, field, None) == getattr(right, field, None) for field in fields
+    )
+
+
 def _same_verified_layout(
     left: _VerifiedStateLayout,
     right: _VerifiedStateLayout,
@@ -1015,7 +1363,10 @@ def _same_verified_layout(
         )
     ):
         return False
-    return _same_snapshot(left.identity_status, right.identity_status)
+    return _same_managed_file_identity(
+        left.identity_status,
+        right.identity_status,
+    )
 
 
 def _exclusive_write_flags() -> int:
