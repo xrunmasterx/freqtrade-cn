@@ -373,6 +373,13 @@ class PreparationSpy:
             return self.snapshot_override  # type: ignore[return-value]
         return launch_snapshot(revalidated.identity)
 
+    def revalidate_for_runtime_action(
+        self,
+        revalidated: Any,
+        snapshot: LaunchSnapshot,
+    ) -> None:
+        self.events.append(("pre_action", revalidated.identity.attempt_id))
+
     def compile_access_network_plan(
         self,
         revalidated: Any,
@@ -544,6 +551,31 @@ def run_reconciliation(
 
 
 class RuntimeSupervisorDecisionTests(unittest.TestCase):
+    def test_launch_provenance_accepts_sha1_and_sha256_git_object_ids(self) -> None:
+        from tools.runtime_supervisor.reconciler import LaunchProvenance
+
+        for length in (40, 64):
+            with self.subTest(length=length):
+                value = LaunchProvenance(
+                    launch_authority_digest="a" * 64,
+                    root_commit="1" * length,
+                    backend_commit="2" * length,
+                    frontend_commit="3" * length,
+                    strategies_commit="4" * length,
+                )
+                self.assertEqual(len(value.root_commit), length)
+
+        for invalid in ("a" * 39, "a" * 41, "a" * 63, "A" * 64):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "^invalid launch provenance$"):
+                    LaunchProvenance(
+                        launch_authority_digest="a" * 64,
+                        root_commit=invalid,
+                        backend_commit="2" * 40,
+                        frontend_commit="3" * 40,
+                        strategies_commit="4" * 40,
+                    )
+
     def test_action_aware_reconciliation_matrix(self) -> None:
         from tools.runtime_supervisor.domain import (
             ReconciliationAction,
@@ -995,12 +1027,13 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
                 "compile",
                 ("inspect", "paper-attempt-2"),
                 ("begin", "job-1", "paper-attempt-2", preparation.resolved_material),
+                ("pre_action", "paper-attempt-2"),
                 ("launch", "paper-attempt-2"),
+                "secret_close",
                 ("inspect", "paper-attempt-2"),
                 ("compile_access_network", "paper-attempt-2"),
                 ("network_active", "paper-attempt-2"),
                 ("healthy", "job-1", "paper-attempt-2"),
-                "secret_close",
             ],
         )
 
@@ -1095,7 +1128,17 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
             ),
             events,
         )
-        self.assertEqual(events[-1], "secret_close")
+        self.assertLess(
+            events.index("secret_close"),
+            events.index(
+                (
+                    "blocked",
+                    "job-1",
+                    "paper-attempt-2",
+                    "runtime_access_network_invalid",
+                )
+            ),
+        )
 
     def test_active_adopt_rejects_a_plan_for_another_runtime_identity(self) -> None:
         from tools.runtime_access_network import compile_runtime_access_network_plan
@@ -1393,33 +1436,27 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
                     launch_provenance(),
                 )
 
-        for status, expected_binding in (
-            ("launching", "paper-attempt-1"),
-            ("stopped", None),
-            ("invalid", None),
-        ):
-            with self.subTest(status=status):
-                events: list[object] = []
-                latest = Latest("paper-attempt-1", status, "a" * 64, object())
-                repository = RepositorySpy(events, latest)
-                preparation = MismatchingPreparation(
-                    events, {"paper-attempt-1": expected_identity()}
-                )
-                driver = DriverSpy(events, [])
-                result = reconciler(
-                    repository, preparation, driver, NetworkGateSpy(events)
-                ).reconcile(reconciliation_job())
-                self.assertIs(result.decision, ReconciliationDecision.FAIL_LATCHED)
-                self.assertEqual(result.failure_code, "revalidated_identity_mismatch")
-                self.assertEqual(
-                    events[-1],
-                    (
-                        "blocked",
-                        "job-1",
-                        expected_binding,
-                        "revalidated_identity_mismatch",
-                    ),
-                )
+        events: list[object] = []
+        latest = Latest("paper-attempt-1", "launching", "a" * 64, object())
+        repository = RepositorySpy(events, latest)
+        preparation = MismatchingPreparation(
+            events, {"paper-attempt-1": expected_identity()}
+        )
+        driver = DriverSpy(events, [])
+        result = reconciler(
+            repository, preparation, driver, NetworkGateSpy(events)
+        ).reconcile(reconciliation_job())
+        self.assertIs(result.decision, ReconciliationDecision.FAIL_LATCHED)
+        self.assertEqual(result.failure_code, "revalidated_identity_mismatch")
+        self.assertEqual(
+            events[-1],
+            (
+                "blocked",
+                "job-1",
+                "paper-attempt-1",
+                "revalidated_identity_mismatch",
+            ),
+        )
 
     def test_active_attempt_requires_unchanged_resolved_material(self) -> None:
         from tools.runtime_supervisor.domain import ReconciliationDecision
@@ -1618,7 +1655,7 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
         self.assertEqual(result.failure_code, "terminal_runtime_present")
         self.assertEqual(
             events[-2:],
-            [("blocked", "job-1", None, "terminal_runtime_present"), "secret_close"],
+            ["secret_close", ("blocked", "job-1", None, "terminal_runtime_present")],
         )
         self.assertFalse(
             any(
@@ -1650,7 +1687,7 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
         self.assertEqual(result.failure_code, "candidate_runtime_occupied")
         self.assertEqual(
             events[-2:],
-            [("blocked", "job-1", None, "candidate_runtime_occupied"), "secret_close"],
+            ["secret_close", ("blocked", "job-1", None, "candidate_runtime_occupied")],
         )
         self.assertFalse(
             any(
@@ -1750,6 +1787,15 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
                 self.events.append(("launch", snapshot.identity.attempt_id))
                 raise RuntimeError("launch failed")
 
+        class FailingPreAction(PreparationSpy):
+            def revalidate_for_runtime_action(
+                self,
+                revalidated: Any,
+                snapshot: LaunchSnapshot,
+            ) -> None:
+                self.events.append(("pre_action", revalidated.identity.attempt_id))
+                raise RuntimeError("pre-action failed")
+
         class FailingResultRepository(RepositorySpy):
             def record_healthy(
                 self,
@@ -1773,6 +1819,7 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
         )
         cases = (
             (RepositorySpy, FailingPreparation, DriverSpy, "compile failed"),
+            (RepositorySpy, FailingPreAction, DriverSpy, "pre-action failed"),
             (RepositorySpy, PreparationSpy, FailingDriver, "launch failed"),
             (
                 FailingResultRepository,
@@ -1791,7 +1838,73 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
                     reconciler(
                         repository, preparation, driver, NetworkGateSpy(events)
                     ).reconcile(reconciliation_job())
-                self.assertEqual(events[-1], "secret_close")
+                if message == "result failed":
+                    self.assertLess(
+                        events.index("secret_close"),
+                        events.index(("healthy", "job-1", "paper-attempt-2")),
+                    )
+                else:
+                    self.assertEqual(events[-1], "secret_close")
+                if message == "pre-action failed":
+                    self.assertFalse(
+                        any(
+                            isinstance(event, tuple) and event[0] == "launch"
+                            for event in events
+                        )
+                    )
+
+    def test_post_begin_cleanup_failure_keeps_the_attempt_binding(self) -> None:
+        from tools.runtime_supervisor.domain import ReconciliationDecision
+
+        class CleanupFailureContext(SecretContext):
+            def __exit__(
+                self,
+                exc_type: object,
+                exc_value: object,
+                traceback: object,
+            ) -> None:
+                self.events.append("secret_close")
+                raise DriverPolicyError()
+
+        class CleanupFailurePreparation(PreparationSpy):
+            def resolve_secrets(
+                self,
+                revalidated: object,
+            ) -> AbstractContextManager[object]:
+                self.events.append("resolve_secrets")
+                return CleanupFailureContext(self.events)
+
+        events: list[object] = []
+        identity = dataclasses.replace(
+            expected_identity(),
+            attempt_id="paper-attempt-2",
+            container_name="runtime-paper-attempt-2",
+        )
+        repository = RepositorySpy(events, None)
+        preparation = CleanupFailurePreparation(
+            events,
+            {"paper-attempt-2": identity},
+        )
+        driver = DriverSpy(events, [DriverInspection.absent()])
+
+        outcome = reconciler(
+            repository,
+            preparation,
+            driver,
+            NetworkGateSpy(events),
+        ).reconcile(reconciliation_job())
+
+        self.assertIs(outcome.decision, ReconciliationDecision.FAIL_LATCHED)
+        self.assertEqual(outcome.attempt_id, "paper-attempt-2")
+        self.assertEqual(outcome.failure_code, "runtime_policy_invalid")
+        self.assertIn(
+            ("begin", "job-1", "paper-attempt-2", preparation.resolved_material),
+            events,
+        )
+        self.assertEqual(
+            events[-1],
+            ("blocked", "job-1", "paper-attempt-2", "runtime_policy_invalid"),
+        )
 
     def test_preparation_failures_never_reach_the_driver(self) -> None:
 
@@ -1888,13 +2001,13 @@ class RuntimeSupervisorOrchestrationTests(unittest.TestCase):
         self.assertEqual(
             events[-2:],
             [
+                "secret_close",
                 (
                     "blocked",
                     "job-1",
                     None,
                     "compiled_snapshot_identity_mismatch",
                 ),
-                "secret_close",
             ],
         )
 

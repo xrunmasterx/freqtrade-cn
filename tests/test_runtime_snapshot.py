@@ -365,6 +365,7 @@ def _attempt(spec: RuntimeSpecLaunchAuthority) -> ResolvedAttemptAuthority:
         runtime_spec_payload_digest=spec.payload_digest,
         adapter_template_revision_id=spec.adapter_template_revision_id,
         state_allocation_id=STATE_ALLOCATION_ID,
+        state_allocation_generation=1,
         resolved_secret_versions=tuple(
             ResolvedSecretVersionAuthority(
                 secret_reference_id=reference_id,

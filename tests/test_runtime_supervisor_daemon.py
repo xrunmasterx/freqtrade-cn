@@ -396,19 +396,32 @@ class SupervisorProcessLockTests(unittest.TestCase):
 
 class RuntimeSupervisorMainTests(unittest.TestCase):
     def test_unconfigured_production_assembly_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            stderr = io.StringIO()
+        for command in ("run", "reconcile-once"):
             with (
-                redirect_stderr(stderr),
+                self.subTest(command=command),
+                mock.patch.object(supervisor_main, "SupervisorProcessLock") as lock,
                 mock.patch.object(
                     supervisor_main,
-                    "SUPERVISOR_LOCK_PATH",
-                    Path(directory) / "supervisor.lock",
-                ),
+                    "SupervisorDockerWriterGuard",
+                ) as writer_guard,
+                mock.patch.object(supervisor_main, "_assemble_supervisor") as assemble,
             ):
-                code = supervisor_main.main(["reconcile-once"])
-        self.assertEqual(code, 78)
-        self.assertEqual(stderr.getvalue(), "runtime_supervisor_not_enabled\n")
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    code = supervisor_main.main([command])
+            self.assertEqual(code, 78)
+            self.assertEqual(stderr.getvalue(), "runtime_supervisor_not_enabled\n")
+            lock.assert_not_called()
+            writer_guard.assert_not_called()
+            assemble.assert_not_called()
+
+    def test_machine_readable_production_boundary_remains_closed(self) -> None:
+        self.assertIs(supervisor_main.PRODUCTION_ASSEMBLY_ENABLED, False)
+        self.assertIs(
+            supervisor_main.INTERNAL_PERSISTED_ASSEMBLY_SEAM_AVAILABLE,
+            True,
+        )
+        self.assertIs(supervisor_main.HOST_RUNTIME_MUTATION_BRIDGE_ENABLED, False)
 
     def test_unknown_arguments_fail_without_loading_assembly(self) -> None:
         stderr = io.StringIO()

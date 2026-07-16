@@ -15,6 +15,16 @@ IMAGE_ID = f"sha256:{'8' * 64}"
 
 
 class RuntimeSupervisorOfflineAcceptanceTests(unittest.TestCase):
+    def test_input_contract_accepts_sha1_and_sha256_object_ids(self) -> None:
+        for length in (40, 64):
+            with self.subTest(length=length):
+                self.assertIsNotNone(
+                    offline_acceptance._COMMIT.fullmatch("a" * length)
+                )
+        for invalid in ("a" * 39, "a" * 41, "a" * 63, "A" * 64):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(offline_acceptance._COMMIT.fullmatch(invalid))
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
