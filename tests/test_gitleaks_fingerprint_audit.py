@@ -113,9 +113,9 @@ class GitleaksFingerprintAuditTests(unittest.TestCase):
         )
         prefix = "freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:"
 
-        for line in (508, 1210, 1215, 1226):
+        for line in (517, 1220, 1225, 1236):
             self.assertEqual(fingerprints[f"{prefix}{line}"], 1)
-        for line in (402, 1100, 1105, 1116):
+        for line in (508, 1210, 1215, 1226):
             self.assertEqual(fingerprints[f"{prefix}{line}"], 0)
 
 
