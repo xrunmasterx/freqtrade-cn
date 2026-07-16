@@ -251,7 +251,7 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         for mount in lease.mounts:
             self.assertIsInstance(mount, VerifiedSecretMount)
             self.assertEqual(mount.attempt_id, "attempt-1")
-            self.assertEqual(mount.provider_id, "local-file-secret-v1")
+            self.assertEqual(mount.provider_id, "local-file-v1")
             requirement = next(
                 item
                 for item in self.requirements

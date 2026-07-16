@@ -456,7 +456,7 @@ def _secrets() -> tuple[VerifiedSecretMount, ...]:
     return tuple(
         VerifiedSecretMount(
             attempt_id=ATTEMPT_ID,
-            provider_id="local-file-secret-v1",
+            provider_id="local-file-v1",
             reference_id=reference_id,
             version_id=version_id,
             secret_class=secret_class,

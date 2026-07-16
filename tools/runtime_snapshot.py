@@ -50,7 +50,7 @@ _LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,127}")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _MATERIAL_PROVIDER_ID = "committed-paper-probe-material-v1"
 _STATE_PROVIDER_ID = "managed-local-v1"
-_SECRET_PROVIDER_ID = "local-file-secret-v1"
+_SECRET_PROVIDER_ID = "local-file-v1"
 _NETWORK_ALIAS_DERIVATION = "sha256-instance-nul-attempt-v1"
 _MATERIAL_PATHS = {
     "runtime_config": "ft_userdata/user_data/config.example.json",
