@@ -12,9 +12,7 @@ from tools.committed_git import CommittedGitStore
 
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
-_SEMANTIC_VERSION = re.compile(
-    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
-)
+_SEMANTIC_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 _POLICY_PATHS = {
     "image_policy_ids": "ops/runtime-policies/image-policies.json",
@@ -96,6 +94,7 @@ _PAPER_PROBE_IDENTITY = {
     "image_policy_id": "freqtrade-reviewed-image-v1",
     "mount_policy_ids": [
         "runtime-config-ro-v1",
+        "safety-policy-ro-v1",
         "strategy-ro-v1",
         "managed-state-rw-v1",
         "api-secrets-ro-v1",
@@ -171,7 +170,7 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("invalid JSON constant")
 
 
-def _canonical_payload(document: bytes) -> object:
+def parse_canonical_json_document(document: bytes) -> object:
     if document.startswith(b"\xef\xbb\xbf"):
         raise ValueError("artifact JSON must not contain a BOM")
     try:
@@ -198,7 +197,7 @@ def _canonical_payload(document: bytes) -> object:
 
 
 def _policy_ids(document: bytes) -> frozenset[str]:
-    payload = _canonical_payload(document)
+    payload = parse_canonical_json_document(document)
     if not isinstance(payload, dict):
         raise ValueError("policy registry root must be a JSON object")
     expected_keys = {"policy_ids", "schema_version"}
@@ -211,7 +210,9 @@ def _policy_ids(document: bytes) -> frozenset[str]:
     if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
         raise ValueError("policy registry schema_version must be integer 1")
     policy_ids = payload["policy_ids"]
-    if not isinstance(policy_ids, list) or any(type(value) is not str for value in policy_ids):
+    if not isinstance(policy_ids, list) or any(
+        type(value) is not str for value in policy_ids
+    ):
         raise ValueError("policy_ids must be an array of strings")
     if not policy_ids:
         raise ValueError("policy_ids must be non-empty")
@@ -305,7 +306,9 @@ def validate_template(
         raise ValueError("unknown image policy")
     if strings["command_policy_id"] not in registry.command_policy_ids:
         raise ValueError("unknown command policy")
-    if any(value not in registry.mount_policy_ids for value in arrays["mount_policy_ids"]):
+    if any(
+        value not in registry.mount_policy_ids for value in arrays["mount_policy_ids"]
+    ):
         raise ValueError("unknown mount policy")
     if strings["network_policy_id"] not in registry.network_policy_ids:
         raise ValueError("unknown network policy")
@@ -316,8 +319,13 @@ def validate_template(
     if strings["state_layout_id"] not in registry.state_layout_ids:
         raise ValueError("unknown state layout")
 
-    if payload["template_id"] == "freqtrade-paper-probe-v1" and payload != _PAPER_PROBE_IDENTITY:
-        raise ValueError("freqtrade paper probe identity must match the approved fixed payload")
+    if (
+        payload["template_id"] == "freqtrade-paper-probe-v1"
+        and payload != _PAPER_PROBE_IDENTITY
+    ):
+        raise ValueError(
+            "freqtrade paper probe identity must match the approved fixed payload"
+        )
 
     immutable_payload = {
         key: tuple(value) if isinstance(value, list) else value
@@ -335,7 +343,7 @@ def read_committed_template(
     store.assert_template_checkout_clean()
     source_path = f"ops/adapter-templates/{template_id}.json"
     document = store.read_template_blob(template_id)
-    payload = _canonical_payload(document)
+    payload = parse_canonical_json_document(document)
     registry = _load_registry(store)
     validated_payload = validate_template(payload, registry)
     if validated_payload["template_id"] != template_id:

@@ -88,13 +88,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
     def read_all_secret_values(self) -> dict[str, list[str]]:
         return {
             service["name"]: [
-                (
-                    self.root
-                    / "ft_userdata"
-                    / "secrets"
-                    / service["name"]
-                    / filename
-                )
+                (self.root / "ft_userdata" / "secrets" / service["name"] / filename)
                 .read_text(encoding="utf-8")
                 .strip()
                 for filename in bootstrap_runtime.SECRET_SPECS
@@ -213,7 +207,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         service_values = self.read_all_secret_values()
         all_values = [value for values in service_values.values() for value in values]
         self.assertTrue(all(len(values) == 3 for values in service_values.values()))
-        self.assertTrue(all(len(values) == len(set(values)) for values in service_values.values()))
+        self.assertTrue(
+            all(len(values) == len(set(values)) for values in service_values.values())
+        )
         self.assertEqual(len(all_values), len(set(all_values)))
         self.assertTrue(all(len(value) >= 32 for value in all_values))
 
@@ -226,7 +222,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
                 for directory in ("home", "logs", "data", "backtest_results"):
                     self.assertTrue((state_root / directory).is_dir())
 
-    def test_init_creates_and_hardens_managed_state_root_without_touching_children(self) -> None:
+    def test_init_creates_and_hardens_managed_state_root_without_touching_children(
+        self,
+    ) -> None:
         managed_root = self.root / bootstrap_runtime.MANAGED_STATE_ROOT
         managed_root.mkdir(parents=True)
         child = managed_root / "existing-allocation"
@@ -246,7 +244,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
 
-    def test_verify_checks_managed_state_root_without_enumerating_children(self) -> None:
+    def test_verify_checks_managed_state_root_without_enumerating_children(
+        self,
+    ) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
         managed_root = self.root / bootstrap_runtime.MANAGED_STATE_ROOT
         child = managed_root / "existing-allocation"
@@ -273,7 +273,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         identity.write_bytes(b"")
         runtime_uid = 1001
         statuses = {
-            directory: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=runtime_uid),
+            directory: SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700, st_uid=runtime_uid
+            ),
             identity: SimpleNamespace(
                 st_mode=stat.S_IFREG | 0o600,
                 st_uid=runtime_uid,
@@ -322,7 +324,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.name == "posix", "POSIX symlink-parent integration")
-    def test_init_rejects_symlinked_managed_state_parent_without_following_it(self) -> None:
+    def test_init_rejects_symlinked_managed_state_parent_without_following_it(
+        self,
+    ) -> None:
         outside = self.root / "outside"
         outside.mkdir()
         (self.root / "ft_userdata").symlink_to(outside, target_is_directory=True)
@@ -353,7 +357,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
             )
 
         with (
-            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_parent),
+            mock.patch.object(
+                bootstrap_runtime.os, "lstat", side_effect=reparse_parent
+            ),
             self.assertRaisesRegex(ValueError, "managed state"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
@@ -369,7 +375,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     (self.root / service["state_root"] / "strategies").exists()
                 )
 
-    def test_migrate_research_paths_updates_exact_legacy_values_atomically(self) -> None:
+    def test_migrate_research_paths_updates_exact_legacy_values_atomically(
+        self,
+    ) -> None:
         config_path = self.root / "configs/research.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         document = {
@@ -453,7 +461,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     "market_data": {"meta_root": "a_share_meta"},
                     "side_data": {"root": "a_share_meta"},
                 }
-            ]
+            ],
         }
         config_path.write_text(json.dumps(document), encoding="utf-8")
         before = config_path.read_bytes()
@@ -472,7 +480,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         atomic_write.assert_not_called()
         self.assertEqual(config_path.read_bytes(), before)
 
-    def test_migrate_research_paths_rejects_unknown_values_without_partial_write(self) -> None:
+    def test_migrate_research_paths_rejects_unknown_values_without_partial_write(
+        self,
+    ) -> None:
         mutations = (
             ("data_source", "root", "/custom/data"),
             ("market_data", "meta_root", "custom/meta"),
@@ -486,9 +496,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     "research_bots": [
                         {
                             "data_source": {"root": "research_data/a_share"},
-                            "market_data": {
-                                "meta_root": "research_data/a_share_meta"
-                            },
+                            "market_data": {"meta_root": "research_data/a_share_meta"},
                             "side_data": {"root": "research_data/a_share_meta"},
                         }
                     ]
@@ -503,7 +511,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     return
 
                 with (
-                    mock.patch.object(bootstrap_runtime, "_atomic_write_text") as atomic_write,
+                    mock.patch.object(
+                        bootstrap_runtime, "_atomic_write_text"
+                    ) as atomic_write,
                     self.assertRaisesRegex(ValueError, "research path migration"),
                 ):
                     migrate(self.root, self.manifest)
@@ -512,9 +522,13 @@ class BootstrapRuntimeTests(unittest.TestCase):
                 self.assertEqual(config_path.read_bytes(), before)
 
     def test_parser_exposes_explicit_research_path_migration_action(self) -> None:
-        self.assertIn("migrate-research-paths", bootstrap_runtime.build_parser().format_help())
+        self.assertIn(
+            "migrate-research-paths", bootstrap_runtime.build_parser().format_help()
+        )
 
-    def test_verify_requires_data_and_backtest_directories_for_every_service(self) -> None:
+    def test_verify_requires_data_and_backtest_directories_for_every_service(
+        self,
+    ) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 
         for service in self.manifest["services"]:
@@ -537,8 +551,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         with (
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
-            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
-            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(
+                bootstrap_runtime.os, "getuid", return_value=1001, create=True
+            ),
+            mock.patch.object(
+                bootstrap_runtime.os, "getgid", return_value=1002, create=True
+            ),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
             mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
@@ -569,14 +587,20 @@ class BootstrapRuntimeTests(unittest.TestCase):
     def test_posix_init_rejects_root_runtime_identity(self) -> None:
         with (
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
-            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=0, create=True),
-            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=0, create=True),
+            mock.patch.object(
+                bootstrap_runtime.os, "getuid", return_value=0, create=True
+            ),
+            mock.patch.object(
+                bootstrap_runtime.os, "getgid", return_value=0, create=True
+            ),
             self.assertRaisesRegex(ValueError, "non-root runtime identity"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
         self.assertFalse((self.root / ".env").exists())
 
-    def test_init_rejects_conflicting_or_unknown_compose_identity_override(self) -> None:
+    def test_init_rejects_conflicting_or_unknown_compose_identity_override(
+        self,
+    ) -> None:
         override = self.root / "ft_userdata/runtime/compose.identity.yml"
         override.parent.mkdir(parents=True)
         invalid_documents = (
@@ -614,8 +638,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
     def test_init_hardens_existing_runtime_control_files(self) -> None:
         environment = self.root / ".env"
         environment.write_text(
-            "PORT=9000\nFREQTRADE_RUNTIME_UID=1001\n"
-            "FREQTRADE_RUNTIME_GID=1002\n",
+            "PORT=9000\nFREQTRADE_RUNTIME_UID=1001\nFREQTRADE_RUNTIME_GID=1002\n",
             encoding="utf-8",
         )
         override = self.root / "ft_userdata/runtime/compose.identity.yml"
@@ -633,13 +656,22 @@ class BootstrapRuntimeTests(unittest.TestCase):
         )
         with (
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
-            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
-            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
-            mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file") as harden,
+            mock.patch.object(
+                bootstrap_runtime.os, "getuid", return_value=1001, create=True
+            ),
+            mock.patch.object(
+                bootstrap_runtime.os, "getgid", return_value=1002, create=True
+            ),
+            mock.patch.object(
+                bootstrap_runtime, "_harden_runtime_control_file"
+            ) as harden,
             mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
-        self.assertEqual(harden.call_args_list, [mock.call(environment, 1001), mock.call(override, 1001)])
+        self.assertEqual(
+            harden.call_args_list,
+            [mock.call(environment, 1001), mock.call(override, 1001)],
+        )
         self.assertIn("PORT=9000", environment.read_text(encoding="utf-8"))
 
     def test_verify_rejects_insecure_runtime_control_file_metadata(self) -> None:
@@ -691,7 +723,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     bootstrap_runtime.init_runtime(self.root, self.manifest)
                 self.assertEqual(environment.read_text(encoding="utf-8"), content)
 
-    def test_verify_rejects_missing_duplicate_invalid_or_mismatched_identity(self) -> None:
+    def test_verify_rejects_missing_duplicate_invalid_or_mismatched_identity(
+        self,
+    ) -> None:
         with mock.patch.object(bootstrap_runtime, "_is_windows", return_value=True):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -767,7 +801,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         config.write_text('{"marker": "keep"}\n', encoding="utf-8")
         secret = self.root / "ft_userdata/secrets/freqtrade/api_password"
         secret.parent.mkdir(parents=True)
-        secret.write_text("existing-secret-value-that-is-long-enough\n", encoding="utf-8")
+        secret.write_text(
+            "existing-secret-value-that-is-long-enough\n", encoding="utf-8"
+        )
 
         bootstrap_runtime.init_runtime(self.root, self.manifest)
 
@@ -834,8 +870,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
         )
         with (
             mock.patch.object(Path, "stat", return_value=status),
-            mock.patch.object(bootstrap_runtime.os, "getgroups", return_value=[2001], create=True),
-            self.assertRaisesRegex(ValueError, "runtime writable directory permissions"),
+            mock.patch.object(
+                bootstrap_runtime.os, "getgroups", return_value=[2001], create=True
+            ),
+            self.assertRaisesRegex(
+                ValueError, "runtime writable directory permissions"
+            ),
         ):
             bootstrap_runtime._verify_posix_writable_directory(
                 directory,
@@ -859,9 +899,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
                     mock.patch.object(
                         bootstrap_runtime, "_is_windows", return_value=True
                     ),
-                    self.assertRaisesRegex(
-                        ValueError, "runtime writable directory"
-                    ),
+                    self.assertRaisesRegex(ValueError, "runtime writable directory"),
                 ):
                     bootstrap_runtime.verify_runtime(self.root, self.manifest)
                 directory.mkdir()
@@ -902,7 +940,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
                 "which",
                 return_value="C:/Program Files/PowerShell/powershell.exe",
             ),
-            mock.patch.object(bootstrap_runtime.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(
+                bootstrap_runtime.subprocess, "run", return_value=completed
+            ) as run,
         ):
             self.real_windows_acl("verify", secret)
 
@@ -914,6 +954,65 @@ class BootstrapRuntimeTests(unittest.TestCase):
         self.assertNotIn("shell", options)
         self.assertEqual(options["env"]["FREQTRADE_RUNTIME_SECRET_PATH"], str(secret))
 
+    def test_windows_trusted_path_wrapper_uses_argument_array_and_path_environment(
+        self,
+    ) -> None:
+        path = self.root / "trusted path with spaces"
+        completed = subprocess.CompletedProcess([], 0, "trusted path ACL: OK\n", "")
+
+        with (
+            mock.patch.object(
+                bootstrap_runtime.shutil,
+                "which",
+                return_value="C:/Program Files/PowerShell/powershell.exe",
+            ),
+            mock.patch.object(
+                bootstrap_runtime.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            bootstrap_runtime._verify_windows_trusted_path_permissions(path)
+
+        command = run.call_args.args[0]
+        options = run.call_args.kwargs
+        self.assertIsInstance(command, list)
+        self.assertEqual(command[0], "C:/Program Files/PowerShell/powershell.exe")
+        self.assertNotIn(str(path), command)
+        self.assertNotIn("shell", options)
+        self.assertEqual(
+            json.loads(options["env"]["FREQTRADE_RUNTIME_TRUSTED_PATHS"]),
+            [str(path)],
+        )
+        self.assertEqual(
+            options["env"]["FREQTRADE_RUNTIME_TRUSTED_PATH_ACTION"],
+            "verify",
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL integration test")
+    def test_windows_trusted_path_acl_accepts_hardened_and_rejects_group_writer(
+        self,
+    ) -> None:
+        path = self.root / "trusted-source"
+        path.mkdir()
+        bootstrap_runtime._harden_windows_trusted_directory_permissions(path)
+
+        bootstrap_runtime._verify_windows_trusted_path_permissions(path)
+
+        subprocess.run(
+            [
+                "icacls.exe",
+                str(path),
+                "/grant",
+                "*S-1-5-11:(OI)(CI)M",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        with self.assertRaisesRegex(ValueError, "Windows trusted path ACL"):
+            bootstrap_runtime._verify_windows_trusted_path_permissions(path)
+
     def test_windows_acl_failure_is_secret_safe_and_fails_closed(self) -> None:
         secret_value = "secret-value-that-must-not-appear-in-errors"
         secret = self.root / "secret"
@@ -921,8 +1020,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 1, "", "ACL command failed")
 
         with (
-            mock.patch.object(bootstrap_runtime.shutil, "which", return_value="powershell.exe"),
-            mock.patch.object(bootstrap_runtime.subprocess, "run", return_value=completed),
+            mock.patch.object(
+                bootstrap_runtime.shutil, "which", return_value="powershell.exe"
+            ),
+            mock.patch.object(
+                bootstrap_runtime.subprocess, "run", return_value=completed
+            ),
             self.assertRaisesRegex(ValueError, "Windows runtime secret ACL") as raised,
         ):
             self.real_windows_acl("verify", secret)
@@ -942,7 +1045,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
     def test_posix_init_existing_and_rotated_secrets_are_0600(self) -> None:
         existing = self.root / "ft_userdata/secrets/freqtrade/api_password"
         existing.parent.mkdir(parents=True)
-        existing.write_text("existing-secret-value-that-is-long-enough\n", encoding="utf-8")
+        existing.write_text(
+            "existing-secret-value-that-is-long-enough\n", encoding="utf-8"
+        )
         os.chmod(existing, 0o644)
 
         bootstrap_runtime.init_runtime(self.root, self.manifest)
@@ -960,8 +1065,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
     def test_posix_verify_uses_env_uid_and_requires_accessible_state(self) -> None:
         with (
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
-            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
-            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(
+                bootstrap_runtime.os, "getuid", return_value=1001, create=True
+            ),
+            mock.patch.object(
+                bootstrap_runtime.os, "getgid", return_value=1002, create=True
+            ),
             mock.patch.object(bootstrap_runtime, "_harden_runtime_control_file"),
             mock.patch.object(bootstrap_runtime, "_harden_managed_state_directory"),
         ):
@@ -969,8 +1078,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         with (
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
-            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
-            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(
+                bootstrap_runtime.os, "getuid", return_value=1001, create=True
+            ),
+            mock.patch.object(
+                bootstrap_runtime.os, "getgid", return_value=1002, create=True
+            ),
             mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
             mock.patch.object(bootstrap_runtime, "_verify_managed_state_directory"),
             mock.patch.object(
@@ -983,7 +1096,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
         self.assertTrue(verify_secret.call_args_list)
-        self.assertTrue(all(call.args[1] == 1001 for call in verify_secret.call_args_list))
+        self.assertTrue(
+            all(call.args[1] == 1001 for call in verify_secret.call_args_list)
+        )
         self.assertEqual(verify_directory.call_count, 15)
         self.assertTrue(
             all(
@@ -994,8 +1109,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         with (
             mock.patch.object(bootstrap_runtime, "_is_windows", return_value=False),
-            mock.patch.object(bootstrap_runtime.os, "getuid", return_value=1001, create=True),
-            mock.patch.object(bootstrap_runtime.os, "getgid", return_value=1002, create=True),
+            mock.patch.object(
+                bootstrap_runtime.os, "getuid", return_value=1001, create=True
+            ),
+            mock.patch.object(
+                bootstrap_runtime.os, "getgid", return_value=1002, create=True
+            ),
             mock.patch.object(bootstrap_runtime, "_verify_runtime_control_file"),
             mock.patch.object(bootstrap_runtime, "_verify_managed_state_directory"),
             mock.patch.object(bootstrap_runtime, "_verify_secret_permissions"),
@@ -1004,7 +1123,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
                 "_verify_posix_writable_directory",
                 side_effect=ValueError("runtime writable directory permissions"),
             ),
-            self.assertRaisesRegex(ValueError, "runtime writable directory permissions"),
+            self.assertRaisesRegex(
+                ValueError, "runtime writable directory permissions"
+            ),
         ):
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
@@ -1016,7 +1137,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
                 repeated + "\n", encoding="utf-8"
             )
 
-        with self.assertRaisesRegex(ValueError, "runtime secrets must be unique") as raised:
+        with self.assertRaisesRegex(
+            ValueError, "runtime secrets must be unique"
+        ) as raised:
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
         self.assertNotIn(repeated, str(raised.exception))
 
@@ -1026,7 +1149,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         path = self.root / "ft_userdata/secrets/freqtrade/ws_token"
         path.write_text(short_secret + "\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "runtime secret policy failed") as raised:
+        with self.assertRaisesRegex(
+            ValueError, "runtime secret policy failed"
+        ) as raised:
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
         self.assertNotIn(short_secret, str(raised.exception))
 
@@ -1035,7 +1160,11 @@ class BootstrapRuntimeTests(unittest.TestCase):
         config_path = self.root / "configs/spot.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config["api_server"].update(
-            {"password": "old-password", "jwt_secret_key": "old-jwt", "ws_token": "old-ws"}
+            {
+                "password": "old-password",
+                "jwt_secret_key": "old-jwt",
+                "ws_token": "old-ws",
+            }
         )
         config["exchange"]["name"] = "okx"
         config["unchanged"] = {"nested": [1, 2, 3]}
@@ -1110,7 +1239,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         self.assertEqual(len(platform_values), len(set(platform_values)))
         self.assertFalse(set(platform_values) & set(legacy_values))
 
-    def test_operator_secret_init_and_verify_use_shared_hardening_without_output(self) -> None:
+    def test_operator_secret_init_and_verify_use_shared_hardening_without_output(
+        self,
+    ) -> None:
         output = io.StringIO()
         with (
             mock.patch.object(
@@ -1123,8 +1254,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
 
         operator_secret = (
-            self.root
-            / "ft_userdata/secrets/platform/platform_operator_db_password"
+            self.root / "ft_userdata/secrets/platform/platform_operator_db_password"
         )
         value = operator_secret.read_text(encoding="utf-8").rstrip("\n")
         self.assertGreaterEqual(len(value), 32)
@@ -1148,11 +1278,12 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
     def test_operator_secret_init_and_verify_reject_reparse_points(self) -> None:
         operator_secret = (
-            self.root
-            / "ft_userdata/secrets/platform/platform_operator_db_password"
+            self.root / "ft_userdata/secrets/platform/platform_operator_db_password"
         )
         operator_secret.parent.mkdir(parents=True)
-        operator_secret.write_text("existing-operator-secret-value-long-enough\n", encoding="utf-8")
+        operator_secret.write_text(
+            "existing-operator-secret-value-long-enough\n", encoding="utf-8"
+        )
         real_lstat = os.lstat
 
         def reparse_operator(path: Path) -> os.stat_result:
@@ -1171,7 +1302,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
             )
 
         with (
-            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_operator),
+            mock.patch.object(
+                bootstrap_runtime.os, "lstat", side_effect=reparse_operator
+            ),
             self.assertRaisesRegex(ValueError, "invalid runtime secret file"),
         ):
             bootstrap_runtime.init_runtime(self.root, self.manifest)
@@ -1179,17 +1312,20 @@ class BootstrapRuntimeTests(unittest.TestCase):
         operator_secret.unlink()
         bootstrap_runtime.init_runtime(self.root, self.manifest)
         with (
-            mock.patch.object(bootstrap_runtime.os, "lstat", side_effect=reparse_operator),
+            mock.patch.object(
+                bootstrap_runtime.os, "lstat", side_effect=reparse_operator
+            ),
             self.assertRaisesRegex(ValueError, "platform runtime secret"),
         ):
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
     def test_operator_secret_init_and_verify_reject_symlinks(self) -> None:
         outside = self.root / "outside-operator-secret"
-        outside.write_text("outside-operator-secret-value-long-enough\n", encoding="utf-8")
+        outside.write_text(
+            "outside-operator-secret-value-long-enough\n", encoding="utf-8"
+        )
         operator_secret = (
-            self.root
-            / "ft_userdata/secrets/platform/platform_operator_db_password"
+            self.root / "ft_userdata/secrets/platform/platform_operator_db_password"
         )
         operator_secret.parent.mkdir(parents=True)
         try:
@@ -1220,7 +1356,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         else:
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
-    def test_verify_rejects_platform_secret_reused_by_legacy_without_leaking(self) -> None:
+    def test_verify_rejects_platform_secret_reused_by_legacy_without_leaking(
+        self,
+    ) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
         secret = "duplicate-platform-secret-value-that-must-not-leak"
         (self.root / "ft_userdata/secrets/platform/api_password").write_text(
@@ -1230,7 +1368,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
             secret + "\n", encoding="utf-8"
         )
 
-        with self.assertRaisesRegex(ValueError, "runtime secrets must be unique") as raised:
+        with self.assertRaisesRegex(
+            ValueError, "runtime secrets must be unique"
+        ) as raised:
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
         self.assertNotIn(secret, str(raised.exception))
 
@@ -1240,7 +1380,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         value = path.read_text(encoding="utf-8").strip()
         path.write_text(value + "\n\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "platform runtime secret policy failed"):
+        with self.assertRaisesRegex(
+            ValueError, "platform runtime secret policy failed"
+        ):
             bootstrap_runtime.verify_runtime(self.root, self.manifest)
 
     def test_rotate_does_not_expose_platform_as_a_legacy_service(self) -> None:
@@ -1248,7 +1390,9 @@ class BootstrapRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown runtime service"):
             bootstrap_runtime.rotate_secrets(self.root, self.manifest, {"platform"})
 
-    def test_rotate_platform_operator_changes_only_operator_database_secret(self) -> None:
+    def test_rotate_platform_operator_changes_only_operator_database_secret(
+        self,
+    ) -> None:
         bootstrap_runtime.init_runtime(self.root, self.manifest)
         platform_root = self.root / "ft_userdata/secrets/platform"
         before = {
@@ -1273,8 +1417,16 @@ class BootstrapRuntimeTests(unittest.TestCase):
             after["platform_operator_db_password"],
         )
         self.assertEqual(
-            {key: value for key, value in before.items() if key != "platform_operator_db_password"},
-            {key: value for key, value in after.items() if key != "platform_operator_db_password"},
+            {
+                key: value
+                for key, value in before.items()
+                if key != "platform_operator_db_password"
+            },
+            {
+                key: value
+                for key, value in after.items()
+                if key != "platform_operator_db_password"
+            },
         )
         self.assertTrue(after["platform_operator_db_password"].endswith(b"\n"))
         value = after["platform_operator_db_password"].rstrip(b"\n")

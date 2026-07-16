@@ -5,7 +5,7 @@ import os
 import re
 import secrets
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
@@ -34,6 +34,8 @@ _PROVISION_ERROR: Final = "state_provision_failed"
 _QUARANTINE_ERROR: Final = "state_quarantine_failed"
 _EXISTING_ERROR: Final = "state_existing_invalid"
 _VERIFY_EXISTING_ERROR: Final = "state_existing_verification_failed"
+_LEASE_ERROR: Final = "state_lease_invalid"
+_LEASE_VERIFICATION_ERROR: Final = "state_lease_verification_failed"
 
 
 class StateProvisionError(RuntimeError):
@@ -77,8 +79,131 @@ class ProvisionedState:
     durability: DurabilityLevel
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedStateMount:
+    attempt_id: str
+    state_allocation_id: str
+    instance_id: str
+    layout_id: str
+    provider_id: str
+    generation: int
+    relative_path: str
+    source: Path = field(repr=False)
+    runtime_uid: int
+    durability: DurabilityLevel
+
+    def __post_init__(self) -> None:
+        identifiers = (
+            self.attempt_id,
+            self.state_allocation_id,
+            self.instance_id,
+            self.layout_id,
+            self.provider_id,
+        )
+        expected_relative_path = f"ft_userdata/runtime/instances/{self.instance_id}"
+        try:
+            normalized_source = Path(os.path.abspath(os.fspath(self.source)))
+        except (OSError, TypeError, ValueError):
+            raise StateProvisionError(_LEASE_ERROR) from None
+        if (
+            not all(
+                isinstance(value, str) and _IDENTIFIER_PATTERN.fullmatch(value)
+                for value in identifiers
+            )
+            or self.layout_id != _LAYOUT_ID
+            or self.provider_id != _PROVIDER_ID
+            or type(self.generation) is not int
+            or self.generation < 1
+            or self.relative_path != expected_relative_path
+            or not isinstance(self.source, Path)
+            or self.source != normalized_source
+            or type(self.runtime_uid) is not int
+            or self.runtime_uid < 0
+            or self.durability not in ("atomic-process-crash", "power-loss-posix")
+        ):
+            raise StateProvisionError(_LEASE_ERROR)
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedStateLayout:
+    source: Path
+    root_ancestry: tuple[os.stat_result, ...]
+    allocation_status: os.stat_result
+    component_statuses: tuple[tuple[str, os.stat_result], ...]
+    identity_status: os.stat_result
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuedStateProof:
+    state: ProvisionedState
+    layout: _VerifiedStateLayout
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuedStateMountIdentity:
+    attempt_id: str
+    state_allocation_id: str
+    instance_id: str
+    layout_id: str
+    provider_id: str
+    generation: int
+    relative_path: str
+    source: Path
+    runtime_uid: int
+    durability: DurabilityLevel
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveStateLease:
+    lease: VerifiedStateMountLease
+    mount: VerifiedStateMount
+    identity: _IssuedStateMountIdentity
+    layout: _VerifiedStateLayout
+
+
+class VerifiedStateMountLease:
+    __slots__ = ("_closed", "_lease_id", "_provider")
+
+    def __init__(self, provider: ManagedStateProvider, lease_id: str) -> None:
+        self._provider = provider
+        self._lease_id = lease_id
+        self._closed = False
+
+    @property
+    def mount(self) -> VerifiedStateMount:
+        return self._provider._mount_for_lease(self)
+
+    def revalidate_source(self) -> Path:
+        return self._provider.revalidate_source(self)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._provider._close_mount_lease(self)
+        finally:
+            self._closed = True
+
+    def __enter__(self) -> VerifiedStateMountLease:
+        self._provider._mount_for_lease(self)
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        state = "closed" if self._closed else "open"
+        return f"<VerifiedStateMountLease {state}>"
+
+
 class ManagedStateProvider:
-    __slots__ = ("_reservation", "_runtime_uid", "_state_root")
+    __slots__ = (
+        "_active_leases",
+        "_issued_proofs",
+        "_reservation",
+        "_runtime_uid",
+        "_state_root",
+    )
 
     def __init__(
         self,
@@ -89,6 +214,8 @@ class ManagedStateProvider:
     ) -> None:
         self._reservation = reservation
         self._runtime_uid = runtime_uid
+        self._active_leases: dict[str, _ActiveStateLease] = {}
+        self._issued_proofs: list[_IssuedStateProof] = []
         try:
             self._state_root = Path(os.path.abspath(os.fspath(state_root)))
         except (OSError, TypeError, ValueError):
@@ -160,6 +287,13 @@ class ManagedStateProvider:
             )
             if not _same_identity(allocation_status, final_allocation_status):
                 raise OSError
+            verified_layout = _verify_existing_layout(
+                self._state_root,
+                root_status,
+                instance_id,
+                allocation_id,
+                self._runtime_uid,
+            )
         except Exception:
             if _quarantine_owned_allocation(
                 self._state_root,
@@ -173,7 +307,7 @@ class ManagedStateProvider:
                 raise StateProvisionError(_PROVISION_ERROR) from None
             raise StateProvisionError(_QUARANTINE_ERROR) from None
 
-        return ProvisionedState(
+        state = ProvisionedState(
             state_allocation_id=allocation_id,
             instance_id=instance_id,
             layout_id=layout_id,
@@ -184,6 +318,7 @@ class ManagedStateProvider:
                 "atomic-process-crash" if _is_windows() else "power-loss-posix"
             ),
         )
+        return self._remember_proof(state, verified_layout)
 
     def verify_existing(
         self,
@@ -203,7 +338,7 @@ class ManagedStateProvider:
 
         try:
             root_status = _validate_root(self._state_root, self._runtime_uid)
-            _verify_existing_layout(
+            verified_layout = _verify_existing_layout(
                 self._state_root,
                 root_status,
                 instance_id,
@@ -213,7 +348,7 @@ class ManagedStateProvider:
         except (OSError, RuntimeError, StateProvisionError, ValueError):
             raise StateProvisionError(_VERIFY_EXISTING_ERROR) from None
 
-        return ProvisionedState(
+        state = ProvisionedState(
             state_allocation_id=allocation_id,
             instance_id=instance_id,
             layout_id=layout_id,
@@ -224,6 +359,182 @@ class ManagedStateProvider:
                 "atomic-process-crash" if _is_windows() else "power-loss-posix"
             ),
         )
+        return self._remember_proof(state, verified_layout)
+
+    def acquire_mount_lease(
+        self,
+        attempt_id: str,
+        proof: ProvisionedState,
+    ) -> VerifiedStateMountLease:
+        if (
+            not isinstance(attempt_id, str)
+            or _IDENTIFIER_PATTERN.fullmatch(attempt_id) is None
+            or not isinstance(proof, ProvisionedState)
+            or self._active_leases
+        ):
+            raise StateProvisionError(_LEASE_ERROR)
+        issued = next(
+            (
+                candidate
+                for candidate in self._issued_proofs
+                if candidate.state is proof
+            ),
+            None,
+        )
+        if issued is None:
+            raise StateProvisionError(_LEASE_ERROR)
+
+        current = self._verify_lease_layout(proof)
+        if not _same_verified_layout(issued.layout, current):
+            raise StateProvisionError(_LEASE_VERIFICATION_ERROR)
+
+        mount = VerifiedStateMount(
+            attempt_id=attempt_id,
+            state_allocation_id=proof.state_allocation_id,
+            instance_id=proof.instance_id,
+            layout_id=proof.layout_id,
+            provider_id=proof.provider_id,
+            generation=proof.generation,
+            relative_path=proof.relative_path,
+            source=current.source,
+            runtime_uid=self._runtime_uid,
+            durability=proof.durability,
+        )
+        lease_id = secrets.token_hex(32)
+        while lease_id in self._active_leases:
+            lease_id = secrets.token_hex(32)
+        lease = VerifiedStateMountLease(self, lease_id)
+        self._active_leases[lease_id] = _ActiveStateLease(
+            lease=lease,
+            mount=mount,
+            identity=_IssuedStateMountIdentity(
+                attempt_id=mount.attempt_id,
+                state_allocation_id=mount.state_allocation_id,
+                instance_id=mount.instance_id,
+                layout_id=mount.layout_id,
+                provider_id=mount.provider_id,
+                generation=mount.generation,
+                relative_path=mount.relative_path,
+                source=current.source,
+                runtime_uid=mount.runtime_uid,
+                durability=mount.durability,
+            ),
+            layout=current,
+        )
+        return lease
+
+    def revalidate_source(self, lease: VerifiedStateMountLease) -> Path:
+        active = self._require_active_lease(lease)
+        self._require_minted_mount(active)
+        current = self._verify_lease_layout_values(
+            active.identity.instance_id,
+            active.identity.state_allocation_id,
+        )
+        if not _same_verified_layout(active.layout, current):
+            raise StateProvisionError(_LEASE_VERIFICATION_ERROR)
+        return active.identity.source
+
+    def _remember_proof(
+        self,
+        state: ProvisionedState,
+        layout: _VerifiedStateLayout,
+    ) -> ProvisionedState:
+        self._issued_proofs.append(_IssuedStateProof(state=state, layout=layout))
+        return state
+
+    def _verify_lease_layout(self, proof: ProvisionedState) -> _VerifiedStateLayout:
+        return self._verify_lease_layout_values(
+            proof.instance_id,
+            proof.state_allocation_id,
+        )
+
+    def _verify_lease_layout_values(
+        self,
+        instance_id: str,
+        allocation_id: str,
+    ) -> _VerifiedStateLayout:
+        try:
+            root_status = _validate_root(self._state_root, self._runtime_uid)
+            return _verify_existing_layout(
+                self._state_root,
+                root_status,
+                instance_id,
+                allocation_id,
+                self._runtime_uid,
+            )
+        except (OSError, RuntimeError, StateProvisionError, ValueError):
+            raise StateProvisionError(_LEASE_VERIFICATION_ERROR) from None
+
+    def _require_active_lease(
+        self,
+        lease: VerifiedStateMountLease,
+    ) -> _ActiveStateLease:
+        if type(lease) is not VerifiedStateMountLease:
+            raise StateProvisionError(_LEASE_ERROR)
+        active = self._active_leases.get(lease._lease_id)
+        if (
+            active is None
+            or active.lease is not lease
+            or lease._provider is not self
+            or lease._closed
+        ):
+            raise StateProvisionError(_LEASE_ERROR)
+        return active
+
+    def _mount_for_lease(self, lease: VerifiedStateMountLease) -> VerifiedStateMount:
+        active = self._require_active_lease(lease)
+        self._require_minted_mount(active)
+        return active.mount
+
+    def _close_mount_lease(self, lease: VerifiedStateMountLease) -> None:
+        active = self._require_active_lease(lease)
+        valid = _same_minted_mount(active.mount, active.identity)
+        del self._active_leases[lease._lease_id]
+        if not valid:
+            raise StateProvisionError(_LEASE_VERIFICATION_ERROR)
+
+    @staticmethod
+    def _require_minted_mount(active: _ActiveStateLease) -> None:
+        if not _same_minted_mount(active.mount, active.identity):
+            raise StateProvisionError(_LEASE_VERIFICATION_ERROR)
+
+
+def _same_minted_mount(
+    mount: VerifiedStateMount,
+    identity: _IssuedStateMountIdentity,
+) -> bool:
+    if (
+        type(mount) is not VerifiedStateMount
+        or type(identity) is not _IssuedStateMountIdentity
+        or any(
+            type(value) is not str
+            for value in (
+                mount.attempt_id,
+                mount.state_allocation_id,
+                mount.instance_id,
+                mount.layout_id,
+                mount.provider_id,
+                mount.relative_path,
+                mount.durability,
+            )
+        )
+        or type(mount.generation) is not int
+        or type(mount.runtime_uid) is not int
+        or type(mount.source) is not type(Path())
+    ):
+        return False
+    return (
+        mount.attempt_id == identity.attempt_id
+        and mount.state_allocation_id == identity.state_allocation_id
+        and mount.instance_id == identity.instance_id
+        and mount.layout_id == identity.layout_id
+        and mount.provider_id == identity.provider_id
+        and mount.generation == identity.generation
+        and mount.relative_path == identity.relative_path
+        and mount.source == identity.source
+        and mount.runtime_uid == identity.runtime_uid
+        and mount.durability == identity.durability
+    )
 
 
 def _reservation_is_valid(
@@ -308,14 +619,7 @@ def _existing_is_valid(
 
 def _validate_root(state_root: Path, runtime_uid: int) -> os.stat_result:
     try:
-        before = _capture_directory_ancestry(state_root)
-        _verify_managed_state_directory(state_root, runtime_uid)
-        after = _capture_directory_ancestry(state_root)
-        if len(before) != len(after) or any(
-            not _same_identity(previous, current)
-            for previous, current in zip(before, after, strict=True)
-        ):
-            raise OSError
+        after = _verified_root_ancestry(state_root, runtime_uid)
         state_root.resolve(strict=True)
         return after[-1]
     except (OSError, RuntimeError, ValueError):
@@ -327,6 +631,14 @@ def _require_root_identity(
     expected: os.stat_result,
     runtime_uid: int,
 ) -> None:
+    _verified_root_ancestry(state_root, runtime_uid, expected)
+
+
+def _verified_root_ancestry(
+    state_root: Path,
+    runtime_uid: int,
+    expected: os.stat_result | None = None,
+) -> tuple[os.stat_result, ...]:
     before = _capture_directory_ancestry(state_root)
     _verify_managed_state_directory(state_root, runtime_uid)
     after = _capture_directory_ancestry(state_root)
@@ -336,9 +648,10 @@ def _require_root_identity(
             not _same_identity(previous, current)
             for previous, current in zip(before, after, strict=True)
         )
-        or not _same_identity(expected, after[-1])
+        or (expected is not None and not _same_identity(expected, after[-1]))
     ):
         raise OSError
+    return after
 
 
 def _capture_directory_ancestry(path: Path) -> tuple[os.stat_result, ...]:
@@ -455,7 +768,7 @@ def _verify_existing_layout(
     instance_id: str,
     allocation_id: str,
     runtime_uid: int,
-) -> None:
+) -> _VerifiedStateLayout:
     allocation = state_root / instance_id
     if os.path.lexists(state_root / f".{allocation_id}.quarantine"):
         raise OSError
@@ -518,10 +831,12 @@ def _verify_existing_layout(
     final_allocation_status = _validated_directory_status(allocation, runtime_uid)
     if not _same_snapshot(allocation_status, final_allocation_status):
         raise OSError
+    final_component_statuses: dict[str, os.stat_result] = {}
     for name, expected in component_statuses.items():
         current = _validated_directory_status(allocation / name, runtime_uid)
         if not _same_identity(expected, current):
             raise OSError
+        final_component_statuses[name] = current
 
     final_identity_status = os.lstat(identity)
     _require_empty_identity_file(final_identity_status)
@@ -536,6 +851,22 @@ def _verify_existing_layout(
     with os.scandir(allocation) as entries:
         if {entry.name for entry in entries} != expected_names:
             raise OSError
+
+    final_root_ancestry = _verified_root_ancestry(
+        state_root,
+        runtime_uid,
+        root_status,
+    )
+
+    return _VerifiedStateLayout(
+        source=allocation,
+        root_ancestry=final_root_ancestry,
+        allocation_status=final_allocation_status,
+        component_statuses=tuple(
+            (name, final_component_statuses[name]) for name in _LAYOUT_DIRECTORIES
+        ),
+        identity_status=identity_after_permission,
+    )
 
 
 def _require_contained_allocation(state_root: Path, allocation: Path) -> None:
@@ -630,9 +961,61 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
+def _same_directory_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_uid",
+        "st_gid",
+        "st_file_attributes",
+        "st_reparse_tag",
+    )
+    return all(
+        getattr(left, field, None) == getattr(right, field, None) for field in fields
+    )
+
+
 def _same_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
     fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size")
-    return all(getattr(left, field, None) == getattr(right, field, None) for field in fields)
+    return all(
+        getattr(left, field, None) == getattr(right, field, None) for field in fields
+    )
+
+
+def _same_verified_layout(
+    left: _VerifiedStateLayout,
+    right: _VerifiedStateLayout,
+) -> bool:
+    if left.source != right.source or len(left.root_ancestry) != len(
+        right.root_ancestry
+    ):
+        return False
+    if any(
+        not _same_directory_identity(previous, current)
+        for previous, current in zip(
+            left.root_ancestry,
+            right.root_ancestry,
+            strict=True,
+        )
+    ):
+        return False
+    if not _same_directory_identity(left.allocation_status, right.allocation_status):
+        return False
+    if tuple(name for name, _status in left.component_statuses) != tuple(
+        name for name, _status in right.component_statuses
+    ):
+        return False
+    if any(
+        not _same_directory_identity(previous, current)
+        for (_left_name, previous), (_right_name, current) in zip(
+            left.component_statuses,
+            right.component_statuses,
+            strict=True,
+        )
+    ):
+        return False
+    return _same_snapshot(left.identity_status, right.identity_status)
 
 
 def _exclusive_write_flags() -> int:
@@ -662,7 +1045,9 @@ def _publish_no_replace(source: Path, destination: Path) -> None:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = libc.renameat2
     except (AttributeError, OSError):
-        raise OSError(errno.ENOTSUP, "atomic no-replace publish is unsupported") from None
+        raise OSError(
+            errno.ENOTSUP, "atomic no-replace publish is unsupported"
+        ) from None
     renameat2.argtypes = (
         ctypes.c_int,
         ctypes.c_char_p,

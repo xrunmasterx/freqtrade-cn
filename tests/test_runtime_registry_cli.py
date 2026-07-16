@@ -24,6 +24,8 @@ FRONTEND_COMMIT = "3" * 40
 STRATEGIES_COMMIT = "4" * 40
 TEMPLATE_ID = "freqtrade-paper-probe-v1"
 INSTANCE_ID = "phase2-spot-paper-probe"
+LAUNCH_POLICY_CATALOG_DIGEST = "d" * 64
+LAUNCH_POLICY_DIGEST = "e" * 64
 
 
 def _template_payload() -> dict[str, object]:
@@ -38,6 +40,7 @@ def _template_payload() -> dict[str, object]:
         "command_policy_id": "freqtrade-spot-paper-v1",
         "mount_policy_ids": [
             "runtime-config-ro-v1",
+            "safety-policy-ro-v1",
             "strategy-ro-v1",
             "managed-state-rw-v1",
             "api-secrets-ro-v1",
@@ -52,12 +55,15 @@ def _template_payload() -> dict[str, object]:
 
 def _committed_template() -> CommittedTemplate:
     payload = _template_payload()
-    canonical = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ) + "\n"
+    canonical = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    )
     return CommittedTemplate(
         payload=MappingProxyType(
             {
@@ -92,6 +98,7 @@ def _policies() -> ClosedPolicyRegistry:
         mount_policy_ids=frozenset(
             {
                 "runtime-config-ro-v1",
+                "safety-policy-ro-v1",
                 "strategy-ro-v1",
                 "managed-state-rw-v1",
                 "api-secrets-ro-v1",
@@ -102,6 +109,15 @@ def _policies() -> ClosedPolicyRegistry:
         resource_profile_ids=frozenset({"freqtrade-small-v1"}),
         state_layout_ids=frozenset({"freqtrade-state-v1"}),
         source_commit=ROOT_COMMIT,
+    )
+
+
+def _launch_policy() -> SimpleNamespace:
+    return SimpleNamespace(
+        source_commit=ROOT_COMMIT,
+        template_digest=_committed_template().digest,
+        catalog_digest=LAUNCH_POLICY_CATALOG_DIGEST,
+        policy_digest=LAUNCH_POLICY_DIGEST,
     )
 
 
@@ -210,8 +226,19 @@ class RuntimeRegistryCliTests(unittest.TestCase):
                 "load_closed_policy_registry",
                 return_value=_policies(),
             ) as policy_reader,
+            mock.patch.object(
+                runtime_registry_cli,
+                "load_resolved_launch_policy_bundle",
+                return_value=_launch_policy(),
+            ) as launch_policy_reader,
         ):
-            yield commit_reader, template_reader, artifact_reader, policy_reader
+            yield (
+                commit_reader,
+                template_reader,
+                artifact_reader,
+                policy_reader,
+                launch_policy_reader,
+            )
 
     @contextmanager
     def backend_imports_blocked(self):
@@ -235,7 +262,9 @@ class RuntimeRegistryCliTests(unittest.TestCase):
             )
         self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
 
-    def test_validate_remains_offline_when_backend_imports_are_unavailable(self) -> None:
+    def test_validate_remains_offline_when_backend_imports_are_unavailable(
+        self,
+    ) -> None:
         with self.patched_evidence(), self.backend_imports_blocked():
             code, stdout, stderr = self.run_cli("runtime-template", "validate")
         self.assertEqual((code, stderr), (0, ""))
@@ -259,7 +288,9 @@ class RuntimeRegistryCliTests(unittest.TestCase):
             self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
             load_bindings.assert_not_called()
 
-    def test_root_commit_file_accepts_only_one_full_lowercase_identity_line(self) -> None:
+    def test_root_commit_file_accepts_only_one_full_lowercase_identity_line(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "root-commit"
             path.write_bytes((ROOT_COMMIT + "\n").encode("ascii"))
@@ -279,7 +310,9 @@ class RuntimeRegistryCliTests(unittest.TestCase):
                 path.write_bytes(invalid.encode("ascii"))
                 with (
                     mock.patch.object(runtime_registry_cli, "ROOT_COMMIT_FILE", path),
-                    self.assertRaisesRegex(ValueError, "^root_commit_identity_invalid$"),
+                    self.assertRaisesRegex(
+                        ValueError, "^root_commit_identity_invalid$"
+                    ),
                 ):
                     runtime_registry_cli._read_root_commit_identity()
 
@@ -309,7 +342,8 @@ class RuntimeRegistryCliTests(unittest.TestCase):
         self.assertEqual((code, stderr), (0, ""))
         self.assertEqual(
             stdout,
-            json.dumps(json.loads(stdout), separators=(",", ":"), sort_keys=True) + "\n",
+            json.dumps(json.loads(stdout), separators=(",", ":"), sort_keys=True)
+            + "\n",
         )
         self.assertEqual(
             json.loads(stdout),
@@ -317,6 +351,8 @@ class RuntimeRegistryCliTests(unittest.TestCase):
                 "backend_commit": BACKEND_COMMIT,
                 "config_blob_digest": "a" * 64,
                 "frontend_commit": FRONTEND_COMMIT,
+                "launch_policy_catalog_digest": LAUNCH_POLICY_CATALOG_DIGEST,
+                "launch_policy_digest": LAUNCH_POLICY_DIGEST,
                 "root_commit": ROOT_COMMIT,
                 "safety_policy_digest": "c" * 64,
                 "status": "valid",
@@ -329,6 +365,11 @@ class RuntimeRegistryCliTests(unittest.TestCase):
         )
         load_bindings.assert_not_called()
         readers[1].assert_called_once_with(
+            runtime_registry_cli.REPOSITORY_ROOT,
+            TEMPLATE_ID,
+            ROOT_COMMIT,
+        )
+        readers[4].assert_called_once_with(
             runtime_registry_cli.REPOSITORY_ROOT,
             TEMPLATE_ID,
             ROOT_COMMIT,
@@ -543,6 +584,7 @@ class RuntimeRegistryCliTests(unittest.TestCase):
             template=_committed_template(),
             artifacts=_artifacts(),
             policies=_policies(),
+            launch_policy=_launch_policy(),
         )
         publication = runtime_registry_cli._publication(evidence, bindings)
         request = runtime_registry_cli._registration_request(evidence, bindings)

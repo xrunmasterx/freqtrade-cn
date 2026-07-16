@@ -15,6 +15,10 @@ from tools.runtime_artifacts import (
     CommittedPaperProbeArtifacts,
     read_committed_paper_probe_artifacts,
 )
+from tools.runtime_launch_policy import (
+    ResolvedLaunchPolicyBundle,
+    load_resolved_launch_policy_bundle,
+)
 from tools.runtime_templates import (
     ClosedPolicyRegistry,
     CommittedTemplate,
@@ -38,6 +42,7 @@ class _CommittedEvidence:
     template: CommittedTemplate
     artifacts: CommittedPaperProbeArtifacts
     policies: ClosedPolicyRegistry
+    launch_policy: ResolvedLaunchPolicyBundle
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +137,8 @@ def _read_root_commit_identity() -> str:
     except OSError:
         raise ValueError("root_commit_identity_invalid") from None
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+    if not stat.S_ISREG(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & reparse_flag
     ):
         raise ValueError("root_commit_identity_invalid")
     try:
@@ -155,16 +159,24 @@ def _load_committed_evidence() -> _CommittedEvidence:
     )
     artifacts = read_committed_paper_probe_artifacts(REPOSITORY_ROOT, root_commit)
     policies = load_closed_policy_registry(REPOSITORY_ROOT, root_commit)
+    launch_policy = load_resolved_launch_policy_bundle(
+        REPOSITORY_ROOT,
+        PAPER_PROBE_TEMPLATE_ID,
+        root_commit,
+    )
     if (
         template.source_commit != root_commit
         or artifacts.root_commit != root_commit
         or policies.source_commit != root_commit
+        or launch_policy.source_commit != root_commit
+        or launch_policy.template_digest != template.digest
     ):
         raise ValueError("committed_evidence_identity_mismatch")
     return _CommittedEvidence(
         template=template,
         artifacts=artifacts,
         policies=policies,
+        launch_policy=launch_policy,
     )
 
 
@@ -224,6 +236,8 @@ def _validation_payload(evidence: _CommittedEvidence) -> dict[str, str]:
         "backend_commit": artifacts.backend_commit,
         "config_blob_digest": artifacts.config_sha256,
         "frontend_commit": artifacts.frontend_commit,
+        "launch_policy_catalog_digest": evidence.launch_policy.catalog_digest,
+        "launch_policy_digest": evidence.launch_policy.policy_digest,
         "root_commit": artifacts.root_commit,
         "safety_policy_digest": artifacts.safety_sha256,
         "status": "valid",
@@ -285,7 +299,9 @@ def _ensure_registration(actor: str) -> dict[str, object]:
     engine = _create_engine(bindings)
     try:
         repository = bindings.sql_registration_repository(engine)
-        service = bindings.runtime_application_service(registration_repository=repository)
+        service = bindings.runtime_application_service(
+            registration_repository=repository
+        )
         status = service.ensure_paper_probe_registration(
             _registration_request(evidence, bindings),
             actor,
@@ -301,7 +317,9 @@ def _registration_status(instance_id: str) -> dict[str, object]:
     engine = _create_engine(bindings)
     try:
         repository = bindings.sql_registration_repository(engine)
-        service = bindings.runtime_application_service(registration_repository=repository)
+        service = bindings.runtime_application_service(
+            registration_repository=repository
+        )
         status = service.registration_status(instance_id)
     finally:
         engine.dispose()

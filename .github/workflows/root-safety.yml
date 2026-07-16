@@ -580,6 +580,7 @@ jobs:
           validate, publish, register, compile_result, status = documents
           validate_keys = {
               "backend_commit", "config_blob_digest", "frontend_commit", "root_commit",
+              "launch_policy_catalog_digest", "launch_policy_digest",
               "safety_policy_digest", "status", "strategies_commit",
               "strategy_class_name", "strategy_digest", "template_id",
               "template_payload_digest",
@@ -615,7 +616,8 @@ jobs:
               raise SystemExit("operator output root commit differs")
           for key in (
               "config_blob_digest", "safety_policy_digest", "strategy_digest",
-              "template_payload_digest",
+              "template_payload_digest", "launch_policy_catalog_digest",
+              "launch_policy_digest",
           ):
               if digest_pattern.fullmatch(validate[key]) is None:
                   raise SystemExit("operator digest differs")

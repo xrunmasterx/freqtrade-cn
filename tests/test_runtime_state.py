@@ -5,8 +5,9 @@ import os
 import stat
 import tempfile
 import unittest
+from copy import copy
 from contextlib import nullcontext
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from unittest import mock
 
@@ -38,7 +39,9 @@ class RuntimeStateTests(unittest.TestCase):
                 self.addCleanup(patcher.stop)
                 self.permission_patchers.append(patcher)
 
-    def make_reservation(self, **changes: object) -> runtime_state.StateAllocationReservation:
+    def make_reservation(
+        self, **changes: object
+    ) -> runtime_state.StateAllocationReservation:
         values: dict[str, object] = {
             "state_allocation_id": "allocation-1",
             "instance_id": "runtime-1",
@@ -133,9 +136,16 @@ class RuntimeStateTests(unittest.TestCase):
         identity = allocation / ".allocation-allocation-1"
         self.assertTrue(identity.is_file())
         self.assertEqual(identity.read_bytes(), b"")
-        self.assertFalse(any(path.name.endswith(".tmp") for path in allocation.iterdir()))
+        self.assertFalse(
+            any(path.name.endswith(".tmp") for path in allocation.iterdir())
+        )
         if os.name == "posix":
-            for path in (allocation, allocation / "home", allocation / "logs", allocation / "data"):
+            for path in (
+                allocation,
+                allocation / "home",
+                allocation / "logs",
+                allocation / "data",
+            ):
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
                 self.assertEqual(path.stat().st_uid, self.runtime_uid)
             self.assertEqual(stat.S_IMODE(identity.stat().st_mode), 0o600)
@@ -201,10 +211,16 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertFalse(missing_root.exists())
 
     def test_public_surface_has_no_path_fault_reuse_delete_or_enumeration(self) -> None:
-        parameters = tuple(inspect.signature(runtime_state.ManagedStateProvider.provision).parameters)
-        self.assertEqual(parameters, ("self", "instance_id", "allocation_id", "layout_id"))
+        parameters = tuple(
+            inspect.signature(runtime_state.ManagedStateProvider.provision).parameters
+        )
+        self.assertEqual(
+            parameters, ("self", "instance_id", "allocation_id", "layout_id")
+        )
         verify_parameters = tuple(
-            inspect.signature(runtime_state.ManagedStateProvider.verify_existing).parameters
+            inspect.signature(
+                runtime_state.ManagedStateProvider.verify_existing
+            ).parameters
         )
         self.assertEqual(
             verify_parameters,
@@ -233,11 +249,277 @@ class RuntimeStateTests(unittest.TestCase):
             ),
         )
 
+    def test_mount_lease_is_attempt_scoped_live_and_redacted(self) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+
+        lease = provider.acquire_mount_lease("attempt-1", proof)
+        mount = lease.mount
+        self.assertEqual(
+            tuple(field.name for field in fields(runtime_state.VerifiedStateMount)),
+            (
+                "attempt_id",
+                "state_allocation_id",
+                "instance_id",
+                "layout_id",
+                "provider_id",
+                "generation",
+                "relative_path",
+                "source",
+                "runtime_uid",
+                "durability",
+            ),
+        )
+        self.assertEqual(mount.attempt_id, "attempt-1")
+        self.assertEqual(mount.state_allocation_id, "allocation-1")
+        self.assertEqual(mount.source, self.state_root / "runtime-1")
+        self.assertEqual(lease.revalidate_source(), mount.source)
+        self.assertEqual(provider.revalidate_source(lease), mount.source)
+        self.assertNotIn(str(self.base), repr(mount))
+        self.assertNotIn(str(self.base), repr(lease))
+
+        lease.close()
+        lease.close()
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_lease_invalid$",
+        ):
+            lease.revalidate_source()
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_lease_invalid$",
+        ):
+            _ = lease.mount
+
+    def test_mount_lease_context_closes_and_allows_later_attempt(self) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+
+        with provider.acquire_mount_lease("attempt-1", proof) as first:
+            self.assertEqual(first.mount.attempt_id, "attempt-1")
+            with self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_lease_invalid$",
+            ):
+                provider.acquire_mount_lease("attempt-2", proof)
+
+        with provider.acquire_mount_lease("attempt-2", proof) as second:
+            self.assertEqual(second.revalidate_source(), self.state_root / "runtime-1")
+
+    def test_mount_lease_rejects_invalid_attempt_forged_proof_and_wrong_provider(
+        self,
+    ) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+        other_provider = self.provider()
+
+        for attempt_id, candidate in (
+            ("Attempt-1", proof),
+            ("attempt-1", replace(proof)),
+        ):
+            with self.subTest(attempt_id=attempt_id, exact=candidate is proof):
+                with (
+                    mock.patch.object(
+                        runtime_state, "_verify_existing_layout"
+                    ) as verify,
+                    self.assertRaisesRegex(
+                        runtime_state.StateProvisionError,
+                        "^state_lease_invalid$",
+                    ),
+                ):
+                    provider.acquire_mount_lease(attempt_id, candidate)
+                verify.assert_not_called()
+
+        lease = provider.acquire_mount_lease("attempt-1", proof)
+        copied = copy(lease)
+        for owner, candidate in (
+            (provider, copied),
+            (other_provider, lease),
+        ):
+            with self.subTest(owner=owner is provider, exact=candidate is lease):
+                with (
+                    mock.patch.object(
+                        runtime_state, "_verify_existing_layout"
+                    ) as verify,
+                    self.assertRaisesRegex(
+                        runtime_state.StateProvisionError,
+                        "^state_lease_invalid$",
+                    ),
+                ):
+                    owner.revalidate_source(candidate)
+                verify.assert_not_called()
+        lease.close()
+
+    def test_mount_lease_is_minted_from_returned_layout_proof_without_lone_lstat(
+        self,
+    ) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+        real_verify = runtime_state._verify_existing_layout
+        real_lstat = runtime_state.os.lstat
+        verification_returned = False
+
+        def verify_layout(*args: object, **kwargs: object) -> object:
+            nonlocal verification_returned
+            result = real_verify(*args, **kwargs)
+            verification_returned = True
+            return result
+
+        def guarded_lstat(path: object) -> os.stat_result:
+            if verification_returned:
+                raise AssertionError("lease mint performed a post-verification lstat")
+            return real_lstat(path)
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_verify_existing_layout",
+                side_effect=verify_layout,
+            ),
+            mock.patch.object(runtime_state.os, "lstat", side_effect=guarded_lstat),
+        ):
+            lease = provider.acquire_mount_lease("attempt-1", proof)
+
+        lease.close()
+
+    def test_mount_lease_revalidation_allows_business_data_changes(self) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+        lease = provider.acquire_mount_lease("attempt-1", proof)
+        allocation = self.state_root / "runtime-1"
+
+        (allocation / "data/markets").mkdir()
+        (allocation / "data/markets/candles.sqlite").write_bytes(b"business-data")
+        (allocation / "logs/runtime.log").write_text("business-log", encoding="utf-8")
+
+        self.assertEqual(lease.revalidate_source(), allocation)
+        lease.close()
+
+    def test_mount_lease_rejects_mutated_minted_mount_source_and_metadata(self) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+        mutations = (
+            ("source", self.base / "caller-controlled-state"),
+            ("generation", True),
+            ("durability", "arbitrary"),
+            ("relative_path", "ft_userdata/runtime/instances/caller"),
+        )
+
+        for field_name, value in mutations:
+            with self.subTest(field=field_name):
+                lease = provider.acquire_mount_lease("attempt-1", proof)
+                mount = lease.mount
+                object.__setattr__(mount, field_name, value)
+
+                with (
+                    mock.patch.object(
+                        runtime_state,
+                        "_verify_existing_layout",
+                    ) as verify_layout,
+                    self.assertRaisesRegex(
+                        runtime_state.StateProvisionError,
+                        "^state_lease_verification_failed$",
+                    ),
+                ):
+                    _ = lease.mount
+                verify_layout.assert_not_called()
+
+                with (
+                    mock.patch.object(
+                        runtime_state,
+                        "_verify_existing_layout",
+                    ) as verify_layout,
+                    self.assertRaisesRegex(
+                        runtime_state.StateProvisionError,
+                        "^state_lease_verification_failed$",
+                    ),
+                ):
+                    lease.revalidate_source()
+                verify_layout.assert_not_called()
+
+                with self.assertRaisesRegex(
+                    runtime_state.StateProvisionError,
+                    "^state_lease_verification_failed$",
+                ):
+                    lease.close()
+
+        replacement = provider.acquire_mount_lease("attempt-2", proof)
+        self.assertEqual(replacement.revalidate_source(), self.state_root / "runtime-1")
+        replacement.close()
+
+    def test_mount_lease_revalidation_rejects_component_identity_replacement(
+        self,
+    ) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+        lease = provider.acquire_mount_lease("attempt-1", proof)
+        allocation = self.state_root / "runtime-1"
+        original = allocation / "data"
+        displaced = allocation / "data-displaced"
+        original.rename(displaced)
+        original.mkdir(mode=0o700)
+        if os.name == "posix":
+            os.chmod(original, 0o700)
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_lease_verification_failed$",
+        ) as raised:
+            lease.revalidate_source()
+        self.assertNotIn(str(self.base), str(raised.exception))
+        lease.close()
+
+    def test_mount_lease_revalidation_rejects_allocation_identity_replacement(
+        self,
+    ) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+        lease = provider.acquire_mount_lease("attempt-1", proof)
+        allocation = self.state_root / "runtime-1"
+        displaced = self.state_root / "runtime-1-displaced"
+        allocation.rename(displaced)
+        allocation.mkdir(mode=0o700)
+        for name in ("home", "logs", "data"):
+            (allocation / name).mkdir(mode=0o700)
+        marker = allocation / ".allocation-allocation-1"
+        marker.write_bytes(b"")
+        if os.name == "posix":
+            os.chmod(marker, 0o600)
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_lease_verification_failed$",
+        ):
+            lease.revalidate_source()
+        lease.close()
+
+    def test_mount_lease_revalidation_rejects_allocation_marker_replacement(
+        self,
+    ) -> None:
+        provider = self.provider()
+        proof = self.provision(provider)
+        lease = provider.acquire_mount_lease("attempt-1", proof)
+        marker = self.state_root / "runtime-1/.allocation-allocation-1"
+        displaced = marker.with_name(".allocation-original")
+        marker.rename(displaced)
+        marker.write_bytes(b"")
+        if os.name == "posix":
+            os.chmod(marker, 0o600)
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_lease_verification_failed$",
+        ):
+            provider.revalidate_source(lease)
+        lease.close()
+
     def test_existing_allocation_is_a_closed_frozen_value(self) -> None:
         allocation = self.make_existing()
 
         self.assertEqual(
-            tuple(field.name for field in fields(runtime_state.ExistingStateAllocation)),
+            tuple(
+                field.name for field in fields(runtime_state.ExistingStateAllocation)
+            ),
             (
                 "state_allocation_id",
                 "instance_id",
@@ -369,7 +651,9 @@ class RuntimeStateTests(unittest.TestCase):
             mock.patch.object(runtime_state, "_sync_directory") as sync_directory,
             mock.patch.object(runtime_state, "_sync_descriptor") as sync_descriptor,
             mock.patch.object(runtime_state, "_publish_no_replace") as publish,
-            mock.patch.object(runtime_state, "_quarantine_owned_allocation") as quarantine,
+            mock.patch.object(
+                runtime_state, "_quarantine_owned_allocation"
+            ) as quarantine,
         ):
             actual = self.verify_existing()
 
@@ -386,7 +670,9 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertEqual(after, before)
         self.assertEqual(business_data.read_bytes(), b"opaque-business-data")
-        self.assertEqual(business_log.read_text(encoding="utf-8"), "opaque-business-log")
+        self.assertEqual(
+            business_log.read_text(encoding="utf-8"), "opaque-business-log"
+        )
         for mutation in (
             mkdir,
             rename,
@@ -400,7 +686,9 @@ class RuntimeStateTests(unittest.TestCase):
         ):
             mutation.assert_not_called()
 
-    def test_verify_existing_rejects_structure_identity_and_permission_drift(self) -> None:
+    def test_verify_existing_rejects_structure_identity_and_permission_drift(
+        self,
+    ) -> None:
         cases = ("structure", "identity", "permission")
         for index, case in enumerate(cases, start=1):
             with self.subTest(case=case):
@@ -490,7 +778,9 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertTrue(replaced)
         self.assertTrue(displaced.is_dir())
 
-    def test_verify_existing_allows_business_data_created_during_validation(self) -> None:
+    def test_verify_existing_allows_business_data_created_during_validation(
+        self,
+    ) -> None:
         self.provision()
         allocation = self.state_root / "runtime-1"
         business_data = allocation / "data/live.sqlite-wal"
@@ -525,13 +815,17 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertEqual(business_data.read_bytes(), b"legitimate-runtime-write")
         self.assertEqual(data_validations, 2)
 
-    def test_verify_existing_rejects_top_level_member_added_after_initial_scan(self) -> None:
+    def test_verify_existing_rejects_top_level_member_added_after_initial_scan(
+        self,
+    ) -> None:
         self.provision()
         allocation = self.state_root / "runtime-1"
         real_verify_identity = runtime_state._verify_managed_state_identity_file
         identity_validations = 0
 
-        def add_member_during_final_identity_check(path: Path, runtime_uid: int) -> None:
+        def add_member_during_final_identity_check(
+            path: Path, runtime_uid: int
+        ) -> None:
             nonlocal identity_validations
             real_verify_identity(path, runtime_uid)
             identity_validations += 1
@@ -553,7 +847,9 @@ class RuntimeStateTests(unittest.TestCase):
 
         self.assertEqual(identity_validations, 3)
 
-    def test_verify_existing_identity_descriptor_closes_on_success_and_failure(self) -> None:
+    def test_verify_existing_identity_descriptor_closes_on_success_and_failure(
+        self,
+    ) -> None:
         self.provision()
         identity = self.state_root / "runtime-1/.allocation-allocation-1"
         real_open = os.open
@@ -723,7 +1019,9 @@ class RuntimeStateTests(unittest.TestCase):
             real_publish(source, destination)
 
         with (
-            mock.patch.object(runtime_state, "_sync_directory", side_effect=fail_provision_once),
+            mock.patch.object(
+                runtime_state, "_sync_directory", side_effect=fail_provision_once
+            ),
             mock.patch.object(
                 runtime_state,
                 "_publish_no_replace",
@@ -739,7 +1037,9 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertTrue((self.state_root / "runtime-1").is_dir())
         self.assertTrue((self.state_root / ".allocation-1.quarantine").is_dir())
 
-    def test_quarantine_barrier_failure_retains_moved_evidence_and_fails_closed(self) -> None:
+    def test_quarantine_barrier_failure_retains_moved_evidence_and_fails_closed(
+        self,
+    ) -> None:
         real_sync = runtime_state._sync_directory
         sync_calls = 0
 
@@ -784,7 +1084,9 @@ class RuntimeStateTests(unittest.TestCase):
             raise OSError("fault")
 
         with (
-            mock.patch.object(runtime_state, "_sync_directory", side_effect=replace_then_fail),
+            mock.patch.object(
+                runtime_state, "_sync_directory", side_effect=replace_then_fail
+            ),
             self.assertRaisesRegex(
                 runtime_state.StateProvisionError,
                 "^state_quarantine_failed$",
@@ -806,10 +1108,14 @@ class RuntimeStateTests(unittest.TestCase):
             real_sync(path, *args)
             if not added:
                 added = True
-                (self.state_root / "runtime-1/unexpected").write_text("evidence", encoding="utf-8")
+                (self.state_root / "runtime-1/unexpected").write_text(
+                    "evidence", encoding="utf-8"
+                )
 
         with (
-            mock.patch.object(runtime_state, "_sync_directory", side_effect=add_unknown),
+            mock.patch.object(
+                runtime_state, "_sync_directory", side_effect=add_unknown
+            ),
             self.assertRaisesRegex(
                 runtime_state.StateProvisionError,
                 "^state_provision_failed$",
@@ -818,7 +1124,9 @@ class RuntimeStateTests(unittest.TestCase):
             self.provision()
 
         self.assertTrue(
-            (self.state_root / ".allocation-1.quarantine/runtime-1/unexpected").is_file()
+            (
+                self.state_root / ".allocation-1.quarantine/runtime-1/unexpected"
+            ).is_file()
         )
 
     def test_identity_descriptor_closes_on_success_and_failure(self) -> None:
@@ -847,7 +1155,9 @@ class RuntimeStateTests(unittest.TestCase):
             raise OSError("fault")
 
         with (
-            mock.patch.object(runtime_state, "_sync_descriptor", side_effect=capture_then_fail),
+            mock.patch.object(
+                runtime_state, "_sync_descriptor", side_effect=capture_then_fail
+            ),
             self.assertRaisesRegex(
                 runtime_state.StateProvisionError,
                 "^state_provision_failed$",
@@ -899,7 +1209,9 @@ class RuntimeStateTests(unittest.TestCase):
                 displaced_status = displaced.stat()
                 synced_identity = displaced_status.st_dev, displaced_status.st_ino
 
-                descriptor = os.open(source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                descriptor = os.open(
+                    source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
                 try:
                     os.fsync(descriptor)
                 finally:
@@ -1031,7 +1343,9 @@ class RuntimeStateTests(unittest.TestCase):
         ):
             self.provision()
 
-    def test_allocation_replaced_at_final_root_barrier_never_returns_proof(self) -> None:
+    def test_allocation_replaced_at_final_root_barrier_never_returns_proof(
+        self,
+    ) -> None:
         real_sync = runtime_state._sync_directory
         displaced = self.state_root / "owned-at-barrier"
         replacement = self.state_root / "runtime-1"
@@ -1047,7 +1361,9 @@ class RuntimeStateTests(unittest.TestCase):
             real_sync(path, *args)
 
         with (
-            mock.patch.object(runtime_state, "_sync_directory", side_effect=replace_at_root),
+            mock.patch.object(
+                runtime_state, "_sync_directory", side_effect=replace_at_root
+            ),
             self.assertRaisesRegex(
                 runtime_state.StateProvisionError,
                 "^state_quarantine_failed$",
@@ -1056,7 +1372,9 @@ class RuntimeStateTests(unittest.TestCase):
             self.provision()
 
         self.assertTrue(replaced)
-        self.assertEqual((replacement / "competitor").read_text(encoding="utf-8"), "keep")
+        self.assertEqual(
+            (replacement / "competitor").read_text(encoding="utf-8"), "keep"
+        )
         self.assertTrue(displaced.is_dir())
         self.assertFalse((self.state_root / ".allocation-1.quarantine").exists())
 
@@ -1135,16 +1453,30 @@ class RuntimeStateTests(unittest.TestCase):
             real_validate(*args, **kwargs)
 
         with (
-            mock.patch.object(runtime_state, "_sync_descriptor", side_effect=sync_descriptor),
-            mock.patch.object(runtime_state, "_sync_directory", side_effect=sync_directory),
-            mock.patch.object(runtime_state, "_publish_no_replace", side_effect=publish),
-            mock.patch.object(runtime_state, "_validate_final_layout", side_effect=validate),
+            mock.patch.object(
+                runtime_state, "_sync_descriptor", side_effect=sync_descriptor
+            ),
+            mock.patch.object(
+                runtime_state, "_sync_directory", side_effect=sync_directory
+            ),
+            mock.patch.object(
+                runtime_state, "_publish_no_replace", side_effect=publish
+            ),
+            mock.patch.object(
+                runtime_state, "_validate_final_layout", side_effect=validate
+            ),
         ):
             self.provision()
 
-        self.assertLess(events.index("identity-file-sync"), events.index("identity-rename"))
-        self.assertLess(events.index("identity-rename"), events.index("directory-sync:runtime-1"))
-        self.assertLess(events.index("directory-sync:runtime-1"), events.index("final-validation"))
+        self.assertLess(
+            events.index("identity-file-sync"), events.index("identity-rename")
+        )
+        self.assertLess(
+            events.index("identity-rename"), events.index("directory-sync:runtime-1")
+        )
+        self.assertLess(
+            events.index("directory-sync:runtime-1"), events.index("final-validation")
+        )
         for name in ("home", "logs", "data"):
             self.assertIn(f"directory-sync:{name}", events)
         self.assertEqual(events[-1], "directory-sync:instances")
@@ -1157,10 +1489,18 @@ class RuntimeStateTests(unittest.TestCase):
         )
         with (
             mock.patch.object(runtime_state, "_is_windows", return_value=True),
-            mock.patch.object(runtime_state, "_harden_managed_state_directory") as harden_dir,
-            mock.patch.object(runtime_state, "_verify_managed_state_directory") as verify_dir,
-            mock.patch.object(runtime_state, "_harden_managed_state_identity_file") as harden_file,
-            mock.patch.object(runtime_state, "_verify_managed_state_identity_file") as verify_file,
+            mock.patch.object(
+                runtime_state, "_harden_managed_state_directory"
+            ) as harden_dir,
+            mock.patch.object(
+                runtime_state, "_verify_managed_state_directory"
+            ) as verify_dir,
+            mock.patch.object(
+                runtime_state, "_harden_managed_state_identity_file"
+            ) as harden_file,
+            mock.patch.object(
+                runtime_state, "_verify_managed_state_identity_file"
+            ) as verify_file,
         ):
             result = self.provider(reservation).provision(
                 "runtime-2", "allocation-2", "freqtrade-state-v1"
@@ -1174,7 +1514,9 @@ class RuntimeStateTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows ACL integration test")
     def test_windows_real_acl_protects_every_managed_layout_path(self) -> None:
-        harden_directory = self.real_permission_helpers["_harden_managed_state_directory"]
+        harden_directory = self.real_permission_helpers[
+            "_harden_managed_state_directory"
+        ]
         harden_directory(self.state_root, self.runtime_uid)
         with (
             mock.patch.object(

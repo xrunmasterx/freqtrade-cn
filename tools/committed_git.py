@@ -20,6 +20,7 @@ _POLICY_PATHS = {
     "resource_profile_ids": "ops/runtime-policies/resource-profiles.json",
     "state_layout_ids": "ops/runtime-policies/state-layouts.json",
 }
+_LAUNCH_POLICY_CATALOG_PATH = "ops/runtime-policies/launch-policy-catalog.json"
 _RUNTIME_CONFIG_PATH = "ft_userdata/user_data/config.example.json"
 _RUNTIME_STRATEGY_PATH = "ft_userdata/user_data/strategies/sample_strategy.py"
 _RUNTIME_SAFETY_PATH = "ops/config/trading-safety.json"
@@ -212,6 +213,14 @@ class CommittedGitStore:
             exact_index=True,
         )
 
+    def assert_launch_policy_checkout_clean(self) -> None:
+        self._assert_clean(
+            ("ops/adapter-templates", "ops/runtime-policies"),
+            "launch policy checkout must be clean",
+            required_paths=(*_POLICY_PATHS.values(), _LAUNCH_POLICY_CATALOG_PATH),
+            exact_index=False,
+        )
+
     def _assert_clean(
         self,
         paths: tuple[str, ...],
@@ -299,7 +308,10 @@ class CommittedGitStore:
             self._assert_regular_worktree_file(path, error)
 
     def read_template_blob(self, template_id: str) -> bytes:
-        if not isinstance(template_id, str) or _TEMPLATE_ID.fullmatch(template_id) is None:
+        if (
+            not isinstance(template_id, str)
+            or _TEMPLATE_ID.fullmatch(template_id) is None
+        ):
             raise ValueError("template_id must be a valid platform identifier")
         path = f"{_TEMPLATE_PREFIX}{template_id}.json"
         self._assert_current_paths(
@@ -314,6 +326,15 @@ class CommittedGitStore:
         except (KeyError, TypeError):
             raise ValueError("artifact path is not permitted") from None
         return self._blob(path)
+
+    def read_launch_policy_catalog_blob(self) -> bytes:
+        return self._blob(_LAUNCH_POLICY_CATALOG_PATH)
+
+    def launch_policy_catalog_blob_id(self) -> str:
+        entry = self._tree_entry(_LAUNCH_POLICY_CATALOG_PATH)
+        if entry.mode != b"100644" or entry.object_type != b"blob":
+            raise ValueError("artifact must be a regular 100644 blob")
+        return entry.object_id
 
     def read_runtime_config_blob(self) -> bytes:
         return self._blob(_RUNTIME_CONFIG_PATH, runtime=True)
@@ -330,7 +351,9 @@ class CommittedGitStore:
             if runtime
             else "required artifact metadata is unavailable"
         )
-        missing = "runtime artifact is missing" if runtime else "required artifact is missing"
+        missing = (
+            "runtime artifact is missing" if runtime else "required artifact is missing"
+        )
         invalid = (
             "runtime artifact metadata is invalid"
             if runtime
