@@ -632,6 +632,11 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         "FROM supervisor_authority",
         "psql --username platform_control --dbname platform",
         "supervisor_psql <<'SQL'",
+        "PLATFORM_TEST_SUPERVISOR_ADMIN_POSTGRES_URL=",
+        "PLATFORM_TEST_SUPERVISOR_POSTGRES_URL=",
+        "PLATFORM_TEST_SUPERVISOR_DATABASE_SENTINEL=",
+        "tests/platform/test_supervisor_repository_postgres.py",
+        "supervisor_junit=",
         'expect_role_denied platform_control temp "CREATE TEMP TABLE',
         'expect_role_denied platform_control create "CREATE TABLE',
         'expect_role_denied platform_control alter "ALTER TABLE',
@@ -2864,8 +2869,9 @@ sleep() {
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
         for fragment in (
             'supervisor_pgpass="${platform_ci_dir}/supervisor.pgpass"',
+            '"${platform_ci_dir}/postgres_admin_password"',
             '"${platform_ci_dir}/platform_supervisor_db_password"',
-            "os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)",
+            "os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)",
             'test "$(stat --format \'%a\' "${supervisor_pgpass}")" = "600"',
             "cleanup_supervisor_pgpass() {",
             'rm -f "${supervisor_pgpass}"',
@@ -2877,6 +2883,12 @@ sleep() {
             "supervisor_psql <<'SQL'",
             "current_user = 'platform_supervisor'",
             "current_database() = 'platform'",
+            'supervisor_database_sentinel="$(python - <<\'PY\'',
+            'print(f"root-safety-ephemeral-platform-ci:{secrets.token_hex(16)}")',
+            'test "${#supervisor_database_sentinel}" -eq 66',
+            '--username postgres --dbname platform --set ON_ERROR_STOP=on',
+            '--set="database_sentinel=${supervisor_database_sentinel}"',
+            "COMMENT ON DATABASE platform IS :'database_sentinel';",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, step)
@@ -2889,6 +2901,38 @@ sleep() {
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, step)
+
+    def test_supervisor_repository_lifecycle_uses_restricted_role_and_zero_skips(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+        fragments = (
+            'supervisor_junit="${platform_ci_dir}/supervisor-repository.xml"',
+            "env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS",
+            'PGPASSFILE="${supervisor_pgpass}"',
+            'PLATFORM_TEST_SUPERVISOR_ADMIN_POSTGRES_URL="postgresql+psycopg://postgres@127.0.0.1:55432/platform"',
+            'PLATFORM_TEST_SUPERVISOR_POSTGRES_URL="postgresql+psycopg://platform_supervisor@127.0.0.1:55432/platform"',
+            'PLATFORM_TEST_SUPERVISOR_DATABASE_SENTINEL="${supervisor_database_sentinel}"',
+            "freqtrade/tests/platform/test_supervisor_repository_postgres.py",
+            '--junitxml="${supervisor_junit}"',
+            'root.iter("testsuite")',
+            'suite.attrib.get("skipped", "0")',
+            "restricted Supervisor repository selector skipped tests",
+            "supervisor_repository_lifecycle_zero_skip",
+        )
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+
+        lifecycle_position = step.index(
+            "freqtrade/tests/platform/test_supervisor_repository_postgres.py"
+        )
+        self.assertLess(step.index("supervisor_psql <<'SQL'"), lifecycle_position)
+        self.assertLess(
+            lifecycle_position,
+            step.index("expect_role_denied() {"),
+        )
 
     def test_acl_inventory_includes_exact_supervisor_authority_reads(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

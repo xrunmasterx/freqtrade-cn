@@ -1675,23 +1675,46 @@ jobs:
             rm -f "${supervisor_pgpass}"
           }
           trap cleanup_supervisor_pgpass EXIT
-          python - "${platform_ci_dir}/platform_supervisor_db_password" "${supervisor_pgpass}" <<'PY'
+          python - \
+            "${platform_ci_dir}/postgres_admin_password" \
+            "${platform_ci_dir}/platform_supervisor_db_password" \
+            "${supervisor_pgpass}" <<'PY'
           import os
           import sys
           from pathlib import Path
 
-          password = Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\r\n")
-          if not password or any(character in password for character in "\r\n\x00"):
-              raise SystemExit("invalid platform supervisor database password")
-          escaped_password = password.replace("\\", "\\\\").replace(":", "\\:")
-          descriptor = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          def read_password(path_value):
+              password = Path(path_value).read_text(encoding="utf-8").rstrip("\r\n")
+              if not password or any(character in password for character in "\r\n\x00"):
+                  raise SystemExit("invalid restricted PostgreSQL test password")
+              return password.replace("\\", "\\\\").replace(":", "\\:")
+
+          admin_password = read_password(sys.argv[1])
+          supervisor_password = read_password(sys.argv[2])
+          descriptor = os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
           with os.fdopen(descriptor, "w", encoding="utf-8") as passfile:
               passfile.write(
-                  f"127.0.0.1:55432:platform:platform_supervisor:{escaped_password}\n"
+                  f"127.0.0.1:55432:platform:postgres:{admin_password}\n"
+                  f"127.0.0.1:55432:platform:platform_supervisor:{supervisor_password}\n"
               )
           PY
           test "$(stat --format '%a' "${supervisor_pgpass}")" = "600"
           command -v psql >/dev/null
+          supervisor_database_sentinel="$(python - <<'PY'
+          import secrets
+
+          print(f"root-safety-ephemeral-platform-ci:{secrets.token_hex(16)}")
+          PY
+          )"
+          test "${#supervisor_database_sentinel}" -eq 66
+          env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
+            PGPASSFILE="${supervisor_pgpass}" \
+            psql --host 127.0.0.1 --port 55432 \
+              --username postgres --dbname platform --set ON_ERROR_STOP=on \
+              --set="database_sentinel=${supervisor_database_sentinel}" <<'SQL'
+          COMMENT ON DATABASE platform IS :'database_sentinel';
+          SQL
+
           supervisor_psql() {
             env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
               PGPASSFILE="${supervisor_pgpass}" psql \
@@ -1740,6 +1763,28 @@ jobs:
           WHERE fixture_attempt.attempt_id = 'ci-attempt';
           ROLLBACK;
           SQL
+
+          supervisor_junit="${platform_ci_dir}/supervisor-repository.xml"
+          env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
+            PGPASSFILE="${supervisor_pgpass}" \
+            PLATFORM_TEST_SUPERVISOR_ADMIN_POSTGRES_URL="postgresql+psycopg://postgres@127.0.0.1:55432/platform" \
+            PLATFORM_TEST_SUPERVISOR_POSTGRES_URL="postgresql+psycopg://platform_supervisor@127.0.0.1:55432/platform" \
+            PLATFORM_TEST_SUPERVISOR_DATABASE_SENTINEL="${supervisor_database_sentinel}" \
+            python -m pytest \
+              freqtrade/tests/platform/test_supervisor_repository_postgres.py \
+              --junitxml="${supervisor_junit}" -q -p no:cacheprovider
+          python - "${supervisor_junit}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = tuple(root.iter("testsuite"))
+          tests = sum(int(suite.attrib.get("tests", "0")) for suite in suites)
+          skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in suites)
+          if tests < 1 or skipped != 0:
+              raise SystemExit("restricted Supervisor repository selector skipped tests")
+          PY
+          printf '%s\n' 'supervisor_repository_lifecycle_zero_skip' >&2
 
           expect_role_denied() {
             role_name="$1"
