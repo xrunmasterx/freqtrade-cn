@@ -76,6 +76,8 @@ RUN apt-get update \
 COPY --chown=root:root --chmod=0444 \
   tools/__init__.py \
   tools/committed_git.py \
+  tools/runtime_driver.py \
+  tools/runtime_launch_policy.py \
   tools/runtime_templates.py \
   tools/runtime_artifacts.py \
   tools/runtime_registry_cli.py \

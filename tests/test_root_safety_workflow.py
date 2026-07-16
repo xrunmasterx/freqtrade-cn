@@ -18,9 +18,7 @@ PLATFORM_RUNBOOK_PATH = REPO_ROOT / "docs" / "operations" / "platform-control.md
 SETUP_COMPOSE_ACTION = (
     "docker/setup-compose-action@4eb059ff7f16592f9c84d5ca339c53cb7c5064e2"
 )
-SETUP_PNPM_ACTION = (
-    "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271"
-)
+SETUP_PNPM_ACTION = "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271"
 SETUP_PNPM_ACTION_LINE = f"        uses: {SETUP_PNPM_ACTION} # v6.0.9"
 PNPM_SETUP_STEP = "Install pnpm"
 PNPM_VERSION = "11.9.0"
@@ -34,8 +32,7 @@ BOOTSTRAP_STEP = "Bootstrap ephemeral runtime"
 FULL_RUNTIME_STEP = "Enforce full runtime contract"
 BOOTSTRAPPED_RUNTIME_STEP = "Run bootstrapped runtime root tests"
 BOOTSTRAPPED_RUNTIME_COMMAND = (
-    "python -S -m unittest "
-    "tests.test_trading_config_safety.TradingConfigSafetyTests -v"
+    "python -S -m unittest tests.test_trading_config_safety.TradingConfigSafetyTests -v"
 )
 RUNTIME_READY_ENV_LINE = '          ROOT_RUNTIME_TEST_READY: "1"'
 RUNTIME_NOT_READY_ENV_LINE = '          ROOT_RUNTIME_TEST_READY: "0"'
@@ -120,8 +117,8 @@ REVIEWED_SECRET_SCAN_SCRIPT = "\n".join(
         "set -e",
         'test "${filtered_status}" -eq 0',
         'mutation_path="${scan_root}/.ci-gitleaks-mutation"',
-        'printf \'api_key = "%s"\\n\' '
-        '"$(head -c 48 /dev/urandom | base64 | tr -d \'\\n\')" '
+        "printf 'api_key = \"%s\"\\n' "
+        "\"$(head -c 48 /dev/urandom | base64 | tr -d '\\n')\" "
         '> "${mutation_path}"',
         "set +e",
         "docker run --rm \\",
@@ -152,9 +149,7 @@ def named_workflow_step(workflow: str, step_name: str) -> str:
     marker = f"      - name: {step_name}"
     lines = workflow.splitlines(keepends=True)
     matches = [
-        index
-        for index, line in enumerate(lines)
-        if line.rstrip("\r\n") == marker
+        index for index, line in enumerate(lines) if line.rstrip("\r\n") == marker
     ]
     if len(matches) != 1:
         raise AssertionError(
@@ -188,7 +183,9 @@ def step_run_script(workflow: str, step_name: str) -> str:
     try:
         start = lines.index("        run: |") + 1
     except ValueError as error:
-        raise AssertionError(f"step {step_name!r} must use a literal run script") from error
+        raise AssertionError(
+            f"step {step_name!r} must use a literal run script"
+        ) from error
     script_lines: list[str] = []
     for line in lines[start:]:
         if line and not line.startswith("          "):
@@ -199,7 +196,7 @@ def step_run_script(workflow: str, step_name: str) -> str:
 
 def operator_output_validator_script(workflow: str) -> str:
     script = step_run_script(workflow, OPERATOR_CI_STEPS[0])
-    start_marker = '  "${GITHUB_SHA}" <<\'PY\'\n'
+    start_marker = "  \"${GITHUB_SHA}\" <<'PY'\n"
     if script.count(start_marker) != 1:
         raise AssertionError("expected exactly one operator output validator")
     validator = script.split(start_marker, 1)[1]
@@ -232,6 +229,8 @@ def canonical_operator_documents() -> tuple[str, list[dict[str, object]]]:
         "backend_commit": component_commit,
         "config_blob_digest": digest,
         "frontend_commit": component_commit,
+        "launch_policy_catalog_digest": digest,
+        "launch_policy_digest": digest,
         "root_commit": root_commit,
         "safety_policy_digest": digest,
         "status": "valid",
@@ -685,6 +684,7 @@ OPERATOR_OUTPUT_CONTRACT = (
     "if set(validate) != validate_keys",
     "if set(publish) != publish_keys",
     "if set(register) != registration_keys",
+    '"launch_policy_catalog_digest", "launch_policy_digest",',
     'validate["strategy_class_name"] != "SampleStrategy"',
     'register["catalog_revision_id"] != "builtin-market-catalog-v2"',
     'register["state_allocation_id"] != "state-phase2-spot-paper-probe-v1"',
@@ -738,8 +738,12 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
                 executable_statement_position(statements, fragment)
                 for fragment in CONTROL_TOPOLOGY_FRAGMENTS
             ]
-            if all(position >= 0 for position in topology_positions) and topology_positions != sorted(topology_positions):
-                errors.append("Verify platform-control least privilege: control topology order differs")
+            if all(
+                position >= 0 for position in topology_positions
+            ) and topology_positions != sorted(topology_positions):
+                errors.append(
+                    "Verify platform-control least privilege: control topology order differs"
+                )
             create_statements = [
                 statement
                 for statement in executable_shell_statements(script)
@@ -809,8 +813,7 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     ):
         errors.append("least-privilege owner grantor chain differs")
     expected_schema_grantor = (
-        "SELECT 'schema', 'public', '', role_name, 'USAGE', "
-        "'pg_database_owner', false"
+        "SELECT 'schema', 'public', '', role_name, 'USAGE', 'pg_database_owner', false"
     )
     if least_privilege.count(expected_schema_grantor) != 1:
         errors.append("least-privilege expected ACL grantor differs")
@@ -887,8 +890,12 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
         "operator_database_networks=",
         'test "${operator_database_networks}" = "${operator_database_networks_before}"',
     )
-    topology_positions = [operator_acceptance.find(value) for value in topology_fragments]
-    if any(position < 0 for position in topology_positions) or topology_positions != sorted(topology_positions):
+    topology_positions = [
+        operator_acceptance.find(value) for value in topology_fragments
+    ]
+    if any(
+        position < 0 for position in topology_positions
+    ) or topology_positions != sorted(topology_positions):
         errors.append("operator database topology restoration order differs")
 
     denial_bodies = active_shell_function_bodies(least_privilege, "expect_role_denied")
@@ -1089,7 +1096,7 @@ def run_cleanup_with_stubbed_docker_failure(
         "",
     )
     export_failure = f"export STUB_DOCKER_FAILURE={shlex.quote(failure)}\n"
-    stub = r'''
+    stub = r"""
 RUNNER_TEMP="$(mktemp -d)"
 baseline_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 printf 'freqtrade-cn-operator:preexisting|%s\n' "${baseline_id}" \
@@ -1177,7 +1184,7 @@ docker() {
   fi
   return 99
 }
-'''
+"""
     raw_result = subprocess.run(
         [shutil.which("bash") or "bash", "-s"],
         cwd=REPO_ROOT,
@@ -1212,7 +1219,7 @@ def run_cleanup_with_stateful_images(
         reviewed_id,
     )
     export_scenario = f"export STUB_IMAGE_SCENARIO={shlex.quote(scenario)}\n"
-    stub = r'''
+    stub = r"""
 RUNNER_TEMP="$(mktemp -d)"
 old_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 new_id="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -1351,7 +1358,7 @@ docker() {
   fi
   return 99
 }
-'''
+"""
     raw_result = subprocess.run(
         [shutil.which("bash") or "bash", "-s"],
         cwd=REPO_ROOT,
@@ -1367,7 +1374,11 @@ docker() {
         stdout,
         raw_result.stderr.decode(),
     )
-    events = [line.removeprefix("EVENT:") for line in stdout.splitlines() if line.startswith("EVENT:")]
+    events = [
+        line.removeprefix("EVENT:")
+        for line in stdout.splitlines()
+        if line.startswith("EVENT:")
+    ]
     final_mapping = "\n".join(
         line.removeprefix("FINAL:")
         for line in stdout.splitlines()
@@ -1385,7 +1396,7 @@ def run_operator_image_build_with_stubbed_inventory(
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     build_script = step_run_script(workflow, BUILD_OPERATOR_IMAGE_STEP)
     export_failure = f"export STUB_BUILD_FAILURE={shlex.quote(failure)}\n"
-    stub = r'''
+    stub = r"""
 RUNNER_TEMP="$(mktemp -d)"
 GITHUB_OUTPUT="${RUNNER_TEMP}/github-output"
 export RUNNER_TEMP GITHUB_OUTPUT
@@ -1449,7 +1460,7 @@ docker() {
   if test "$1" = "tag"; then return 0; fi
   return 99
 }
-'''
+"""
     raw_result = subprocess.run(
         [shutil.which("bash") or "bash", "-s"],
         cwd=REPO_ROOT,
@@ -1486,7 +1497,9 @@ def run_operator_status_with_stubbed_docker(
         if 'operator-status.json"' in line
     )
     status_script = "\n".join(lines[start : end + 1])
-    setup = f"export STUB_STATUS_SCENARIO={shlex.quote(scenario)}\n" + r'''
+    setup = (
+        f"export STUB_STATUS_SCENARIO={shlex.quote(scenario)}\n"
+        + r"""
 set -euo pipefail
 RUNNER_TEMP="$(mktemp -d)"
 trap 'rm -rf "${RUNNER_TEMP}"' EXIT
@@ -1515,7 +1528,8 @@ docker() {
       ;;
   esac
 }
-'''
+"""
+    )
     raw_result = subprocess.run(
         [shutil.which("bash") or "bash", "-s"],
         cwd=REPO_ROOT,
@@ -1559,7 +1573,9 @@ def run_operator_invalid_probe_with_stubbed_docker(
         if "operator_invalid_arguments_phase_complete" in line
     )
     probe_script = "\n".join(lines[start : end + 1])
-    setup = f"export STUB_INVALID_SCENARIO={shlex.quote(scenario)}\n" + r'''
+    setup = (
+        f"export STUB_INVALID_SCENARIO={shlex.quote(scenario)}\n"
+        + r"""
 set -euo pipefail
 export GITHUB_RUN_ID=123456
 export GITHUB_RUN_ATTEMPT=2
@@ -1660,7 +1676,8 @@ docker() {
       ;;
   esac
 }
-'''
+"""
+    )
     raw_result = subprocess.run(
         [shutil.which("bash") or "bash", "-s"],
         cwd=REPO_ROOT,
@@ -1813,7 +1830,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 "          unfiltered_status=$?\n          set +e\n",
             ),
             "mutation writer removed": mutate_secret_step(
-                "          printf 'api_key = \"%s\"\\n' \"$(head -c 48 /dev/urandom | base64 | tr -d '\\n')\" > \"${mutation_path}\"\n",
+                '          printf \'api_key = "%s"\\n\' "$(head -c 48 /dev/urandom | base64 | tr -d \'\\n\')" > "${mutation_path}"\n',
                 "          : # mutation writer removed\n",
             ),
             "audit failure masked": mutate_secret_step(
@@ -1915,7 +1932,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_root_unit_gate_precedes_bootstrap_and_all_dependency_installs(self) -> None:
+    def test_root_unit_gate_precedes_bootstrap_and_all_dependency_installs(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         root_unit_step = named_workflow_step(workflow, ROOT_UNIT_STEP)
 
@@ -1968,7 +1987,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertLess(workflow.index(full_runtime), workflow.index(install))
         self.assertLess(workflow.index(install), workflow.index(regressions))
         self.assertLess(workflow.index(regressions), workflow.index(runtime_selector))
-        self.assertLess(workflow.index(runtime_selector), workflow.index(frontend_setup))
+        self.assertLess(
+            workflow.index(runtime_selector), workflow.index(frontend_setup)
+        )
 
     def test_bootstrapped_runtime_class_runs_before_backend_install(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -2051,14 +2072,15 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         setup = named_workflow_step(workflow, PNPM_SETUP_STEP)
 
         self.assertTrue(step_has_exact_line(setup, SETUP_PNPM_ACTION_LINE))
-        self.assertTrue(step_has_exact_line(setup, f"          version: {PNPM_VERSION}"))
+        self.assertTrue(
+            step_has_exact_line(setup, f"          version: {PNPM_VERSION}")
+        )
 
     def test_rejects_pnpm_version_only_present_in_comment(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         mutated_workflow = workflow.replace(
             f"          version: {PNPM_VERSION}",
-            "          version: 10.32.1\n"
-            f"          # version: {PNPM_VERSION}",
+            f"          version: 10.32.1\n          # version: {PNPM_VERSION}",
             1,
         )
         setup = named_workflow_step(mutated_workflow, PNPM_SETUP_STEP)
@@ -2070,8 +2092,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
     def test_rejects_pinned_action_only_present_in_unrelated_step(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         mutated_workflow = workflow.replace(
-            f"      - name: {PNPM_SETUP_STEP}\n"
-            f"{SETUP_PNPM_ACTION_LINE}",
+            f"      - name: {PNPM_SETUP_STEP}\n{SETUP_PNPM_ACTION_LINE}",
             "      - name: Unrelated pnpm setup\n"
             f"{SETUP_PNPM_ACTION_LINE}\n"
             "        with:\n"
@@ -2084,9 +2105,13 @@ class RootSafetyWorkflowTests(unittest.TestCase):
 
         self.assertFalse(step_has_exact_line(setup, SETUP_PNPM_ACTION_LINE))
 
-    def test_platform_ci_steps_are_unique_and_follow_the_image_build_in_order(self) -> None:
+    def test_platform_ci_steps_are_unique_and_follow_the_image_build_in_order(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        previous_position = workflow.index(named_workflow_step(workflow, BUILD_IMAGE_STEP))
+        previous_position = workflow.index(
+            named_workflow_step(workflow, BUILD_IMAGE_STEP)
+        )
 
         for step_name in PLATFORM_CI_STEPS:
             with self.subTest(step=step_name):
@@ -2106,7 +2131,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
 
         self.assertEqual(validate_root_safety_workflow(workflow), [])
 
-    def test_reusable_platform_contract_rejects_dead_echoed_and_missing_commands(self) -> None:
+    def test_reusable_platform_contract_rejects_dead_echoed_and_missing_commands(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         mutations = {
             "echoed control connect": workflow.replace(
@@ -2218,7 +2245,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(helper)
         helper_text = helper.group(0) if helper is not None else ""
-        probe_anchor = "            set +e\n            docker exec platform-postgres-ci \\\n"
+        probe_anchor = (
+            "            set +e\n            docker exec platform-postgres-ci \\\n"
+        )
         mutations = {
             "postgres substitution": workflow.replace(
                 'psql --username "${role_name}" --dbname platform',
@@ -2302,8 +2331,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "          PY\n"
             "          if false; then\n"
             "            role_name=postgres\n"
-            "          fi\n"
-            + marker,
+            "          fi\n" + marker,
             1,
         )
 
@@ -2354,7 +2382,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_reusable_platform_contract_rejects_all_deny_and_identity_mutations(self) -> None:
+    def test_reusable_platform_contract_rejects_all_deny_and_identity_mutations(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         deny_fragments = tuple(
             fragment
@@ -2371,7 +2401,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_reusable_platform_contract_rejects_transition_and_cleanup_mutations(self) -> None:
+    def test_reusable_platform_contract_rejects_transition_and_cleanup_mutations(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         fragments = (
             *WORKFLOW_EXECUTABLE_CONTRACT[PLATFORM_CI_STEPS[0]],
@@ -2383,7 +2415,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_reusable_platform_contract_ignores_heredoc_and_uncalled_function_text(self) -> None:
+    def test_reusable_platform_contract_ignores_heredoc_and_uncalled_function_text(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         marker = "docker network connect freqtrade-platform-ci platform-control-ci"
         removed = workflow.replace(marker, "removed-control-connect", 1)
@@ -2422,10 +2456,14 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                     capture_output=True,
                     check=False,
                 )
-                output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+                output = (result.stdout + result.stderr).decode(
+                    "utf-8", errors="replace"
+                )
                 self.assertEqual(result.returncode, 0, output)
 
-    def test_platform_postgres_step_is_file_secreted_loopback_and_volume_free(self) -> None:
+    def test_platform_postgres_step_is_file_secreted_loopback_and_volume_free(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[0]))
         required = (
@@ -2448,7 +2486,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
             "docker network connect freqtrade-platform-ci platform-postgres-ci",
             "for attempt in $(seq 1 60); do",
             "CREATE DATABASE platform_test_ci",
-            'PGPASSFILE=${platform_ci_dir}/pgpass',
+            "PGPASSFILE=${platform_ci_dir}/pgpass",
             "PLATFORM_TEST_POSTGRES_URL=postgresql+psycopg://postgres@127.0.0.1:55432/platform_test_ci",
         )
         for fragment in required:
@@ -2458,7 +2496,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertNotIn("docker compose", step)
         self.assertNotIn("docker network disconnect bridge platform-postgres-ci", step)
 
-    def test_platform_postgres_readiness_requires_pid_one_before_pg_isready(self) -> None:
+    def test_platform_postgres_readiness_requires_pid_one_before_pg_isready(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = step_run_script(workflow, PLATFORM_CI_STEPS[0])
         probe = (
@@ -2478,7 +2518,9 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertIn("for attempt in $(seq 1 60); do", step)
         self.assertIn("sleep 1", step)
         self.assertIn('test "${ready}" -eq 1', step)
-        self.assertLess(step.index("read -r postmaster_pid"), step.index("exec pg_isready"))
+        self.assertLess(
+            step.index("read -r postmaster_pid"), step.index("exec pg_isready")
+        )
         self.assertLess(
             step.index('test "${ready}" -eq 1'),
             step.index("CREATE DATABASE platform_test_ci"),
@@ -2493,7 +2535,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         loop_start = script_lines.index("ready=0")
         loop_end = script_lines.index('test "${ready}" -eq 1', loop_start) + 1
         readiness_loop = "\n".join(script_lines[loop_start:loop_end]) + "\n"
-        harness = r'''set -u
+        harness = r"""set -u
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "${fixture_root}"' EXIT
 mkdir -p "${fixture_root}/bin" "${fixture_root}/pgdata"
@@ -2537,11 +2579,11 @@ seq() {
 sleep() {
   test "$1" = "1"
 }
-'''
+"""
 
         def run_scenario(scenario: str) -> subprocess.CompletedProcess[bytes]:
             assertions = (
-                'loop_status=$?\n'
+                "loop_status=$?\n"
                 'test "$(cat "${fixture_root}/attempt")" = "3"\n'
                 'exit "${loop_status}"\n'
             )
@@ -2571,7 +2613,9 @@ sleep() {
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         upgrade = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[1]))
         postgres = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[2]))
-        regressions = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[3]))
+        regressions = active_step_text(
+            named_workflow_step(workflow, PLATFORM_CI_STEPS[3])
+        )
 
         for fragment in (
             "PlatformDatabaseSettings",
@@ -2600,7 +2644,9 @@ sleep() {
             self.assertIn(selector, regressions)
         self.assertIn("ruff check \\", regressions)
 
-    def test_least_privilege_step_reconciles_roles_and_probes_hardened_http(self) -> None:
+    def test_least_privilege_step_reconciles_roles_and_probes_hardened_http(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
         required = (
@@ -2619,7 +2665,7 @@ sleep() {
             "expect_role_denied platform_supervisor delegated-sequence",
             "docker network disconnect bridge platform-postgres-ci",
             "database_networks=\"$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')\"",
-            'printf \'platform PostgreSQL networks after isolation: %s\\n\' "${database_networks}"',
+            "printf 'platform PostgreSQL networks after isolation: %s\\n' \"${database_networks}\"",
             'test "${database_networks}" = "freqtrade-platform-ci"',
             "--name platform-control-ci",
             "--user 1000:1000",
@@ -2655,14 +2701,18 @@ sleep() {
             step.index("ALTER ROLE platform_control WITH SUPERUSER"),
         )
         self.assertLess(
-            step.index("GRANT UPDATE (desired_state) ON TABLE public.runtime_instances\n"
-                       "            TO platform_ci_downstream"),
+            step.index(
+                "GRANT UPDATE (desired_state) ON TABLE public.runtime_instances\n"
+                "            TO platform_ci_downstream"
+            ),
             step.index("ALTER ROLE platform_control WITH SUPERUSER"),
         )
         for forbidden in ("docker.sock", "ft_userdata/runtime", "docker compose"):
             self.assertNotIn(forbidden, step)
 
-    def test_least_privilege_fixture_reuses_registered_runtime_foreign_keys(self) -> None:
+    def test_least_privilege_fixture_reuses_registered_runtime_foreign_keys(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
 
@@ -2688,7 +2738,9 @@ sleep() {
         )
         self.assertEqual(step.count("FROM runtime_attempts AS fixture_attempt"), 2)
 
-    def test_contamination_preserves_production_owners_and_postgres_grantor(self) -> None:
+    def test_contamination_preserves_production_owners_and_postgres_grantor(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
 
@@ -2698,9 +2750,7 @@ sleep() {
             "CREATE SCHEMA platform_ci_private AUTHORIZATION platform_ci_owner",
             step,
         )
-        database_grant = (
-            "GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION"
-        )
+        database_grant = "GRANT CREATE ON DATABASE platform TO platform_ci_delegate WITH GRANT OPTION"
         schema_grant = (
             "GRANT CREATE ON SCHEMA public TO platform_ci_delegate WITH GRANT OPTION"
         )
@@ -2708,9 +2758,15 @@ sleep() {
         self.assertIn(database_grant, step)
         self.assertIn(schema_grant, step)
         self.assertIn(schema_usage, step)
-        self.assertLess(step.index(database_grant), step.index("SET ROLE platform_ci_owner"))
-        self.assertLess(step.index(schema_grant), step.index("SET ROLE platform_ci_owner"))
-        self.assertLess(step.index(schema_usage), step.index("SET ROLE platform_ci_delegate"))
+        self.assertLess(
+            step.index(database_grant), step.index("SET ROLE platform_ci_owner")
+        )
+        self.assertLess(
+            step.index(schema_grant), step.index("SET ROLE platform_ci_owner")
+        )
+        self.assertLess(
+            step.index(schema_usage), step.index("SET ROLE platform_ci_delegate")
+        )
         self.assertIn("'CONNECT', 'postgres', false", step)
         self.assertIn("'USAGE', 'pg_database_owner', false", step)
         self.assertNotIn("'schema', 'public', '', role_name, 'USAGE', 'postgres'", step)
@@ -2759,10 +2815,10 @@ sleep() {
         def run_checker(log_content: str) -> subprocess.CompletedProcess[bytes]:
             setup = (
                 'platform_ci_dir="$(mktemp -d)"\n'
-                'trap \'rm -rf "${platform_ci_dir}"\' EXIT\n'
+                "trap 'rm -rf \"${platform_ci_dir}\"' EXIT\n"
                 "umask 077\n"
-                f"printf %s {shlex.quote(sentinel)} > \"${{platform_ci_dir}}/query-sentinel\"\n"
-                f"printf %s {shlex.quote(log_content)} > \"${{platform_ci_dir}}/query-container.log\"\n"
+                f'printf %s {shlex.quote(sentinel)} > "${{platform_ci_dir}}/query-sentinel"\n'
+                f'printf %s {shlex.quote(log_content)} > "${{platform_ci_dir}}/query-container.log"\n'
                 'test "$(stat -c %a "${platform_ci_dir}/query-sentinel")" = "600"\n'
             )
             return subprocess.run(
@@ -2836,7 +2892,9 @@ sleep() {
                     validate_root_safety_workflow(mutated),
                 )
 
-    def test_platform_cleanup_removes_exact_resources_and_asserts_no_volume_drift(self) -> None:
+    def test_platform_cleanup_removes_exact_resources_and_asserts_no_volume_drift(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[5]))
 
@@ -2884,18 +2942,26 @@ sleep() {
         mutated = workflow.replace(marker, "removed-created-volume-drift-status", 1)
         self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_platform_contract_text_in_comments_or_unrelated_steps_is_rejected(self) -> None:
+    def test_platform_contract_text_in_comments_or_unrelated_steps_is_rejected(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         marker = "--security-opt no-new-privileges:true"
         step = named_workflow_step(workflow, PLATFORM_CI_STEPS[4])
         mutated_step = step.replace(marker, f"# {marker}", 1)
         mutated = workflow.replace(step, mutated_step, 1)
-        mutated += f"\n      - name: Unrelated platform text\n        run: echo '{marker}'\n"
+        mutated += (
+            f"\n      - name: Unrelated platform text\n        run: echo '{marker}'\n"
+        )
         self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_operator_image_is_built_from_reviewed_provenance_and_alias_verified(self) -> None:
+    def test_operator_image_is_built_from_reviewed_provenance_and_alias_verified(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        step = active_step_text(named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP))
+        step = active_step_text(
+            named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP)
+        )
         for fragment in (
             "id: reviewed-operator-image",
             "python tools/image_provenance.py build-operator --print-image-id",
@@ -2915,7 +2981,9 @@ sleep() {
     def test_operator_image_build_rejects_untrusted_baseline_inventory(self) -> None:
         for failure in ("image-list", "sort", "image-inspect"):
             with self.subTest(failure=failure):
-                result, events = run_operator_image_build_with_stubbed_inventory(failure)
+                result, events = run_operator_image_build_with_stubbed_inventory(
+                    failure
+                )
                 self.assertNotEqual(
                     result.returncode,
                     0,
@@ -2939,7 +3007,7 @@ sleep() {
         for fragment in (
             'operator_image_tags_raw_tmp="${operator_image_baseline}.tags.raw.tmp"',
             'operator_image_tags_tmp="${operator_image_baseline}.tags.tmp"',
-            'docker image ls --format \'{{.Repository}}:{{.Tag}}\' > "${operator_image_tags_raw_tmp}"',
+            "docker image ls --format '{{.Repository}}:{{.Tag}}' > \"${operator_image_tags_raw_tmp}\"",
             'sort --unique "${operator_image_tags_tmp}"',
             'test -n "${operator_id}"',
         ):
@@ -2955,12 +3023,13 @@ sleep() {
     def test_operator_steps_have_fixed_order_after_phase2b_regressions(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         positions = [
-            workflow.index(f"      - name: {name}")
-            for name in ALL_PLATFORM_CI_STEPS
+            workflow.index(f"      - name: {name}") for name in ALL_PLATFORM_CI_STEPS
         ]
         self.assertEqual(positions, sorted(positions))
 
-    def test_postgres_provisions_operator_secret_and_runs_zero_skip_selectors(self) -> None:
+    def test_postgres_provisions_operator_secret_and_runs_zero_skip_selectors(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         start = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[0]))
         self.assertIn("platform_operator_db_password \\", start)
@@ -2977,7 +3046,9 @@ sleep() {
         self.assertIn("if skipped:", postgres)
         self.assertIn("platform PostgreSQL selectors skipped tests", postgres)
 
-    def test_operator_acceptance_uses_normal_local_checkout_and_repeats_typed_commands(self) -> None:
+    def test_operator_acceptance_uses_normal_local_checkout_and_repeats_typed_commands(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
         required = (
@@ -3020,7 +3091,9 @@ sleep() {
         self.assertNotIn("git@", step)
         self.assertNotIn("https://", step)
 
-    def test_operator_acceptance_restores_the_observed_database_network_baseline(self) -> None:
+    def test_operator_acceptance_restores_the_observed_database_network_baseline(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
         before = 'operator_database_networks_before="$(docker inspect'
@@ -3030,9 +3103,14 @@ sleep() {
         equality = 'test "${operator_database_networks}" = "${operator_database_networks_before}"'
         for fragment in (before, connect, disconnect, after, equality):
             self.assertIn(fragment, step)
-        positions = [step.index(fragment) for fragment in (before, connect, disconnect, after, equality)]
+        positions = [
+            step.index(fragment)
+            for fragment in (before, connect, disconnect, after, equality)
+        ]
         self.assertEqual(positions, sorted(positions))
-        self.assertNotIn('test "${operator_database_networks}" = "freqtrade-platform-ci"', step)
+        self.assertNotIn(
+            'test "${operator_database_networks}" = "freqtrade-platform-ci"', step
+        )
         reordered = workflow.replace(before, "topology-baseline-placeholder", 1)
         reordered = reordered.replace(connect, before, 1)
         reordered = reordered.replace("topology-baseline-placeholder", connect, 1)
@@ -3041,9 +3119,13 @@ sleep() {
             validate_root_safety_workflow(reordered),
         )
 
-    def test_operator_cleanup_restores_postgres_topology_and_removes_temp_resources(self) -> None:
+    def test_operator_cleanup_restores_postgres_topology_and_removes_temp_resources(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        acceptance = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
+        acceptance = active_step_text(
+            named_workflow_step(workflow, OPERATOR_CI_STEPS[0])
+        )
         for fragment in (
             "docker network disconnect freqtrade-cn_platform-db platform-postgres-ci",
             "docker network rm freqtrade-cn_platform-db",
@@ -3061,7 +3143,9 @@ sleep() {
         ):
             self.assertIn(fragment, cleanup)
 
-    def test_operator_privilege_gate_uses_real_login_and_reconciles_contamination(self) -> None:
+    def test_operator_privilege_gate_uses_real_login_and_reconciles_contamination(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
         for fragment in (
@@ -3113,7 +3197,9 @@ sleep() {
             step.index("CREATE FUNCTION public.platform_operator_public_null_probe()"),
         )
 
-    def test_operator_privilege_gate_reports_fixed_post_reconcile_checkpoints(self) -> None:
+    def test_operator_privilege_gate_reports_fixed_post_reconcile_checkpoints(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
         checkpoints = (
@@ -3226,12 +3312,14 @@ sleep() {
             "operator_password=",
             "--env PGPASSWORD",
             '$(cat "${platform_ci_dir}/platform_operator_db_password")',
-            '$(tr -d \'\\r\\n\' < "${platform_ci_dir}/platform_operator_db_password")',
+            "$(tr -d '\\r\\n' < \"${platform_ci_dir}/platform_operator_db_password\")",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, step)
 
-    def test_operator_privilege_gate_has_exact_catalog_authority_inventories(self) -> None:
+    def test_operator_privilege_gate_has_exact_catalog_authority_inventories(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[1]))
         required = (
@@ -3261,7 +3349,9 @@ sleep() {
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, step)
 
-    def test_operator_acceptance_requires_exact_output_schemas_and_fixed_ids(self) -> None:
+    def test_operator_acceptance_requires_exact_output_schemas_and_fixed_ids(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         step = active_step_text(named_workflow_step(workflow, OPERATOR_CI_STEPS[0]))
         for fragment in (
@@ -3271,10 +3361,11 @@ sleep() {
             "if set(validate) != validate_keys",
             "if set(publish) != publish_keys",
             "if set(register) != registration_keys",
+            '"launch_policy_catalog_digest", "launch_policy_digest",',
             'validate["strategy_class_name"] != "SampleStrategy"',
             'register["catalog_revision_id"] != "builtin-market-catalog-v2"',
             'register["state_allocation_id"] != "state-phase2-spot-paper-probe-v1"',
-            'f"template-{validate[\'template_payload_digest\']}"',
+            "f\"template-{validate['template_payload_digest']}\"",
             'runtime_spec_revision_id.removeprefix("runtime-spec-")',
             'runtime_spec_revision_id.startswith("runtime-spec-")',
             "secret-phase2-spot-paper-probe-api-password-v1",
@@ -3416,7 +3507,10 @@ sleep() {
             ("invalid_wait_status", "operator_invalid_arguments_wait_failed"),
             ("invalid_log_status", "operator_invalid_arguments_log_capture_failed"),
             ("invalid_cleanup_status", "operator_invalid_arguments_cleanup_failed"),
-            ("invalid_absence_status", "operator_invalid_arguments_absence_check_failed"),
+            (
+                "invalid_absence_status",
+                "operator_invalid_arguments_absence_check_failed",
+            ),
         ):
             self.assertIn(
                 f'if ! test "${{{status_name}}}" -eq 0; then\n'
@@ -3463,7 +3557,7 @@ sleep() {
             step,
         )
         self.assertNotIn("invalid_existing=", step)
-        self.assertNotIn('name=^/${invalid_container}$', step)
+        self.assertNotIn("name=^/${invalid_container}$", step)
         self.assertNotIn(
             "run --rm --no-deps -T platform-operator ${invalid_arguments}",
             step,
@@ -3598,8 +3692,7 @@ sleep() {
                     )
                 )
                 expected_container_id = (
-                    "0123456789abcdef0123456789abcdef"
-                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 )
                 if scenario in ("wrong-status", "contaminated-app-output"):
                     self.assertEqual(
@@ -3685,7 +3778,9 @@ sleep() {
             ["upstream-status-call-1", "upstream-status-call-2"],
         )
 
-    def test_operator_cleanup_removes_all_reviewed_image_tags_and_asserts_absence(self) -> None:
+    def test_operator_cleanup_removes_all_reviewed_image_tags_and_asserts_absence(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
         for fragment in (
@@ -3701,11 +3796,15 @@ sleep() {
         ):
             self.assertIn(fragment, cleanup)
 
-    def test_operator_image_cleanup_uses_prebuild_baseline_when_output_is_empty(self) -> None:
+    def test_operator_image_cleanup_uses_prebuild_baseline_when_output_is_empty(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        build = active_step_text(named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP))
+        build = active_step_text(
+            named_workflow_step(workflow, BUILD_OPERATOR_IMAGE_STEP)
+        )
         cleanup = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[-1]))
-        baseline = '${RUNNER_TEMP}/platform-operator-images.before'
+        baseline = "${RUNNER_TEMP}/platform-operator-images.before"
         self.assertIn(baseline, build)
         self.assertLess(
             build.index(baseline),
@@ -3727,7 +3826,7 @@ sleep() {
             "platform-operator-images.created",
             "platform-operator-image-ids.created",
             "comm -13",
-            "docker image rm \"${operator_tag}\"",
+            'docker image rm "${operator_tag}"',
             'docker image rm --force "${operator_id}"',
             "cmp",
         ):
@@ -3746,7 +3845,7 @@ sleep() {
         cleanup = step_run_script(workflow, PLATFORM_CI_STEPS[-1]).replace(
             "${{ steps.reviewed-operator-image.outputs.image_id }}", ""
         )
-        stub = r'''
+        stub = r"""
 RUNNER_TEMP="$(mktemp -d)"
 trap 'rm -rf "${RUNNER_TEMP}"' EXIT
 baseline_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -3782,7 +3881,7 @@ docker() {
   fi
   return 99
 }
-'''
+"""
         result = subprocess.run(
             [shutil.which("bash") or "bash", "-s"],
             cwd=REPO_ROOT,
@@ -3865,7 +3964,9 @@ docker() {
         self.assertEqual(final_mapping, "")
         self.assertEqual(image_list_count, 2)
 
-    def test_operator_contract_rejects_missing_executable_and_sql_evidence(self) -> None:
+    def test_operator_contract_rejects_missing_executable_and_sql_evidence(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         fragments = (
             *WORKFLOW_EXECUTABLE_CONTRACT[OPERATOR_CI_STEPS[0]],
@@ -3880,7 +3981,9 @@ docker() {
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
 
-    def test_operator_contract_rejects_comment_and_dead_branch_substitution(self) -> None:
+    def test_operator_contract_rejects_comment_and_dead_branch_substitution(
+        self,
+    ) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         marker = "docker network connect --alias platform-postgres freqtrade-cn_platform-db platform-postgres-ci"
         step = named_workflow_step(workflow, OPERATOR_CI_STEPS[0])
@@ -3891,9 +3994,9 @@ docker() {
         removed = workflow.replace(marker, "removed-operator-network-connect", 1)
         dead = removed.replace(
             '          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"',
-            '          if false; then\n'
-            f'            {marker}\n'
-            '          fi\n'
+            "          if false; then\n"
+            f"            {marker}\n"
+            "          fi\n"
             '          platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"',
             1,
         )

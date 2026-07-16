@@ -115,6 +115,86 @@ if (-not $valid) {
 }
 Write-Output "runtime secret ACL: $action`: OK"
 """
+WINDOWS_TRUSTED_PATH_ACL_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+[string[]]$paths = $env:FREQTRADE_RUNTIME_TRUSTED_PATHS | ConvertFrom-Json
+$action = $env:FREQTRADE_RUNTIME_TRUSTED_PATH_ACTION
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$trustedSids = @(
+    $identity.User.Value,
+    'S-1-5-18',
+    'S-1-5-32-544'
+)
+$writeMask = [int64]0
+foreach ($right in @(
+    [System.Security.AccessControl.FileSystemRights]::WriteData,
+    [System.Security.AccessControl.FileSystemRights]::AppendData,
+    [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes,
+    [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,
+    [System.Security.AccessControl.FileSystemRights]::WriteAttributes,
+    [System.Security.AccessControl.FileSystemRights]::Delete,
+    [System.Security.AccessControl.FileSystemRights]::ChangePermissions,
+    [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+)) {
+    $writeMask = $writeMask -bor [int64][int]$right
+}
+
+if ($action -eq 'harden-directory') {
+    if ($paths.Count -ne 1) {
+        throw 'trusted directory hardening requires one path'
+    }
+    $path = $paths[0]
+    $acl = Get-Acl -LiteralPath $path
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) {
+        $null = $acl.RemoveAccessRuleSpecific($rule)
+    }
+    $acl.SetOwner($identity.User)
+    $inheritance = `
+        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit `
+        -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity.User,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritance,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        $allow
+    )
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $path -AclObject $acl
+} elseif ($action -ne 'verify') {
+    throw 'unsupported trusted path ACL action'
+}
+
+if ($paths.Count -eq 0) {
+    throw 'trusted path verification requires paths'
+}
+foreach ($path in $paths) {
+    $acl = Get-Acl -LiteralPath $path
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+    if ($trustedSids -notcontains $owner.Value) {
+        throw 'trusted path owner verification failed'
+    }
+    $rules = @(
+        $acl.GetAccessRules(
+            $true,
+            $true,
+            [System.Security.Principal.SecurityIdentifier]
+        )
+    )
+    foreach ($rule in $rules) {
+        if (
+            $rule.AccessControlType -eq $allow `
+            -and $trustedSids -notcontains $rule.IdentityReference.Value `
+            -and (([int64][int]$rule.FileSystemRights -band $writeMask) -ne 0)
+        ) {
+            throw 'trusted path writer verification failed'
+        }
+    }
+}
+Write-Output "runtime trusted path ACL: $action OK"
+"""
 
 
 def _is_windows() -> bool:
@@ -127,7 +207,9 @@ def _run_windows_acl(action: str, path: Path) -> None:
     powershell = shutil.which("powershell.exe")
     if powershell is None:
         raise ValueError("unable to prove Windows runtime secret ACL")
-    encoded_script = base64.b64encode(WINDOWS_ACL_SCRIPT.encode("utf-16-le")).decode("ascii")
+    encoded_script = base64.b64encode(WINDOWS_ACL_SCRIPT.encode("utf-16-le")).decode(
+        "ascii"
+    )
     environment = os.environ.copy()
     environment["FREQTRADE_RUNTIME_SECRET_PATH"] = str(path)
     environment["FREQTRADE_RUNTIME_ACL_ACTION"] = action
@@ -151,6 +233,56 @@ def _run_windows_acl(action: str, path: Path) -> None:
         raise ValueError(f"failed to {action} Windows runtime secret ACL") from error
     if completed.returncode != 0:
         raise ValueError(f"failed to {action} Windows runtime secret ACL")
+
+
+def _run_windows_trusted_path_acl(action: str, paths: tuple[Path, ...]) -> None:
+    if action not in {"harden-directory", "verify"}:
+        raise ValueError("unsupported Windows trusted path ACL action")
+    if not paths or (action == "harden-directory" and len(paths) != 1):
+        raise ValueError("invalid Windows trusted path ACL scope")
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        raise ValueError("unable to prove Windows trusted path ACL")
+    encoded_script = base64.b64encode(
+        WINDOWS_TRUSTED_PATH_ACL_SCRIPT.encode("utf-16-le")
+    ).decode("ascii")
+    environment = os.environ.copy()
+    environment["FREQTRADE_RUNTIME_TRUSTED_PATHS"] = json.dumps(
+        [str(path) for path in paths]
+    )
+    environment["FREQTRADE_RUNTIME_TRUSTED_PATH_ACTION"] = action
+    try:
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded_script,
+            ],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"failed to {action} Windows trusted path ACL") from error
+    if completed.returncode != 0:
+        raise ValueError(f"failed to {action} Windows trusted path ACL")
+
+
+def _harden_windows_trusted_directory_permissions(path: Path) -> None:
+    _run_windows_trusted_path_acl("harden-directory", (path,))
+
+
+def _verify_windows_trusted_path_permissions(path: Path) -> None:
+    _run_windows_trusted_path_acl("verify", (path,))
+
+
+def _verify_windows_trusted_paths_permissions(paths: tuple[Path, ...]) -> None:
+    _run_windows_trusted_path_acl("verify", paths)
 
 
 def _harden_secret_permissions(path: Path) -> None:
@@ -188,9 +320,7 @@ def _require_managed_state_status(status: os.stat_result, *, directory: bool) ->
         raise ValueError("invalid managed state path")
     if directory and not stat.S_ISDIR(status.st_mode):
         raise ValueError("invalid managed state directory")
-    if not directory and (
-        not stat.S_ISREG(status.st_mode) or status.st_nlink != 1
-    ):
+    if not directory and (not stat.S_ISREG(status.st_mode) or status.st_nlink != 1):
         raise ValueError("invalid managed state identity file")
 
 
@@ -209,7 +339,9 @@ def _verify_managed_state_directory(path: Path, runtime_uid: int) -> None:
     if _is_windows():
         _run_windows_acl("verify", path)
     elif status.st_uid != runtime_uid or stat.S_IMODE(status.st_mode) != 0o700:
-        raise ValueError("managed state directory must be owned by runtime uid with mode 0700")
+        raise ValueError(
+            "managed state directory must be owned by runtime uid with mode 0700"
+        )
 
 
 def _harden_managed_state_identity_file(path: Path, runtime_uid: int) -> None:
@@ -336,16 +468,15 @@ def _verify_ambient_runtime_identity(identity: dict[str, int]) -> None:
         if value is None or NON_NEGATIVE_INTEGER_PATTERN.fullmatch(value) is None:
             raise ValueError("ambient runtime identity must be a positive integer pair")
         if int(value) <= 0 or int(value) != identity[key]:
-            raise ValueError("ambient runtime identity does not match verified identity")
+            raise ValueError(
+                "ambient runtime identity does not match verified identity"
+            )
 
 
 def build_compose_identity(
     manifest: dict[str, Any], identity: dict[str, int]
 ) -> dict[str, object]:
-    user = (
-        f"{identity['FREQTRADE_RUNTIME_UID']}:"
-        f"{identity['FREQTRADE_RUNTIME_GID']}"
-    )
+    user = f"{identity['FREQTRADE_RUNTIME_UID']}:{identity['FREQTRADE_RUNTIME_GID']}"
     return {
         "services": {
             service["name"]: {"user": user} for service in manifest["services"]
@@ -409,7 +540,9 @@ def _verify_runtime_control_file(path: Path, runtime_uid: int) -> None:
     if _is_windows():
         _run_windows_acl("verify", path)
     elif status.st_uid != runtime_uid or stat.S_IMODE(status.st_mode) != 0o600:
-        raise ValueError("runtime control file must be owned by runtime uid with mode 0600")
+        raise ValueError(
+            "runtime control file must be owned by runtime uid with mode 0600"
+        )
 
 
 def _merge_runtime_identity(path: Path) -> None:
@@ -494,10 +627,14 @@ def _verify_writable_directories(
     resolved_root = state_root.resolve()
     for path in directories:
         if path.is_symlink() or not path.is_dir():
-            raise ValueError(f"invalid runtime writable directory for {service['name']}")
+            raise ValueError(
+                f"invalid runtime writable directory for {service['name']}"
+            )
         resolved = path.resolve()
         if resolved != resolved_root and resolved_root not in resolved.parents:
-            raise ValueError(f"runtime writable directory escapes state root: {service['name']}")
+            raise ValueError(
+                f"runtime writable directory escapes state root: {service['name']}"
+            )
         if _is_windows():
             if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
                 raise ValueError(
@@ -792,7 +929,9 @@ def verify_runtime(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Bootstrap isolated Freqtrade runtime state")
+    parser = argparse.ArgumentParser(
+        description="Bootstrap isolated Freqtrade runtime state"
+    )
     parser.add_argument(
         "--root",
         type=Path,

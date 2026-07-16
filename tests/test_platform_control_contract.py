@@ -102,7 +102,9 @@ class PlatformControlContractTests(unittest.TestCase):
         )
         self.assertEqual(self.errors(), [])
 
-    def test_operator_database_secret_is_mounted_only_into_postgres_and_operator(self) -> None:
+    def test_operator_database_secret_is_mounted_only_into_postgres_and_operator(
+        self,
+    ) -> None:
         definition = self.compose["secrets"]["platform_operator_db_password"]
         self.assertEqual(
             definition,
@@ -280,11 +282,15 @@ class PlatformControlContractTests(unittest.TestCase):
             cases.append(("platform-operator fields differ", mutated))
 
         writable_mount = copy.deepcopy(self.compose)
-        writable_mount["services"]["platform-operator"]["volumes"][0]["read_only"] = False
+        writable_mount["services"]["platform-operator"]["volumes"][0]["read_only"] = (
+            False
+        )
         cases.append(("platform-operator fields differ", writable_mount))
 
         full_root = copy.deepcopy(self.compose)
-        full_root["services"]["platform-operator"]["volumes"][0]["source"] = str(REPO_ROOT)
+        full_root["services"]["platform-operator"]["volumes"][0]["source"] = str(
+            REPO_ROOT
+        )
         cases.append(("platform-operator fields differ", full_root))
 
         wrong_profile = copy.deepcopy(self.compose)
@@ -297,7 +303,9 @@ class PlatformControlContractTests(unittest.TestCase):
                 self.assertIn(expected, errors)
                 self.assertNotIn("private-value", errors)
 
-    def test_operator_dockerfile_stage_is_fixed_and_default_image_stays_runtime(self) -> None:
+    def test_operator_dockerfile_stage_is_fixed_and_default_image_stays_runtime(
+        self,
+    ) -> None:
         dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("FROM runtime-image AS platform-operator-image", dockerfile)
         self.assertIn("ARG PLATFORM_OPERATOR_ROOT_COMMIT", dockerfile)
@@ -315,14 +323,16 @@ class PlatformControlContractTests(unittest.TestCase):
         for module in (
             "tools/__init__.py",
             "tools/committed_git.py",
+            "tools/runtime_driver.py",
+            "tools/runtime_launch_policy.py",
             "tools/runtime_templates.py",
             "tools/runtime_artifacts.py",
             "tools/runtime_registry_cli.py",
         ):
             self.assertIn(module, operator_stage)
         self.assertNotIn("COPY tools/", operator_stage)
-        self.assertIn('*[!0-9a-f]*', operator_stage)
-        self.assertIn('${#PLATFORM_OPERATOR_ROOT_COMMIT}', operator_stage)
+        self.assertIn("*[!0-9a-f]*", operator_stage)
+        self.assertIn("${#PLATFORM_OPERATOR_ROOT_COMMIT}", operator_stage)
         self.assertNotIn("grep -E", operator_stage)
         checkout_directories = operator_stage.split(
             "install -d -o ftuser -g ftuser -m 0555", 1
@@ -336,20 +346,24 @@ class PlatformControlContractTests(unittest.TestCase):
             "/opt/platform-operator/repository/ft_userdata/user_data/strategies",
         ):
             self.assertIn(directory, checkout_directories)
-        self.assertIn("chown root:root /opt/platform-operator/root-commit", operator_stage)
+        self.assertIn(
+            "chown root:root /opt/platform-operator/root-commit", operator_stage
+        )
         self.assertIn("chmod 0444 /opt/platform-operator/root-commit", operator_stage)
 
     def test_platform_control_is_only_fixed_loopback_application_port(self) -> None:
         service = self.compose["services"]["platform-control"]
         self.assertEqual(
             service["ports"],
-            [{
-                "target": 8090,
-                "published": "8090",
-                "host_ip": "127.0.0.1",
-                "protocol": "tcp",
-                "mode": "ingress",
-            }],
+            [
+                {
+                    "target": 8090,
+                    "published": "8090",
+                    "host_ip": "127.0.0.1",
+                    "protocol": "tcp",
+                    "mode": "ingress",
+                }
+            ],
         )
         self.assertEqual(
             service["environment"],
@@ -392,12 +406,18 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertEqual(service.get("ports", []), [])
         self.assertEqual(service["expose"], ["5432"])
         self.assertEqual(service["networks"], {"platform-db": None})
-        self.assertEqual(service["volumes"][0], {
+        self.assertEqual(
+            service["volumes"][0],
+            {
                 "type": "volume",
                 "source": "platform-postgres-data",
                 "target": "/var/lib/postgresql/data",
-            })
-        self.assertEqual(service["volumes"][1]["target"], "/docker-entrypoint-initdb.d/init-platform-roles.sh")
+            },
+        )
+        self.assertEqual(
+            service["volumes"][1]["target"],
+            "/docker-entrypoint-initdb.d/init-platform-roles.sh",
+        )
         self.assertTrue(service["volumes"][1]["read_only"])
         self.assertEqual(
             service["environment"],
@@ -447,13 +467,21 @@ class PlatformControlContractTests(unittest.TestCase):
 
         docker_mount = copy.deepcopy(self.compose)
         docker_mount["services"]["platform-control"]["volumes"] = [
-            {"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}
+            {
+                "type": "bind",
+                "source": "/var/run/docker.sock",
+                "target": "/var/run/docker.sock",
+            }
         ]
         cases.append(("volumes", docker_mount))
 
         state_mount = copy.deepcopy(self.compose)
         state_mount["services"]["platform-control"]["volumes"] = [
-            {"type": "bind", "source": str(REPO_ROOT / "ft_userdata/runtime"), "target": "/state"}
+            {
+                "type": "bind",
+                "source": str(REPO_ROOT / "ft_userdata/runtime"),
+                "target": "/state",
+            }
         ]
         cases.append(("volumes", state_mount))
 
@@ -476,7 +504,9 @@ class PlatformControlContractTests(unittest.TestCase):
         cases.append(("networks", extra_resource))
 
         missing_ingress = copy.deepcopy(self.compose)
-        del missing_ingress["services"]["platform-control"]["networks"]["platform-ingress"]
+        del missing_ingress["services"]["platform-control"]["networks"][
+            "platform-ingress"
+        ]
         cases.append(("platform-control networks", missing_ingress))
 
         extra_volume = copy.deepcopy(self.compose)
@@ -618,8 +648,12 @@ class PlatformControlContractTests(unittest.TestCase):
         )
         for grant in grants:
             with self.subTest(grant=grant):
-                errors = self.role_script_errors(self.role_script() + "\n" + grant + "\n")
-                self.assertIn("platform role initializer broadens database authority", errors)
+                errors = self.role_script_errors(
+                    self.role_script() + "\n" + grant + "\n"
+                )
+                self.assertIn(
+                    "platform role initializer broadens database authority", errors
+                )
 
     def test_role_validator_rejects_public_default_hardening_reordering(self) -> None:
         script = self.role_script()
@@ -638,7 +672,9 @@ class PlatformControlContractTests(unittest.TestCase):
             self.role_script_errors(moved),
         )
 
-    def test_role_password_normalization_removes_only_one_terminal_newline(self) -> None:
+    def test_role_password_normalization_removes_only_one_terminal_newline(
+        self,
+    ) -> None:
         script = self.role_script().lower()
         self.assertNotRegex(script, r"\b(?:btrim|trim)\s*\(")
         self.assertEqual(script.count("right(secret_value, 2) = e'\\r\\n'"), 3)
@@ -646,7 +682,9 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertEqual(script.count("right(secret_value, 1) = e'\\n'"), 3)
         self.assertEqual(script.count("left(secret_value, -1)"), 3)
 
-    def test_role_script_resets_exact_attributes_and_both_membership_directions(self) -> None:
+    def test_role_script_resets_exact_attributes_and_both_membership_directions(
+        self,
+    ) -> None:
         script = " ".join(self.role_script().upper().split())
         attributes = (
             "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
@@ -666,7 +704,9 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertEqual(script.count("GRANTED BY %I CASCADE"), 18)
         self.assertGreaterEqual(script.count(" CASCADE"), 5)
 
-    def test_role_script_fails_closed_on_operator_ownership_and_default_authority(self) -> None:
+    def test_role_script_fails_closed_on_operator_ownership_and_default_authority(
+        self,
+    ) -> None:
         script = " ".join(self.role_script().upper().split())
         self.assertNotIn("REASSIGN OWNED", script)
         self.assertNotIn("DROP OWNED", script)
@@ -1024,22 +1064,32 @@ class PlatformControlContractTests(unittest.TestCase):
                 )
 
     def test_role_validator_rejects_closed_artifact_byte_drift(self) -> None:
-        errors = self.role_script_errors(self.role_script() + "\n# harmless byte drift\n")
+        errors = self.role_script_errors(
+            self.role_script() + "\n# harmless byte drift\n"
+        )
         self.assertIn("platform role initializer digest differs", errors)
 
     def test_role_validator_normalizes_crlf_before_hashing(self) -> None:
         crlf_script = self.role_script().replace("\n", "\r\n")
         self.assertEqual(self.role_script_errors(crlf_script), [])
 
-    def test_role_script_byte_normalization_rejects_non_shell_equivalent_bytes(self) -> None:
+    def test_role_script_byte_normalization_rejects_non_shell_equivalent_bytes(
+        self,
+    ) -> None:
         lf = self.role_script().encode("utf-8")
-        self.assertEqual(runtime_contract._normalize_platform_role_script(lf), lf.decode())
         self.assertEqual(
-            runtime_contract._normalize_platform_role_script(lf.replace(b"\n", b"\r\n")),
+            runtime_contract._normalize_platform_role_script(lf), lf.decode()
+        )
+        self.assertEqual(
+            runtime_contract._normalize_platform_role_script(
+                lf.replace(b"\n", b"\r\n")
+            ),
             lf.decode(),
         )
         mixed = lf.replace(b"\n", b"\r\n", 1)
-        self.assertEqual(runtime_contract._normalize_platform_role_script(mixed), lf.decode())
+        self.assertEqual(
+            runtime_contract._normalize_platform_role_script(mixed), lf.decode()
+        )
 
         parts = lf.split(b"\n", 2)
         invalid = {
@@ -1051,7 +1101,9 @@ class PlatformControlContractTests(unittest.TestCase):
         }
         for name, content in invalid.items():
             with self.subTest(name=name):
-                self.assertIsNone(runtime_contract._normalize_platform_role_script(content))
+                self.assertIsNone(
+                    runtime_contract._normalize_platform_role_script(content)
+                )
 
     def test_role_validator_rejects_column_original_grantor_mutations(self) -> None:
         script = self.role_script()
@@ -1123,7 +1175,9 @@ class PlatformControlContractTests(unittest.TestCase):
                     errors,
                 )
 
-    def test_role_validator_rejects_grant_inventory_and_recipient_mutations(self) -> None:
+    def test_role_validator_rejects_grant_inventory_and_recipient_mutations(
+        self,
+    ) -> None:
         script = self.role_script()
         mutations = {
             "narrow extra update": script
@@ -1153,9 +1207,13 @@ class PlatformControlContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(mutated, script)
                 errors = self.role_script_errors(mutated)
-                self.assertIn("platform role initializer grant inventory differs", errors)
+                self.assertIn(
+                    "platform role initializer grant inventory differs", errors
+                )
 
-    def test_role_validator_rejects_operator_guard_and_allowlist_mutations(self) -> None:
+    def test_role_validator_rejects_operator_guard_and_allowlist_mutations(
+        self,
+    ) -> None:
         script = self.role_script()
         mutations = {
             "missing ownership guard": (
@@ -1225,8 +1283,12 @@ class PlatformControlContractTests(unittest.TestCase):
             "DROP OWNED BY platform_operator;",
         ):
             with self.subTest(command=command):
-                errors = self.role_script_errors(self.role_script() + "\n" + command + "\n")
-                self.assertIn("platform role initializer broadens database authority", errors)
+                errors = self.role_script_errors(
+                    self.role_script() + "\n" + command + "\n"
+                )
+                self.assertIn(
+                    "platform role initializer broadens database authority", errors
+                )
 
     def test_role_validator_rejects_missing_reconciliation_clauses(self) -> None:
         script = self.role_script()
@@ -1265,11 +1327,15 @@ class PlatformControlContractTests(unittest.TestCase):
             ),
             "supervisor inbound membership": (
                 "platform role initializer membership cleanup differs",
-                script.replace("member_role.rolname = 'platform_supervisor'", "FALSE", 1),
+                script.replace(
+                    "member_role.rolname = 'platform_supervisor'", "FALSE", 1
+                ),
             ),
             "supervisor outbound membership": (
                 "platform role initializer membership cleanup differs",
-                script.replace("granted_role.rolname = 'platform_supervisor'", "FALSE", 1),
+                script.replace(
+                    "granted_role.rolname = 'platform_supervisor'", "FALSE", 1
+                ),
             ),
             "operator inbound membership": (
                 "platform role initializer membership cleanup differs",
@@ -1277,7 +1343,9 @@ class PlatformControlContractTests(unittest.TestCase):
             ),
             "operator outbound membership": (
                 "platform role initializer membership cleanup differs",
-                script.replace("granted_role.rolname = 'platform_operator'", "FALSE", 1),
+                script.replace(
+                    "granted_role.rolname = 'platform_operator'", "FALSE", 1
+                ),
             ),
             "column cleanup": (
                 "platform role initializer residual column cleanup differs",

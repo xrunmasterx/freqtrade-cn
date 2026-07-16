@@ -7,6 +7,7 @@ import shutil
 import stat
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,6 +17,9 @@ from tools.runtime_secrets import (
     LocalFileSecretProvider,
     SecretMaterialError,
     SecretMaterialRequirement,
+    SecretSourceIdentity,
+    VerifiedSecretMount,
+    VerifiedSecretMountLease,
 )
 
 
@@ -37,10 +41,20 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         }
         for requirement in self.requirements:
             self.write_secret(requirement, self.values[requirement.identity])
+        self.secret_permission_patcher = None
+        self.directory_permission_patcher = None
         if os.name == "nt":
-            permissions = mock.patch.object(runtime_secrets, "_verify_secret_permissions")
-            self.permission_proof = permissions.start()
-            self.addCleanup(permissions.stop)
+            self.secret_permission_patcher = mock.patch.object(
+                runtime_secrets, "_verify_secret_permissions"
+            )
+            self.permission_proof = self.secret_permission_patcher.start()
+            self.addCleanup(self.secret_permission_patcher.stop)
+            self.directory_permission_patcher = mock.patch.object(
+                runtime_secrets,
+                "_verify_windows_trusted_paths_permissions",
+            )
+            self.directory_permission_patcher.start()
+            self.addCleanup(self.directory_permission_patcher.stop)
         self.provider = self.make_provider()
 
     def make_provider(
@@ -172,11 +186,546 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         handle.close()
         self.assert_closed(selected)
 
+    def test_handle_close_oserror_preserves_legacy_error_and_can_retry(self) -> None:
+        handle = self.provider.resolve("api-password", "v1")
+        descriptor = handle.descriptor
+        real_close = os.close
+        calls = 0
+
+        def fail_twice(opened_descriptor: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise OSError("injected close failure")
+            real_close(opened_descriptor)
+
+        with (
+            mock.patch.object(
+                runtime_secrets.os,
+                "close",
+                side_effect=fail_twice,
+            ),
+            self.assertRaisesRegex(
+                SecretMaterialError,
+                "^secret material handle is closed$",
+            ) as caught,
+        ):
+            handle.close()
+
+        self.assertNotIn(str(self.root), str(caught.exception))
+        self.assertFalse(handle._closed)
+        self.assertEqual(handle.descriptor, descriptor)
+        os.fstat(descriptor)
+
+        handle.close()
+        self.assert_closed(descriptor)
+        with self.assertRaisesRegex(
+            SecretMaterialError,
+            "^secret material handle is closed$",
+        ):
+            _ = handle.descriptor
+
+    def test_resolve_mounts_returns_sorted_frozen_provider_metadata(self) -> None:
+        provider = self.make_provider(tuple(reversed(self.requirements)))
+        opened: list[int] = []
+        real_open = runtime_secrets._open_secret_descriptor
+
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
+            opened.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(
+            runtime_secrets, "_open_secret_descriptor", side_effect=recording_open
+        ):
+            lease = provider.resolve_mounts("attempt-1")
+
+        self.assertIsInstance(lease, VerifiedSecretMountLease)
+        self.assertEqual(
+            tuple(mount.secret_class for mount in lease.mounts),
+            ("api_password", "jwt_secret", "ws_token"),
+        )
+        self.assertEqual(len(opened), len(self.requirements))
+        for descriptor in opened:
+            os.fstat(descriptor)
+        for mount in lease.mounts:
+            self.assertIsInstance(mount, VerifiedSecretMount)
+            self.assertEqual(mount.attempt_id, "attempt-1")
+            self.assertEqual(mount.provider_id, "local-file-secret-v1")
+            requirement = next(
+                item
+                for item in self.requirements
+                if item.secret_class == mount.secret_class
+            )
+            self.assertEqual(mount.reference_id, requirement.reference_id)
+            self.assertEqual(mount.version_id, requirement.version_id)
+            self.assertEqual(mount.source, self.secret_path(requirement).absolute())
+            self.assertIsInstance(mount.source_identity, SecretSourceIdentity)
+            self.assertEqual(
+                tuple(field.name for field in fields(mount)),
+                (
+                    "attempt_id",
+                    "provider_id",
+                    "reference_id",
+                    "version_id",
+                    "secret_class",
+                    "source",
+                    "source_identity",
+                ),
+            )
+            with self.assertRaises(FrozenInstanceError):
+                mount.source = self.root  # type: ignore[misc]
+            self.assertFalse(hasattr(mount, "descriptor"))
+        self.assertFalse(hasattr(lease, "descriptor"))
+        self.assertFalse(hasattr(lease, "__dict__"))
+        with self.assertRaises(TypeError):
+            json.dumps(lease)
+
+        rendered = repr((lease, lease.mounts, lease.mounts[0].source_identity))
+        for secret in (
+            *self.values.values(),
+            str(self.root),
+            *(item.reference_id for item in self.requirements),
+            *(item.version_id for item in self.requirements),
+            *(str(descriptor) for descriptor in opened),
+        ):
+            self.assertNotIn(secret, rendered)
+
+        lease.close()
+        for descriptor in opened:
+            self.assert_closed(descriptor)
+
+    def test_mount_lease_revalidates_with_fresh_descriptors_and_closes(self) -> None:
+        opened: list[int] = []
+        real_open = runtime_secrets._open_secret_descriptor
+
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
+            opened.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(
+            runtime_secrets, "_open_secret_descriptor", side_effect=recording_open
+        ):
+            with self.provider.resolve_mounts("attempt-1") as lease:
+                retained = tuple(opened)
+                self.assertEqual(lease.revalidate_sources(), lease.mounts)
+                temporary = tuple(opened[len(retained) :])
+                self.assertEqual(len(temporary), len(self.requirements))
+                for descriptor in retained:
+                    os.fstat(descriptor)
+                for descriptor in temporary:
+                    self.assert_closed(descriptor)
+
+        for descriptor in retained:
+            self.assert_closed(descriptor)
+        lease.close()
+        for accessor in (lambda: lease.mounts, lease.revalidate_sources):
+            with self.assertRaisesRegex(SecretMaterialError, "^secret_lease_closed$"):
+                accessor()
+
+    def test_mount_lease_rejects_invalid_attempt_and_forged_capability(self) -> None:
+        with (
+            mock.patch.object(runtime_secrets.os, "lstat") as lstat,
+            self.assertRaisesRegex(
+                SecretMaterialError, "^secret_lease_identity_invalid$"
+            ),
+        ):
+            self.provider.resolve_mounts("../attempt")
+        lstat.assert_not_called()
+
+        genuine = self.provider.resolve_mounts("attempt-1")
+        forged = object.__new__(VerifiedSecretMountLease)
+        object.__setattr__(forged, "_provider", self.provider)
+        object.__setattr__(forged, "_token", object())
+        object.__setattr__(forged, "_closed", False)
+        for action in (
+            lambda: forged.mounts,
+            forged.__enter__,
+            forged.revalidate_sources,
+            forged.close,
+        ):
+            with self.assertRaisesRegex(
+                SecretMaterialError, "^secret_lease_identity_invalid$"
+            ):
+                action()
+
+        issued_mount = genuine.mounts[0]
+        object.__setattr__(issued_mount, "attempt_id", "attempt-other")
+        with self.assertRaisesRegex(
+            SecretMaterialError, "^secret_lease_identity_invalid$"
+        ):
+            _ = genuine.mounts
+        with self.assertRaisesRegex(
+            SecretMaterialError, "^secret_lease_identity_invalid$"
+        ):
+            genuine.revalidate_sources()
+        genuine.close()
+
+    def test_mount_bundle_base_exception_closes_unreturned_descriptor(self) -> None:
+        opened: list[int] = []
+        real_open = runtime_secrets._open_secret_descriptor
+
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
+            opened.append(descriptor)
+            return descriptor
+
+        with (
+            mock.patch.object(
+                runtime_secrets,
+                "_open_secret_descriptor",
+                side_effect=recording_open,
+            ),
+            mock.patch.object(
+                runtime_secrets,
+                "_read_validated_value",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.provider.resolve_mounts("attempt-1")
+
+        self.assertEqual(len(opened), 1)
+        self.assert_closed(opened[0])
+
+    def test_resolve_base_exception_closes_previously_opened_peers(self) -> None:
+        opened: list[int] = []
+        calls = 0
+        real_open = runtime_secrets._open_secret_material
+
+        def interrupt_second_open(*args: object) -> tuple[int, str]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt
+            descriptor, value = real_open(*args)
+            opened.append(descriptor)
+            return descriptor, value
+
+        with (
+            mock.patch.object(
+                runtime_secrets,
+                "_open_secret_material",
+                side_effect=interrupt_second_open,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.provider.resolve("api-password", "v1")
+
+        self.assertEqual(len(opened), 1)
+        self.assert_closed(opened[0])
+
+    def test_mount_lease_close_attempts_every_descriptor_before_control_error(
+        self,
+    ) -> None:
+        opened: list[int] = []
+        real_open = runtime_secrets._open_secret_descriptor
+        real_close = os.close
+
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
+            opened.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(
+            runtime_secrets,
+            "_open_secret_descriptor",
+            side_effect=recording_open,
+        ):
+            lease = self.provider.resolve_mounts("attempt-close-interrupted")
+
+        attempted: list[int] = []
+
+        def interrupt_first_close(descriptor: int) -> None:
+            attempted.append(descriptor)
+            if len(attempted) == 1:
+                raise KeyboardInterrupt
+            real_close(descriptor)
+
+        with (
+            mock.patch.object(
+                runtime_secrets.os,
+                "close",
+                side_effect=interrupt_first_close,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            lease.close()
+
+        self.assertEqual(attempted, [opened[0], opened[0], *opened[1:]])
+        self.assertFalse(lease._closed)
+        self.assertEqual(len(self.provider._active_mount_leases), 1)
+        for descriptor in opened:
+            self.assert_closed(descriptor)
+        lease.close()
+        self.assertTrue(lease._closed)
+        self.assertFalse(self.provider._active_mount_leases)
+
+    def test_mount_lease_close_oserror_retains_recoverable_registry(self) -> None:
+        opened: list[int] = []
+        real_open = runtime_secrets._open_secret_descriptor
+        real_close = os.close
+
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
+            opened.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(
+            runtime_secrets,
+            "_open_secret_descriptor",
+            side_effect=recording_open,
+        ):
+            lease = self.provider.resolve_mounts("attempt-close-oserror")
+
+        attempted: list[int] = []
+
+        def fail_first_descriptor_twice(descriptor: int) -> None:
+            attempted.append(descriptor)
+            if descriptor == opened[0] and attempted.count(descriptor) <= 2:
+                raise OSError("injected close failure")
+            real_close(descriptor)
+
+        with (
+            mock.patch.object(
+                runtime_secrets.os,
+                "close",
+                side_effect=fail_first_descriptor_twice,
+            ),
+            self.assertRaisesRegex(
+                SecretMaterialError,
+                "^secret_lease_close_failed$",
+            ),
+        ):
+            lease.close()
+
+        self.assertEqual(attempted, [opened[0], opened[0], *opened[1:]])
+        self.assertFalse(lease._closed)
+        self.assertEqual(len(self.provider._active_mount_leases), 1)
+        os.fstat(opened[0])
+        for descriptor in opened[1:]:
+            self.assert_closed(descriptor)
+
+        lease.close()
+        self.assertTrue(lease._closed)
+        self.assertFalse(self.provider._active_mount_leases)
+        for descriptor in opened:
+            self.assert_closed(descriptor)
+
+    def test_mount_bundle_rejects_unsafe_ancestor_permissions(self) -> None:
+        rejected = self.secret_path(self.requirements[0]).parent.parent
+        real_verify = runtime_secrets._verify_secret_directory_chain_permissions
+
+        def reject_reference(
+            components: tuple[tuple[Path, os.stat_result], ...],
+            runtime_uid: int,
+        ) -> None:
+            if any(Path(path) == rejected for path, _ in components):
+                raise SecretMaterialError("secret permissions are invalid")
+            real_verify(components, runtime_uid)
+
+        with (
+            mock.patch.object(
+                runtime_secrets,
+                "_verify_secret_directory_chain_permissions",
+                side_effect=reject_reference,
+            ),
+            self.assertRaisesRegex(
+                SecretMaterialError,
+                "^secret_lease_source_changed$",
+            ),
+        ):
+            self.provider.resolve_mounts("attempt-1")
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL integration test")
+    def test_mount_bundle_windows_real_acl_mints_and_revalidates(self) -> None:
+        assert self.secret_permission_patcher is not None
+        assert self.directory_permission_patcher is not None
+        requirement = self.requirements[0]
+        source = self.secret_path(requirement)
+        bootstrap_runtime._harden_windows_trusted_directory_permissions(self.root)
+        bootstrap_runtime._run_windows_acl("harden", source)
+        self.secret_permission_patcher.stop()
+        self.directory_permission_patcher.stop()
+        provider = self.make_provider((requirement,))
+
+        with provider.resolve_mounts("attempt-windows-real-acl") as lease:
+            self.assertEqual(lease.revalidate_sources(), lease.mounts)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission semantics only")
+    def test_mount_bundle_posix_rejects_group_writable_ancestor(self) -> None:
+        ancestor = self.secret_path(self.requirements[0]).parent.parent
+        original_mode = stat.S_IMODE(os.lstat(ancestor).st_mode)
+        os.chmod(ancestor, original_mode | 0o020)
+        self.addCleanup(os.chmod, ancestor, original_mode)
+
+        with self.assertRaisesRegex(
+            SecretMaterialError,
+            "^secret_lease_source_changed$",
+        ):
+            self.provider.resolve_mounts("attempt-1")
+
+    def test_mount_lease_rejects_duplicate_class_before_filesystem_io(self) -> None:
+        duplicate_class = (
+            SecretMaterialRequirement("api-password", "v1", "api_password"),
+            SecretMaterialRequirement("api-password-2", "v2", "api_password"),
+        )
+        provider = self.make_provider(duplicate_class)
+        with (
+            mock.patch.object(runtime_secrets.os, "lstat") as lstat,
+            self.assertRaisesRegex(
+                SecretMaterialError, "^secret_lease_identity_invalid$"
+            ),
+        ):
+            provider.resolve_mounts("attempt-1")
+        lstat.assert_not_called()
+
+    def test_mount_bundle_source_failure_closes_descriptors_and_is_redacted(
+        self,
+    ) -> None:
+        invalid = self.requirements[-1]
+        self.write_secret(invalid, b"invalid\x00material", ending=b"")
+        opened: list[int] = []
+        real_open = runtime_secrets._open_secret_descriptor
+
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
+            opened.append(descriptor)
+            return descriptor
+
+        with (
+            mock.patch.object(
+                runtime_secrets, "_open_secret_descriptor", side_effect=recording_open
+            ),
+            self.assertRaisesRegex(
+                SecretMaterialError, "^secret_lease_source_changed$"
+            ) as raised,
+        ):
+            self.provider.resolve_mounts("attempt-1")
+        self.assertEqual(len(opened), len(self.requirements))
+        for descriptor in opened:
+            self.assert_closed(descriptor)
+        rendered = repr(raised.exception)
+        for secret in (
+            *self.values.values(),
+            str(self.root),
+            invalid.reference_id,
+            invalid.version_id,
+            *(str(descriptor) for descriptor in opened),
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_mount_lease_rejects_ancestor_identity_drift_without_leakage(self) -> None:
+        lease = self.provider.resolve_mounts("attempt-1")
+        reference_directory = self.secret_path(self.requirements[0]).parent.parent
+        real_lstat = os.lstat
+        real_open = runtime_secrets._open_secret_descriptor
+        opened: list[int] = []
+
+        def recording_open(path: Path) -> int:
+            descriptor = real_open(path)
+            opened.append(descriptor)
+            return descriptor
+
+        def drifted_lstat(path: os.PathLike[str] | str) -> object:
+            status = real_lstat(path)
+            if Path(path) != reference_directory:
+                return status
+            values = {
+                name: getattr(status, name)
+                for name in dir(status)
+                if name.startswith("st_")
+            }
+            values["st_ino"] = status.st_ino + 1
+            return SimpleNamespace(**values)
+
+        try:
+            with (
+                mock.patch.object(
+                    runtime_secrets.os, "lstat", side_effect=drifted_lstat
+                ),
+                mock.patch.object(
+                    runtime_secrets,
+                    "_open_secret_descriptor",
+                    side_effect=recording_open,
+                ),
+                self.assertRaisesRegex(
+                    SecretMaterialError, "^secret_lease_source_changed$"
+                ) as raised,
+            ):
+                lease.revalidate_sources()
+            self.assertTrue(opened)
+            for descriptor in opened:
+                self.assert_closed(descriptor)
+            rendered = repr(raised.exception)
+            for secret in (
+                *self.values.values(),
+                str(self.root),
+                *(item.reference_id for item in self.requirements),
+                *(item.version_id for item in self.requirements),
+                *(str(descriptor) for descriptor in opened),
+            ):
+                self.assertNotIn(secret, rendered)
+        finally:
+            lease.close()
+
+    @unittest.skipUnless(os.name == "nt", "Windows mount lease lock test")
+    def test_mount_lease_windows_blocks_replacement_until_close(self) -> None:
+        target = self.secret_path(self.requirements[0])
+        displaced = target.with_name("displaced")
+        lease = self.provider.resolve_mounts("attempt-1")
+        try:
+            with self.assertRaises(OSError):
+                os.replace(target, displaced)
+        finally:
+            lease.close()
+        os.replace(target, displaced)
+        os.replace(displaced, target)
+
+    @unittest.skipIf(os.name == "nt", "POSIX source mutation test")
+    def test_mount_lease_rejects_content_permission_and_replacement_drift(self) -> None:
+        requirement = self.requirements[0]
+        target = self.secret_path(requirement)
+        cases = ("content", "permission", "replacement")
+        for case in cases:
+            with self.subTest(case=case):
+                self.write_secret(requirement, self.values[requirement.identity])
+                lease = self.provider.resolve_mounts("attempt-1")
+                displaced = target.with_name("displaced")
+                replacement = target.with_name("replacement")
+                try:
+                    if case == "content":
+                        target.write_text("z" * 32 + "\n", encoding="utf-8")
+                        os.chmod(target, 0o600)
+                    elif case == "permission":
+                        os.chmod(target, 0o644)
+                    else:
+                        replacement.write_text("z" * 32 + "\n", encoding="utf-8")
+                        os.chmod(replacement, 0o600)
+                        os.replace(target, displaced)
+                        os.replace(replacement, target)
+                    with self.assertRaisesRegex(
+                        SecretMaterialError, "^secret_lease_source_changed$"
+                    ):
+                        lease.revalidate_sources()
+                finally:
+                    lease.close()
+                    if displaced.exists():
+                        if target.exists():
+                            target.unlink()
+                        os.replace(displaced, target)
+                    replacement.unlink(missing_ok=True)
+                    if target.exists():
+                        os.chmod(target, 0o600)
+
     def test_accepts_only_no_newline_one_lf_or_one_crlf(self) -> None:
         requirement = self.requirements[0]
         for ending in (b"", b"\n", b"\r\n"):
             with self.subTest(ending=ending):
-                self.write_secret(requirement, self.values[requirement.identity], ending=ending)
+                self.write_secret(
+                    requirement, self.values[requirement.identity], ending=ending
+                )
                 with self.provider.resolve(*requirement.identity) as handle:
                     self.assertEqual(os.lseek(handle.descriptor, 0, os.SEEK_CUR), 0)
 
@@ -205,7 +754,9 @@ class RuntimeSecretProviderTests(unittest.TestCase):
                 ):
                     resolve_and_close()
 
-    def test_rejects_invalid_constructor_requirements_before_filesystem_io(self) -> None:
+    def test_rejects_invalid_constructor_requirements_before_filesystem_io(
+        self,
+    ) -> None:
         invalid_cases = (
             (),
             (SecretMaterialRequirement("api-password", "v1", "unknown"),),
@@ -222,7 +773,9 @@ class RuntimeSecretProviderTests(unittest.TestCase):
             with (
                 self.subTest(requirements=requirements),
                 mock.patch.object(runtime_secrets.os, "lstat") as lstat,
-                self.assertRaisesRegex(SecretMaterialError, "^secret identity is invalid$"),
+                self.assertRaisesRegex(
+                    SecretMaterialError, "^secret identity is invalid$"
+                ),
             ):
                 self.make_provider(requirements, root=self.root / "missing")
             lstat.assert_not_called()
@@ -250,7 +803,9 @@ class RuntimeSecretProviderTests(unittest.TestCase):
             with (
                 self.subTest(identity=identity),
                 mock.patch.object(runtime_secrets.os, "lstat") as lstat,
-                self.assertRaisesRegex(SecretMaterialError, "^secret identity is invalid$"),
+                self.assertRaisesRegex(
+                    SecretMaterialError, "^secret identity is invalid$"
+                ),
             ):
                 self.provider.resolve(*identity)
             lstat.assert_not_called()
@@ -275,15 +830,21 @@ class RuntimeSecretProviderTests(unittest.TestCase):
             os.chdir(original_cwd)
 
     def test_resolve_has_no_caller_controlled_path_or_policy_surface(self) -> None:
-        parameters = tuple(inspect.signature(LocalFileSecretProvider.resolve).parameters)
+        parameters = tuple(
+            inspect.signature(LocalFileSecretProvider.resolve).parameters
+        )
         self.assertEqual(parameters, ("self", "reference_id", "version_id"))
         for name in ("list", "list_requirements", "requirements", "enumerate"):
             self.assertFalse(hasattr(self.provider, name))
 
         with (
             mock.patch.object(Path, "iterdir", side_effect=AssertionError("scan")),
-            mock.patch.object(runtime_secrets.os, "scandir", side_effect=AssertionError("scan")),
-            mock.patch.object(runtime_secrets.os, "listdir", side_effect=AssertionError("scan")),
+            mock.patch.object(
+                runtime_secrets.os, "scandir", side_effect=AssertionError("scan")
+            ),
+            mock.patch.object(
+                runtime_secrets.os, "listdir", side_effect=AssertionError("scan")
+            ),
             self.provider.resolve("api-password", "v1") as handle,
         ):
             self.assertEqual(handle.reference_id, "api-password")
@@ -411,7 +972,9 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         real_lstat = os.lstat
         target_calls = 0
 
-        def raced_lstat(path: os.PathLike[str] | str) -> os.stat_result | SimpleNamespace:
+        def raced_lstat(
+            path: os.PathLike[str] | str,
+        ) -> os.stat_result | SimpleNamespace:
             nonlocal target_calls
             status = real_lstat(path)
             if Path(path) == target:
@@ -597,6 +1160,8 @@ class RuntimeSecretProviderTests(unittest.TestCase):
 
         def prove_acl_while_locked(path: Path, runtime_uid: int) -> None:
             del runtime_uid
+            if path.name != "value":
+                return
             attempted_paths.append(path)
             with self.assertRaises(OSError):
                 os.replace(path, path.with_name("displaced"))
@@ -625,7 +1190,9 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         os.replace(displaced, target)
 
     @unittest.skipUnless(os.name == "nt", "Windows HANDLE ownership test")
-    def test_windows_descriptor_conversion_failure_closes_handle_and_redacts(self) -> None:
+    def test_windows_descriptor_conversion_failure_closes_handle_and_redacts(
+        self,
+    ) -> None:
         import msvcrt
 
         target = self.secret_path(self.requirements[0])
@@ -675,7 +1242,9 @@ class RuntimeSecretProviderTests(unittest.TestCase):
         minimums = {"api_password": 32, "jwt_secret": 48, "ws_token": 32}
         for requirement in self.requirements:
             with self.subTest(secret_class=requirement.secret_class):
-                self.write_secret(requirement, "x" * (minimums[requirement.secret_class] - 1))
+                self.write_secret(
+                    requirement, "x" * (minimums[requirement.secret_class] - 1)
+                )
                 with self.assertRaisesRegex(
                     SecretMaterialError, "^secret content is invalid$"
                 ):

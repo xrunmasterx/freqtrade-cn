@@ -11,6 +11,167 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
+LAUNCH_POLICY_CATALOG = {
+    "policies": [
+        {
+            "command_policy": {
+                "argument_tokens": [
+                    {"kind": "literal", "value": "trade"},
+                    {"kind": "literal", "value": "--logfile"},
+                    {"kind": "state_target", "value": "log_file"},
+                    {"kind": "literal", "value": "--db-url"},
+                    {"kind": "state_target", "value": "database_url"},
+                    {"kind": "literal", "value": "--config"},
+                    {"kind": "mount_target", "value": "runtime_config"},
+                    {"kind": "literal", "value": "--config"},
+                    {"kind": "mount_target", "value": "safety_policy"},
+                    {"kind": "literal", "value": "--user-data-dir"},
+                    {"kind": "state_target", "value": "user_data"},
+                    {"kind": "literal", "value": "--strategy-path"},
+                    {
+                        "kind": "literal",
+                        "value": "/freqtrade/user_data/strategies",
+                    },
+                    {"kind": "literal", "value": "--strategy"},
+                    {"kind": "strategy_class_name"},
+                ],
+                "entrypoint_argv": [
+                    "python",
+                    "/usr/local/bin/freqtrade-entrypoint",
+                ],
+                "execution_mode": "image-entrypoint-args",
+                "policy_id": "freqtrade-spot-paper-v1",
+            },
+            "environment_bindings": [
+                {
+                    "kind": "secret_mount_target",
+                    "name": "FT_API_PASSWORD_FILE",
+                    "value": "api_password",
+                },
+                {
+                    "kind": "secret_mount_target",
+                    "name": "FT_JWT_SECRET_FILE",
+                    "value": "jwt_secret",
+                },
+                {
+                    "kind": "secret_mount_target",
+                    "name": "FT_WS_TOKEN_FILE",
+                    "value": "ws_token",
+                },
+                {"kind": "state_target", "name": "HOME", "value": "home"},
+            ],
+            "health_profile": {
+                "interval_seconds": 30,
+                "probe_argv": [
+                    "curl",
+                    "-fsS",
+                    "http://127.0.0.1:8080/api/v1/ping",
+                ],
+                "profile_id": "freqtrade-ping-v1",
+                "retries": 3,
+                "start_period_seconds": 30,
+                "timeout_seconds": 5,
+            },
+            "image_policy": {
+                "identity_source": "resolved-attempt-sha256",
+                "policy_id": "freqtrade-reviewed-image-v1",
+            },
+            "internal_ports": [8080],
+            "material_mounts": [
+                {
+                    "material_kind": "runtime_config",
+                    "policy_id": "runtime-config-ro-v1",
+                    "role": "runtime_config",
+                    "target": "/freqtrade/config/runtime.json",
+                },
+                {
+                    "material_kind": "safety_policy",
+                    "policy_id": "safety-policy-ro-v1",
+                    "role": "safety_policy",
+                    "target": "/freqtrade/config/trading-safety.json",
+                },
+                {
+                    "material_kind": "strategy",
+                    "policy_id": "strategy-ro-v1",
+                    "role": "strategy",
+                    "target": "/freqtrade/user_data/strategies/strategy.py",
+                },
+            ],
+            "network_policy": {
+                "networks": [
+                    {
+                        "derivation": "sha256-prefix-v1",
+                        "digest_characters": 24,
+                        "identity_source": "instance_id",
+                        "internal": False,
+                        "prefix": "runtime-",
+                        "requires_platform_control": True,
+                        "requires_upstream_access": True,
+                        "role": "access",
+                        "suffix": "-access",
+                    }
+                ],
+                "policy_id": "isolated-public-market-data-v1",
+            },
+            "resource_profile": {
+                "cpu_millis": 1000,
+                "memory_bytes": 536870912,
+                "pids_limit": 256,
+                "profile_id": "freqtrade-small-v1",
+            },
+            "runtime_user": {
+                "gid": 12345,
+                "home": "/freqtrade/state/home",
+                "uid": 12345,
+            },
+            "secret_mounts": [
+                {
+                    "policy_id": "api-secrets-ro-v1",
+                    "secret_class": "api_password",
+                    "target": "/run/secrets/api_password",
+                },
+                {
+                    "policy_id": "api-secrets-ro-v1",
+                    "secret_class": "jwt_secret",
+                    "target": "/run/secrets/jwt_secret_key",
+                },
+                {
+                    "policy_id": "api-secrets-ro-v1",
+                    "secret_class": "ws_token",
+                    "target": "/run/secrets/ws_token",
+                },
+            ],
+            "state_layout": {
+                "layout_id": "freqtrade-state-v1",
+                "targets": [
+                    {
+                        "name": "database_url",
+                        "value": "sqlite:////freqtrade/state/data/trades.sqlite",
+                    },
+                    {"name": "home", "value": "/freqtrade/state/home"},
+                    {
+                        "name": "log_file",
+                        "value": "/freqtrade/state/logs/freqtrade.log",
+                    },
+                    {"name": "root", "value": "/freqtrade/state"},
+                    {
+                        "name": "user_data",
+                        "value": "/freqtrade/state/data",
+                    },
+                ],
+            },
+            "state_mount": {
+                "policy_id": "managed-state-rw-v1",
+                "role": "state",
+                "target": "/freqtrade/state",
+            },
+            "template_id": "freqtrade-paper-probe-v1",
+            "working_directory": "/freqtrade",
+        }
+    ],
+    "schema_version": 1,
+}
+
 POLICY_DOCUMENTS = {
     "ops/runtime-policies/image-policies.json": {
         "policy_ids": ["freqtrade-reviewed-image-v1"],
@@ -30,6 +191,7 @@ POLICY_DOCUMENTS = {
             "api-secrets-ro-v1",
             "managed-state-rw-v1",
             "runtime-config-ro-v1",
+            "safety-policy-ro-v1",
             "strategy-ro-v1",
         ],
         "schema_version": 1,
@@ -53,6 +215,7 @@ POLICY_DOCUMENTS = {
         "policy_ids": ["freqtrade-state-v1"],
         "schema_version": 1,
     },
+    "ops/runtime-policies/launch-policy-catalog.json": LAUNCH_POLICY_CATALOG,
 }
 
 COMMON_TEMPLATE = {
@@ -61,6 +224,7 @@ COMMON_TEMPLATE = {
     "image_policy_id": "freqtrade-reviewed-image-v1",
     "mount_policy_ids": [
         "runtime-config-ro-v1",
+        "safety-policy-ro-v1",
         "strategy-ro-v1",
         "managed-state-rw-v1",
         "api-secrets-ro-v1",
@@ -188,19 +352,25 @@ class RuntimeTemplatesAvailabilityTests(unittest.TestCase):
             "tools.runtime_templates must exist before the contract can pass",
         )
 
-    @unittest.skipIf(RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing")
+    @unittest.skipIf(
+        RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing"
+    )
     def test_required_public_api_is_exposed(self) -> None:
         self.assertTrue(callable(read_committed_template))
         self.assertTrue(callable(load_closed_policy_registry))
         self.assertTrue(callable(validate_template))
         self.assertTrue(callable(git_blob))
 
-    @unittest.skipIf(RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing")
+    @unittest.skipIf(
+        RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing"
+    )
     def test_uses_the_shared_committed_git_store(self) -> None:
         self.assertIs(runtime_templates_module.CommittedGitStore, CommittedGitStore)
 
 
-@unittest.skipIf(RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing")
+@unittest.skipIf(
+    RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing"
+)
 class RuntimeTemplateArtifactTests(unittest.TestCase):
     def test_exact_root_artifacts_are_canonical(self) -> None:
         expected = {
@@ -212,7 +382,9 @@ class RuntimeTemplateArtifactTests(unittest.TestCase):
         }
         for relative_path, payload in expected.items():
             with self.subTest(path=relative_path):
-                self.assertEqual((ROOT / relative_path).read_bytes(), canonical_json(payload))
+                self.assertEqual(
+                    (ROOT / relative_path).read_bytes(), canonical_json(payload)
+                )
 
     def test_fixed_paper_probe_security_identity(self) -> None:
         paper_probe = TEMPLATE_DOCUMENTS["freqtrade-paper-probe-v1"]
@@ -225,7 +397,9 @@ class RuntimeTemplateArtifactTests(unittest.TestCase):
         )
 
 
-@unittest.skipIf(RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing")
+@unittest.skipIf(
+    RUNTIME_TEMPLATES_IMPORT_ERROR is not None, "runtime_templates is missing"
+)
 class RuntimeTemplateGitTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -259,11 +433,16 @@ class RuntimeTemplateGitTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     fixture = GitFixture(Path(directory))
                     if mutation == "untracked":
-                        fixture.write_bytes("ops/runtime-policies/untracked.json", b"{}\n")
+                        fixture.write_bytes(
+                            "ops/runtime-policies/untracked.json", b"{}\n"
+                        )
                     else:
                         fixture.write_template(
                             "freqtrade-paper-probe-v1",
-                            {**TEMPLATE_DOCUMENTS["freqtrade-paper-probe-v1"], "schema_version": 2},
+                            {
+                                **TEMPLATE_DOCUMENTS["freqtrade-paper-probe-v1"],
+                                "schema_version": 2,
+                            },
                         )
                         if mutation == "staged":
                             git(
@@ -294,13 +473,19 @@ class RuntimeTemplateGitTests(unittest.TestCase):
             "freqtrade-paper-probe-v1",
             {**TEMPLATE_DOCUMENTS["freqtrade-paper-probe-v1"], "image": "arbitrary"},
         )
-        self.assertEqual(template.payload["image_policy_id"], "freqtrade-reviewed-image-v1")
+        self.assertEqual(
+            template.payload["image_policy_id"], "freqtrade-reviewed-image-v1"
+        )
         self.assertNotIn("image", template.payload)
 
     def test_publication_does_not_use_path_content_reads(self) -> None:
         with (
-            patch.object(Path, "read_bytes", side_effect=AssertionError("worktree read")),
-            patch.object(Path, "read_text", side_effect=AssertionError("worktree read")),
+            patch.object(
+                Path, "read_bytes", side_effect=AssertionError("worktree read")
+            ),
+            patch.object(
+                Path, "read_text", side_effect=AssertionError("worktree read")
+            ),
             patch.object(Path, "open", side_effect=AssertionError("worktree read")),
         ):
             template = read_committed_template(
@@ -364,9 +549,7 @@ class RuntimeTemplateGitTests(unittest.TestCase):
             input_bytes=b"not a commit\n",
         )
         with self.assertRaisesRegex(ValueError, "commit object"):
-            read_committed_template(
-                self.fixture.root, "freqtrade-paper-probe-v1", blob
-            )
+            read_committed_template(self.fixture.root, "freqtrade-paper-probe-v1", blob)
 
     def test_commit_must_be_ancestor_of_current_head(self) -> None:
         tree = git(self.fixture.root, "write-tree")
@@ -635,7 +818,11 @@ class RuntimeTemplateGitTests(unittest.TestCase):
             ),
             ("wrong version", {**valid, "schema_version": 2}, "schema_version"),
             ("bool version", {**valid, "schema_version": True}, "schema_version"),
-            ("bad semantic version", {**valid, "semantic_version": "01.0.0"}, "semantic_version"),
+            (
+                "bad semantic version",
+                {**valid, "semantic_version": "01.0.0"},
+                "semantic_version",
+            ),
             (
                 "array as string",
                 {**valid, "allowed_environments": "paper"},

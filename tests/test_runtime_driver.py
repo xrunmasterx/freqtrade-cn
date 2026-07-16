@@ -6,7 +6,6 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path, PurePosixPath
-from unittest import mock
 
 
 class RuntimeDriverIdentityTests(unittest.TestCase):
@@ -232,6 +231,7 @@ class LaunchSnapshotTests(unittest.TestCase):
             ResourceLimits,
             RuntimeUser,
             SecretMount,
+            SecretPathEnvironmentBinding,
             WritableStateMount,
         )
 
@@ -251,11 +251,10 @@ class LaunchSnapshotTests(unittest.TestCase):
         )
         return {
             "identity": identity,
+            "launch_authority_digest": "c" * 64,
             "argv": ("freqtrade", "trade", "--config", "/runtime/config/config.json"),
             "working_directory": "/freqtrade",
-            "non_secret_environment": (
-                EnvironmentEntry("HOME", "/runtime/home"),
-            ),
+            "non_secret_environment": (EnvironmentEntry("HOME", "/runtime/home"),),
             "read_only_mounts": (
                 ReadOnlyMount(
                     host_root / "config.json",
@@ -275,6 +274,12 @@ class LaunchSnapshotTests(unittest.TestCase):
                     "version-1",
                 ),
             ),
+            "secret_path_environment_bindings": (
+                SecretPathEnvironmentBinding(
+                    "FT_API_PASSWORD_FILE",
+                    PurePosixPath("/run/secrets/api-password"),
+                ),
+            ),
             "runtime_user": RuntimeUser(1001, 1001, PurePosixPath("/runtime/home")),
             "internal_ports": (8080,),
             "health_profile": HealthProfile(
@@ -287,6 +292,151 @@ class LaunchSnapshotTests(unittest.TestCase):
             ),
             "resource_limits": ResourceLimits(1000, 536870912, 256),
         }
+
+    def test_secret_path_environment_binding_is_frozen_strict_and_canonical(
+        self,
+    ) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            SecretPathEnvironmentBinding,
+        )
+
+        binding = SecretPathEnvironmentBinding(
+            "FT_API_PASSWORD_FILE",
+            PurePosixPath("/run/secrets/api-password"),
+        )
+        self.assertIs(SecretPathEnvironmentBinding.model_validate(binding), binding)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            binding.name = "FT_JWT_SECRET_FILE"
+        with self.assertRaises(DriverValidationError) as raised:
+            SecretPathEnvironmentBinding.model_validate(dataclasses.asdict(binding))
+        self.assertEqual(str(raised.exception), "driver_validation_error")
+
+        invalid = (
+            ("FT_API_PASSWORD", PurePosixPath("/run/secrets/api-password")),
+            ("ft_api_password_FILE", PurePosixPath("/run/secrets/api-password")),
+            ("1_SECRET_FILE", PurePosixPath("/run/secrets/api-password")),
+            ("FT_API_PASSWORD_FILE\n", PurePosixPath("/run/secrets/api-password")),
+            ("FT_API_PASSWORD_FILE", PurePosixPath("run/secrets/api-password")),
+            (
+                "FT_API_PASSWORD_FILE",
+                PurePosixPath("/run/secrets/../api-password"),
+            ),
+            ("FT_API_PASSWORD_FILE", "/run/secrets/api-password"),
+            (
+                "FT_API_PASSWORD_FILE",
+                Path.cwd().resolve() / "run" / "secrets" / "api-password",
+            ),
+        )
+        for name, target in invalid:
+            with self.subTest(name=name, target=target):
+                with self.assertRaises(DriverValidationError) as raised:
+                    SecretPathEnvironmentBinding(name, target)
+                self.assertEqual(str(raised.exception), "driver_validation_error")
+
+    def test_snapshot_secret_path_bindings_are_sorted_unique_and_typed(self) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            SecretMount,
+            SecretPathEnvironmentBinding,
+        )
+
+        payload = self.valid_snapshot_payload()
+        host_root = Path.cwd().resolve() / "runtime-driver-fixtures"
+        second_mount = SecretMount(
+            host_root / "secrets" / "jwt-secret" / "value",
+            PurePosixPath("/run/secrets/jwt-secret"),
+            "phase2-paper-probe-jwt-secret",
+            "version-1",
+        )
+        payload["secret_mounts"] = (*payload["secret_mounts"], second_mount)
+        api_binding = payload["secret_path_environment_bindings"][0]
+        jwt_binding = SecretPathEnvironmentBinding(
+            "FT_JWT_SECRET_FILE",
+            second_mount.target,
+        )
+
+        for bindings in (
+            (jwt_binding, api_binding),
+            (api_binding, api_binding),
+            (api_binding, dataclasses.asdict(jwt_binding)),
+        ):
+            with self.subTest(bindings=bindings):
+                with self.assertRaises(DriverValidationError) as raised:
+                    LaunchSnapshot(
+                        **{
+                            **payload,
+                            "secret_path_environment_bindings": bindings,
+                        }
+                    )
+                self.assertEqual(str(raised.exception), "driver_validation_error")
+
+    def test_snapshot_secret_path_binding_must_target_exactly_one_secret_mount(
+        self,
+    ) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            LaunchSnapshot,
+            SecretPathEnvironmentBinding,
+        )
+
+        payload = self.valid_snapshot_payload()
+        payload["secret_path_environment_bindings"] = (
+            SecretPathEnvironmentBinding(
+                "FT_API_PASSWORD_FILE",
+                PurePosixPath("/run/secrets/not-mounted"),
+            ),
+        )
+        with self.assertRaises(DriverValidationError) as raised:
+            LaunchSnapshot(**payload)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
+
+    def test_snapshot_secret_path_binding_names_cannot_collide_with_environment(
+        self,
+    ) -> None:
+        from tools.runtime_driver import (
+            DriverValidationError,
+            EnvironmentEntry,
+            LaunchSnapshot,
+            SecretPathEnvironmentBinding,
+        )
+
+        payload = self.valid_snapshot_payload()
+        payload["non_secret_environment"] = (
+            EnvironmentEntry("CONFIG_FILE", "/runtime/config/config.json"),
+        )
+        payload["secret_path_environment_bindings"] = (
+            SecretPathEnvironmentBinding(
+                "CONFIG_FILE",
+                PurePosixPath("/run/secrets/api-password"),
+            ),
+        )
+        with self.assertRaises(DriverValidationError) as raised:
+            LaunchSnapshot(**payload)
+        self.assertEqual(str(raised.exception), "driver_validation_error")
+
+    def test_launch_authority_digest_is_required_and_strict(self) -> None:
+        from tools.runtime_driver import DriverValidationError, LaunchSnapshot
+
+        payload = self.valid_snapshot_payload()
+        snapshot = LaunchSnapshot(**payload)
+        self.assertEqual(snapshot.launch_authority_digest, "c" * 64)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            snapshot.launch_authority_digest = "d" * 64
+
+        for invalid_digest in ("c" * 63, "c" * 65, "C" * 64, 1, None):
+            with self.subTest(invalid_digest=invalid_digest):
+                with self.assertRaises(DriverValidationError) as raised:
+                    LaunchSnapshot(
+                        **{**payload, "launch_authority_digest": invalid_digest}
+                    )
+                self.assertEqual(str(raised.exception), "driver_validation_error")
+
+        missing_digest = dict(payload)
+        del missing_digest["launch_authority_digest"]
+        with self.assertRaises(TypeError):
+            LaunchSnapshot(**missing_digest)
 
     def test_launch_snapshot_validation_accepts_only_an_existing_snapshot(self) -> None:
         from tools.runtime_driver import DriverValidationError, LaunchSnapshot
@@ -435,11 +585,7 @@ class LaunchSnapshotTests(unittest.TestCase):
         from tools.runtime_driver import RuntimeDriver
 
         self.assertEqual(
-            {
-                name
-                for name in RuntimeDriver.__dict__
-                if not name.startswith("_")
-            },
+            {name for name in RuntimeDriver.__dict__ if not name.startswith("_")},
             {"inspect", "launch", "stop", "probe"},
         )
         probe = inspect.signature(RuntimeDriver.probe)
