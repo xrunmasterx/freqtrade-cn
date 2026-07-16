@@ -11,6 +11,7 @@ from unittest import mock
 from tests.test_runtime_snapshot import valid_authority
 from tools.runtime_driver import (
     AmbiguousDriverOutcome,
+    AmbiguousNetworkOutcome,
     DriverHealth,
     DriverIdentityMismatch,
     DriverObjectOccupied,
@@ -18,14 +19,20 @@ from tools.runtime_driver import (
     DriverState,
     DriverValidationError,
     HealthProfile,
+    PlatformControlIdentity,
+    PlatformControlIdentityMismatch,
 )
 from tools.runtime_preparation_lease import ActiveLaunchAuthorityLease
 from tools.runtime_snapshot import compile_launch_snapshot
 
 try:
-    from tools.safe_compose_driver import SafeComposeRuntimeDriver
+    from tools.safe_compose_driver import (
+        SafeComposeRuntimeDriver,
+        SafePlatformControlIdentityProvider,
+    )
 except ImportError:
     SafeComposeRuntimeDriver = None  # type: ignore[assignment,misc]
+    SafePlatformControlIdentityProvider = None  # type: ignore[assignment,misc]
 
 
 if os.name == "nt":
@@ -78,6 +85,126 @@ class AuthorityResolver:
         if profile.profile_id != profile_id:
             raise DriverPolicyError()
         return profile
+
+    def resolve_platform_control_identity(self):
+        return PlatformControlIdentity(
+            container_id="d" * 64,
+            container_name="freqtrade-cn-platform-control",
+            image_id="sha256:" + "e" * 64,
+            compose_project="freqtrade-cn",
+            compose_service="platform-control",
+            identity_revision="platform-control-v1",
+        )
+
+
+class NetworkDriverSpy:
+    def __init__(self, *, faults=None) -> None:
+        self.events = []
+        self.faults = {} if faults is None else dict(faults)
+
+    def _record(self, name, *values):
+        self.events.append((name, *values))
+        fault = self.faults.get(name)
+        if fault is not None:
+            raise fault
+
+    def ensure_access_network(self, identity, platform_control, runtime=None):
+        self._record("ensure", identity, platform_control, runtime)
+
+    def verify_created_access_network(self, identity, platform_control, runtime):
+        self._record("verify_created", identity, platform_control, runtime)
+
+    def verify_active_access_network(self, identity, platform_control, runtime):
+        self._record("verify_active", identity, platform_control, runtime)
+
+    def inspect_access_network(self, identity, platform_control, runtime):
+        raise AssertionError("launch must use bounded network operations")
+
+    def remove_access_network_if_empty(self, identity):
+        raise AssertionError("launch must not remove a network")
+
+
+class PlatformIdentityRunner:
+    def __init__(self, *, image_id: str | None = None) -> None:
+        self.container_id = "d" * 64
+        self.image_id = image_id or "sha256:" + "e" * 64
+        self.calls = []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append((tuple(command), kwargs))
+        if command[1:3] == ["container", "ls"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                self.container_id + "\n",
+                "",
+            )
+        if command[1:3] == ["container", "inspect"]:
+            document = {
+                "Id": self.container_id,
+                "Name": "/freqtrade-cn-platform-control",
+                "Image": self.image_id,
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": "freqtrade-cn",
+                        "com.docker.compose.service": "platform-control",
+                        "io.freqtrade.platform.identity-revision": (
+                            "platform-control-v1"
+                        ),
+                        "io.freqtrade.platform.role": "platform-control",
+                    }
+                },
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([document]),
+                "",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+
+class SafePlatformControlIdentityProviderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.expected_image_id = "sha256:" + "e" * 64
+
+    def provider(self, runner):
+        return SafePlatformControlIdentityProvider(
+            docker_executable=DOCKER,
+            environment=APPROVED_ENVIRONMENT,
+            approved_docker_host=APPROVED_ENVIRONMENT["DOCKER_HOST"],
+            approved_docker_context=APPROVED_ENVIRONMENT["DOCKER_CONTEXT"],
+            approved_system_root=APPROVED_SYSTEM_ROOT,
+            working_directory=Path(self.temporary.name),
+            expected_image_id=self.expected_image_id,
+            command_runner=runner,
+        )
+
+    def test_resolves_only_the_fixed_full_platform_identity(self) -> None:
+        runner = PlatformIdentityRunner()
+
+        identity = self.provider(runner).resolve_platform_control_identity()
+
+        self.assertEqual(identity.container_id, runner.container_id)
+        self.assertEqual(identity.image_id, self.expected_image_id)
+        self.assertEqual(
+            runner.calls[1][0],
+            (str(DOCKER), "container", "inspect", runner.container_id),
+        )
+        self.assertTrue(
+            all(kwargs["env"] == APPROVED_ENVIRONMENT for _command, kwargs in runner.calls)
+        )
+
+    def test_rejects_a_same_name_replacement_with_the_wrong_image(self) -> None:
+        runner = PlatformIdentityRunner(image_id="sha256:" + "f" * 64)
+
+        with self.assertRaisesRegex(
+            PlatformControlIdentityMismatch,
+            "^platform_control_identity_mismatch$",
+        ):
+            self.provider(runner).resolve_platform_control_identity()
 
 
 def _container_document(
@@ -193,6 +320,7 @@ class SafeComposeDriverTests(unittest.TestCase):
         self.snapshot = compile_launch_snapshot(self.authority)
         self.lease = _active_lease(self.authority)
         self.resolver = AuthorityResolver(self.authority, self.lease)
+        self.network_driver = NetworkDriverSpy()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -219,6 +347,8 @@ class SafeComposeDriverTests(unittest.TestCase):
                 else temporary_directory
             ),
             authority_resolver=self.resolver if resolver is None else resolver,
+            platform_control_identity_provider=self.resolver,
+            access_network_driver=self.network_driver,
             command_runner=runner,
         )
 
@@ -239,7 +369,16 @@ class SafeComposeDriverTests(unittest.TestCase):
 
         self.assertIs(result.state, DriverState.RUNNING)
         self.assertEqual(result.container_id, "c" * 64)
-        self.assertEqual(revalidate.call_count, 3)
+        self.assertEqual(revalidate.call_count, 4)
+        self.assertEqual(
+            [event[0] for event in self.network_driver.events],
+            [
+                "ensure",
+                "verify_created",
+                "verify_created",
+                "verify_active",
+            ],
+        )
         compose = runner.compose_commands("create")
         self.assertEqual(len(compose), 1)
         command, kwargs = next(
@@ -325,7 +464,7 @@ class SafeComposeDriverTests(unittest.TestCase):
             self.assertRaisesRegex(DriverObjectOccupied, "^driver_object_occupied$"),
         ):
             self.driver(runner).launch(self.snapshot)
-        self.assertEqual(revalidate.call_count, 2)
+        self.assertEqual(revalidate.call_count, 3)
         self.assertFalse(runner.compose_commands("create"))
 
     def test_closed_lease_fails_before_action_with_fixed_error(self) -> None:
@@ -366,12 +505,12 @@ class SafeComposeDriverTests(unittest.TestCase):
             (
                 "inspect_transport",
                 DockerRunner(self.snapshot, [None, None, OSError("lost")]),
-                [None, None],
+                [None, None, None],
             ),
             (
                 "lease_drift",
                 DockerRunner(self.snapshot, [None, None, created, created]),
-                [None, None, OSError("changed source")],
+                [None, None, None, OSError("changed source")],
             ),
         )
         for name, runner, lease_effects in cases:
@@ -446,6 +585,33 @@ class SafeComposeDriverTests(unittest.TestCase):
                 self.assertEqual(len(runner.compose_commands("create")), 1)
                 self.assertFalse(runner.commands(("container", "start")))
 
+    def test_post_create_snapshot_drift_is_ambiguous_and_never_starts(self) -> None:
+        created = _container_document(self.snapshot, status="created")
+
+        def mutate_after_create(count, _observation):
+            if count == 3:
+                object.__setattr__(self.snapshot, "network_bindings", ())
+
+        runner = DockerRunner(
+            self.snapshot,
+            [None, None, created],
+            inspection_callback=mutate_after_create,
+        )
+        with (
+            mock.patch.object(
+                ActiveLaunchAuthorityLease,
+                "revalidate_for_runtime_action",
+            ),
+            self.assertRaisesRegex(
+                AmbiguousDriverOutcome,
+                "^ambiguous_driver_outcome$",
+            ),
+        ):
+            self.driver(runner).launch(self.snapshot)
+
+        self.assertEqual(len(runner.compose_commands("create")), 1)
+        self.assertFalse(runner.commands(("container", "start")))
+
     def test_final_created_inspection_precedes_last_lease_gate(self) -> None:
         created = _container_document(self.snapshot, status="created")
         revoked = False
@@ -476,9 +642,68 @@ class SafeComposeDriverTests(unittest.TestCase):
             ),
         ):
             self.driver(runner).launch(self.snapshot)
-        self.assertEqual(validation.call_count, 3)
+        self.assertEqual(validation.call_count, 4)
         self.assertEqual(len(runner.compose_commands("create")), 1)
         self.assertFalse(runner.commands(("container", "start")))
+
+    def test_created_network_gate_failure_prevents_container_start(self) -> None:
+        created = _container_document(self.snapshot, status="created")
+        runner = DockerRunner(self.snapshot, [None, None, created])
+        self.network_driver = NetworkDriverSpy(
+            faults={"verify_created": RuntimeError("invalid created topology")}
+        )
+
+        with (
+            mock.patch.object(
+                ActiveLaunchAuthorityLease,
+                "revalidate_for_runtime_action",
+            ),
+            self.assertRaisesRegex(
+                AmbiguousDriverOutcome,
+                "^ambiguous_driver_outcome$",
+            ),
+        ):
+            self.driver(runner).launch(self.snapshot)
+
+        self.assertEqual(
+            [event[0] for event in self.network_driver.events],
+            ["ensure", "verify_created"],
+        )
+        self.assertFalse(runner.commands(("container", "start")))
+
+    def test_active_network_gate_failure_never_returns_launch_success(self) -> None:
+        created = _container_document(self.snapshot, status="created")
+        observed = _container_document(self.snapshot)
+        runner = DockerRunner(
+            self.snapshot,
+            [None, None, created, created, observed],
+        )
+        self.network_driver = NetworkDriverSpy(
+            faults={"verify_active": RuntimeError("invalid active topology")}
+        )
+
+        with (
+            mock.patch.object(
+                ActiveLaunchAuthorityLease,
+                "revalidate_for_runtime_action",
+            ),
+            self.assertRaisesRegex(
+                AmbiguousDriverOutcome,
+                "^ambiguous_driver_outcome$",
+            ),
+        ):
+            self.driver(runner).launch(self.snapshot)
+
+        self.assertEqual(len(runner.commands(("container", "start"))), 1)
+        self.assertEqual(
+            [event[0] for event in self.network_driver.events],
+            [
+                "ensure",
+                "verify_created",
+                "verify_created",
+                "verify_active",
+            ],
+        )
 
     def test_actual_render_rejects_unmodeled_nested_behavior(self) -> None:
         def mutation(name):
@@ -605,6 +830,33 @@ class SafeComposeDriverTests(unittest.TestCase):
                 ):
                     self.driver(runner).launch(self.snapshot)
                 self.assertFalse(runner.compose_commands("create"))
+                self.assertEqual(self.network_driver.events, [])
+
+    def test_ambiguous_network_preparation_is_not_reclassified_or_retried(
+        self,
+    ) -> None:
+        runner = DockerRunner(self.snapshot, [None])
+        self.network_driver = NetworkDriverSpy(
+            faults={"ensure": AmbiguousNetworkOutcome()}
+        )
+
+        with (
+            mock.patch.object(
+                ActiveLaunchAuthorityLease,
+                "revalidate_for_runtime_action",
+            ),
+            self.assertRaisesRegex(
+                AmbiguousNetworkOutcome,
+                "^ambiguous_network_outcome$",
+            ),
+        ):
+            self.driver(runner).launch(self.snapshot)
+
+        self.assertEqual(
+            [event[0] for event in self.network_driver.events],
+            ["ensure"],
+        )
+        self.assertFalse(runner.compose_commands("create"))
 
     def test_stop_requires_exact_identity_and_uses_only_full_container_id(self) -> None:
         wrong = _container_document(self.snapshot, attempt_id="wrong-attempt")
@@ -624,6 +876,27 @@ class SafeComposeDriverTests(unittest.TestCase):
         self.assertEqual(stop[0][-1], "c" * 64)
         self.assertIs(result.state, DriverState.EXITED)
         self.assertFalse(any("rm" in command for command, _kwargs in runner.calls))
+
+    def test_exact_stop_remains_available_when_network_topology_is_polluted(self) -> None:
+        running = _container_document(self.snapshot)
+        running["NetworkSettings"]["Networks"]["rogue-network"] = {}
+        exited = _container_document(self.snapshot, status="exited")
+        exited["NetworkSettings"]["Networks"]["rogue-network"] = {}
+        runner = DockerRunner(self.snapshot, [running, running, exited])
+
+        result = self.driver(runner).stop(self.snapshot.identity)
+
+        self.assertIs(result.state, DriverState.EXITED)
+        self.assertEqual(
+            runner.commands(("container", "stop")),
+            [(str(DOCKER), "container", "stop", "c" * 64)],
+        )
+        self.assertFalse(
+            any(
+                command[1:3] == ("network", "disconnect")
+                for command, _kwargs in runner.calls
+            )
+        )
 
     def test_inspect_and_exact_stop_do_not_require_authority_resolver(self) -> None:
         running = _container_document(self.snapshot)
