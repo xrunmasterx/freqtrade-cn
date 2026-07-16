@@ -101,6 +101,8 @@ _APPROVED_PROBE_ARGV_BY_ID = {
     "freqtrade-ping-v1": (
         "curl",
         "-fsS",
+        "--max-time",
+        "5",
         "http://127.0.0.1:8080/api/v1/ping",
     )
 }
@@ -1665,6 +1667,7 @@ class SafeComposeRuntimeDriver:
             observed_instance_id=labels.get(_IDENTITY_LABELS["instance"]),
             observed_attempt_id=labels.get(_IDENTITY_LABELS["attempt"]),
             observed_runtime_spec_digest=labels.get(_IDENTITY_LABELS["spec"]),
+            observed_launch_authority_digest=labels.get(_IDENTITY_LABELS["launch"]),
             observed_state_allocation_id=labels.get(_IDENTITY_LABELS["state"]),
             observed_image_id=document.get("Image"),
             observed_network_names=tuple(sorted(network_settings["Networks"])),
@@ -1779,6 +1782,9 @@ class SafeComposeRuntimeDriver:
             observed_instance_id=inspection.observed_instance_id,
             observed_attempt_id=inspection.observed_attempt_id,
             observed_runtime_spec_digest=inspection.observed_runtime_spec_digest,
+            observed_launch_authority_digest=(
+                inspection.observed_launch_authority_digest
+            ),
             observed_state_allocation_id=inspection.observed_state_allocation_id,
             observed_image_id=inspection.observed_image_id,
             observed_network_names=inspection.observed_network_names,

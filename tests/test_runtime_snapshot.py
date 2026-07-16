@@ -87,8 +87,8 @@ ATTEMPT_ID = "attempt-1"
 STATE_ALLOCATION_ID = "state-paper-probe-1"
 TEMPLATE_ID = "freqtrade-paper-probe-v1"
 TEMPLATE_REVISION_ID = "adapter-template-revision-1"
-POLICY_DIGEST = "233917f5ab0295065c6c533ff439de70a26d6c0343f5c12a1acaaa8f723fbf3b"
-CATALOG_DIGEST = "3b039f1acb6549c769ae345b9f5ab8d263398f55d87b0b7c083976fcf222de27"
+POLICY_DIGEST = "1a8fb0cefd2db6cc8a34f8041bd7d9bfcdea90f2622a3f9b356d21f52d0de266"
+CATALOG_DIGEST = "afba9a1a05211e9136f6bfd934c5a700e4c0efcb234f9a5cb7479ec1dd2358ea"
 CATALOG_BLOB_ID = "b" * 40
 SECRET_IDENTITIES = (
     ("api-password-ref", "api-password-v1", "api_password"),
@@ -281,6 +281,8 @@ def _policies(template: CommittedTemplate) -> ResolvedLaunchPolicyBundle:
             probe_argv=(
                 "curl",
                 "-fsS",
+                "--max-time",
+                "5",
                 "http://127.0.0.1:8080/api/v1/ping",
             ),
             start_period_seconds=30,

@@ -424,6 +424,7 @@ class DriverInspection(_StrictValue):
     observed_instance_id: str | None
     observed_attempt_id: str | None
     observed_runtime_spec_digest: str | None
+    observed_launch_authority_digest: str | None
     observed_state_allocation_id: str | None
     observed_image_id: str | None
     observed_network_names: tuple[str, ...]
@@ -440,6 +441,7 @@ class DriverInspection(_StrictValue):
             observed_instance_id=None,
             observed_attempt_id=None,
             observed_runtime_spec_digest=None,
+            observed_launch_authority_digest=None,
             observed_state_allocation_id=None,
             observed_image_id=None,
             observed_network_names=(),
@@ -466,6 +468,7 @@ class DriverInspection(_StrictValue):
             self.observed_instance_id,
             self.observed_attempt_id,
             self.observed_runtime_spec_digest,
+            self.observed_launch_authority_digest,
             self.observed_state_allocation_id,
             self.observed_image_id,
         ):
@@ -481,6 +484,7 @@ class DriverInspection(_StrictValue):
                         self.observed_instance_id,
                         self.observed_attempt_id,
                         self.observed_runtime_spec_digest,
+                        self.observed_launch_authority_digest,
                         self.observed_state_allocation_id,
                         self.observed_image_id,
                         self.exit_code,
@@ -491,6 +495,11 @@ class DriverInspection(_StrictValue):
             ):
                 raise DriverValidationError()
             return
+        if (
+            self.observed_launch_authority_digest is not None
+            and _DIGEST.fullmatch(self.observed_launch_authority_digest) is None
+        ):
+            raise DriverValidationError()
         if (
             type(self.container_id) is not str
             or _CONTAINER_ID.fullmatch(self.container_id) is None

@@ -65,6 +65,8 @@ LAUNCH_POLICY_CATALOG = {
                 "probe_argv": [
                     "curl",
                     "-fsS",
+                    "--max-time",
+                    "5",
                     "http://127.0.0.1:8080/api/v1/ping",
                 ],
                 "profile_id": "freqtrade-ping-v1",
