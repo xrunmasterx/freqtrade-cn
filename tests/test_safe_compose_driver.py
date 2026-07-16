@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -27,13 +28,23 @@ except ImportError:
     SafeComposeRuntimeDriver = None  # type: ignore[assignment,misc]
 
 
-DOCKER = Path("C:/Program Files/Docker/Docker/resources/bin/docker.exe")
-COMPOSE = Path("C:/Program Files/Docker/Docker/resources/bin/docker-compose.exe")
-APPROVED_ENVIRONMENT = {
-    "DOCKER_CONTEXT": "desktop-linux",
-    "DOCKER_HOST": "npipe:////./pipe/docker_engine",
-    "SYSTEMROOT": "C:/Windows",
-}
+if os.name == "nt":
+    DOCKER = Path("C:/Program Files/Docker/Docker/resources/bin/docker.exe")
+    COMPOSE = Path("C:/Program Files/Docker/Docker/resources/bin/docker-compose.exe")
+    APPROVED_SYSTEM_ROOT = "C:/Windows"
+    APPROVED_ENVIRONMENT = {
+        "DOCKER_CONTEXT": "desktop-linux",
+        "DOCKER_HOST": "npipe:////./pipe/docker_engine",
+        "SYSTEMROOT": APPROVED_SYSTEM_ROOT,
+    }
+else:
+    DOCKER = Path("/usr/bin/docker")
+    COMPOSE = Path("/usr/local/bin/docker-compose")
+    APPROVED_SYSTEM_ROOT = None
+    APPROVED_ENVIRONMENT = {
+        "DOCKER_CONTEXT": "default",
+        "DOCKER_HOST": "unix:///var/run/docker.sock",
+    }
 
 
 def _active_lease(authority):
@@ -200,7 +211,7 @@ class SafeComposeDriverTests(unittest.TestCase):
             environment=(APPROVED_ENVIRONMENT if environment is None else environment),
             approved_docker_host=APPROVED_ENVIRONMENT["DOCKER_HOST"],
             approved_docker_context=APPROVED_ENVIRONMENT["DOCKER_CONTEXT"],
-            approved_system_root=APPROVED_ENVIRONMENT["SYSTEMROOT"],
+            approved_system_root=APPROVED_SYSTEM_ROOT,
             working_directory=Path(self.temporary.name),
             temporary_directory=(
                 Path(self.temporary.name)

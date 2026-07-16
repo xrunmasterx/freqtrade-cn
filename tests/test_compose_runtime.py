@@ -23,6 +23,11 @@ INSPECTED_IMAGE = InspectedImage(
     "freqtrade-cn:p0-aaaaaaaaaaaa-bbbbbbbbbbbb-cccccccccccc",
     {},
 )
+TRUSTED_COMPOSE = (
+    "C:/trusted/docker-compose.exe"
+    if os.name == "nt"
+    else "/usr/local/bin/docker-compose"
+)
 
 
 class ComposeRuntimeTests(unittest.TestCase):
@@ -257,7 +262,7 @@ class ComposeRuntimeTests(unittest.TestCase):
         self,
     ) -> None:
         completed = subprocess.CompletedProcess([], 0, "", "")
-        docker_executable = "C:/trusted/docker.exe"
+        docker_executable = TRUSTED_COMPOSE
         environment = {"DOCKER_HOST": "npipe:////./pipe/docker_engine"}
         events: list[str] = []
 
@@ -335,7 +340,7 @@ class ComposeRuntimeTests(unittest.TestCase):
                 service="runtime",
                 project_name="runtime-paper-probe-1",
                 root=self.root,
-                compose_command=("C:/trusted/docker.exe",),
+                compose_command=(TRUSTED_COMPOSE,),
                 compose_files=(),
                 profiles=(),
                 override='{"services":{"runtime":{}}}\n',
@@ -375,7 +380,7 @@ class ComposeRuntimeTests(unittest.TestCase):
                         service="runtime",
                         project_name="runtime-paper-probe-1",
                         root=self.root,
-                        compose_command=("C:/trusted/docker-compose.exe",),
+                        compose_command=(TRUSTED_COMPOSE,),
                         compose_files=(),
                         profiles=(),
                         override='{"services":{"runtime":{}}}\n',
