@@ -1674,6 +1674,10 @@ jobs:
           docker create \
             --name platform-control-ci \
             --network freqtrade-platform-ingress-ci \
+            --label com.docker.compose.project=freqtrade-cn \
+            --label com.docker.compose.service=platform-control \
+            --label io.freqtrade.platform.role=platform-control \
+            --label io.freqtrade.platform.identity-revision=platform-control-v1 \
             --user 1000:1000 \
             --read-only \
             --init \
@@ -1698,6 +1702,12 @@ jobs:
             -m freqtrade.platform_control
 
           docker network connect freqtrade-platform-ci platform-control-ci
+          control_full_id="$(docker inspect --format '{{.Id}}' platform-control-ci)"
+          test "$(printf '%s' "${control_full_id}" | wc --chars)" -eq 64
+          control_image_id="$(docker inspect --format '{{.Image}}' platform-control-ci)"
+          test "${control_image_id}" = "${REVIEWED_IMAGE_ID}"
+          control_identity_labels="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "io.freqtrade.platform.role"}}|{{index .Config.Labels "io.freqtrade.platform.identity-revision"}}' platform-control-ci)"
+          test "${control_identity_labels}" = "freqtrade-cn|platform-control|platform-control|platform-control-v1"
           control_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-control-ci | sort | sed '/^$/d')"
           test "${control_networks}" = $'freqtrade-platform-ci\nfreqtrade-platform-ingress-ci'
           control_port_mapping="$(docker inspect --format '{{if eq (len .HostConfig.PortBindings) 1}}{{with (index .HostConfig.PortBindings "8090/tcp")}}{{if eq (len .) 1}}{{(index . 0).HostIp}}|{{(index . 0).HostPort}}{{end}}{{end}}{{end}}' platform-control-ci)"

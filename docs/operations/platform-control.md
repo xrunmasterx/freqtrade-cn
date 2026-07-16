@@ -183,6 +183,19 @@ while a fixed role owns the routine; after an administrator restores ownership, 
 rerun must remove the direct `EXECUTE` and `MAINTAIN` grants and each affected fixed
 login must be denied those operations.
 
+## Runtime identity-label migration
+
+Before enabling dynamic Runtime access networks, recreate the fixed
+`platform-control` container from the reviewed Compose contract. An existing
+container does not acquire the identity labels merely because
+`docker-compose.yml` changed. The replacement must retain the fixed name
+`freqtrade-cn-platform-control` and must expose the exact Compose project,
+service, role, identity-revision, full container ID, and reviewed image ID that
+the Supervisor identity provider verifies. Stop if any value differs; do not
+adopt, relabel, rename, or reconnect the old object in place. This migration is
+an infrastructure deployment action and is not an automatic Supervisor
+recovery operation.
+
 ## CI-only acceptance evidence
 
 The `Root Safety` workflow is executable evidence for the migration and runtime

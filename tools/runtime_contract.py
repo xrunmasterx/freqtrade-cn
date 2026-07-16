@@ -1464,6 +1464,10 @@ def validate_platform_compose(
         "environment": PLATFORM_CONTROL_ENVIRONMENT,
         "image": "freqtrade-cn:local",
         "init": True,
+        "labels": {
+            "io.freqtrade.platform.identity-revision": "platform-control-v1",
+            "io.freqtrade.platform.role": "platform-control",
+        },
         "networks": {"platform-db": None, "platform-ingress": None},
         "ports": [
             {
