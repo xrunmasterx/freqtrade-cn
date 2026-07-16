@@ -1457,6 +1457,17 @@ jobs:
                 )")"
           test "${column_privileges}" = $'runtime_access_requests.completed_at\nruntime_access_requests.result_code\nruntime_access_requests.status'
 
+          supervisor_state_column_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT string_agg(table_name || '.' || column_name, E'\\n' ORDER BY table_name, column_name)
+              FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND has_column_privilege(
+                  'platform_supervisor', format('public.%I', table_name), column_name, 'UPDATE'
+                )")"
+          test "${supervisor_state_column_privileges}" = $'state_allocations.ready_at\nstate_allocations.status'
+
           column_acl_inventory="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -1470,7 +1481,7 @@ jobs:
               WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
               ORDER BY grantee.rolname, namespace.nspname, relation.relname,
                        attribute.attname, privilege.privilege_type")"
-          test "${column_acl_inventory}" = $'platform_control|public|runtime_access_requests|completed_at|UPDATE|f\nplatform_control|public|runtime_access_requests|result_code|UPDATE|f\nplatform_control|public|runtime_access_requests|status|UPDATE|f'
+          test "${column_acl_inventory}" = $'platform_control|public|runtime_access_requests|completed_at|UPDATE|f\nplatform_control|public|runtime_access_requests|result_code|UPDATE|f\nplatform_control|public|runtime_access_requests|status|UPDATE|f\nplatform_supervisor|public|state_allocations|ready_at|UPDATE|f\nplatform_supervisor|public|state_allocations|status|UPDATE|f'
 
           sequence_privilege_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
@@ -1600,6 +1611,10 @@ jobs:
                 SELECT 'column', 'public.runtime_access_requests', column_name,
                        'platform_control', 'UPDATE', 'postgres', false
                 FROM (VALUES ('status'), ('result_code'), ('completed_at')) AS columns(column_name)
+                UNION ALL
+                SELECT 'column', 'public.state_allocations', column_name,
+                       'platform_supervisor', 'UPDATE', 'postgres', false
+                FROM (VALUES ('status'), ('ready_at')) AS columns(column_name)
               ), differences AS (
                 (SELECT * FROM actual EXCEPT SELECT * FROM expected)
                 UNION ALL
@@ -1729,7 +1744,7 @@ jobs:
             WHEN current_user = 'platform_supervisor'
              AND current_database() = 'platform'
              AND (SELECT count(*) FROM public.alembic_version) = 1
-             AND (SELECT min(version_num) FROM public.alembic_version) = '20260717_0006'
+             AND (SELECT min(version_num) FROM public.alembic_version) = '20260717_0007'
             THEN 1 ELSE 0
           END AS supervisor_database_authority_valid;
           SELECT instance_id FROM runtime_instances WHERE instance_id = 'ci-instance';
@@ -1822,7 +1837,7 @@ jobs:
           expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions SET payload = payload"
           expect_role_denied platform_supervisor update-alembic "UPDATE alembic_version SET version_num = version_num WHERE false"
           expect_role_denied platform_supervisor update-template "UPDATE adapter_template_revisions SET status = status WHERE false"
-          expect_role_denied platform_supervisor update-state "UPDATE state_allocations SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-state "UPDATE state_allocations SET generation = generation WHERE false"
           expect_role_denied platform_supervisor update-secret-reference "UPDATE secret_references SET status = status WHERE false"
           expect_role_denied platform_supervisor update-secret-version "UPDATE secret_version_metadata SET status = status WHERE false"
           expect_role_denied platform_supervisor update-runtime-spec "UPDATE runtime_spec_revisions SET payload_digest = payload_digest WHERE false"

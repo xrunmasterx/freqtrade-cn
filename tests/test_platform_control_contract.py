@@ -563,6 +563,11 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertIn("ACLDEFAULT('D', DATABASE.DATDBA)", script.upper())
         self.assertIn("PRIVILEGE.GRANTEE = 0", script.upper())
         self.assertIn("UPDATE (status, result_code, completed_at)", script)
+        self.assertIn("GRANT UPDATE (status, ready_at)", script)
+        self.assertIn(
+            "ON TABLE public.state_allocations TO platform_supervisor",
+            script,
+        )
         self.assertEqual(
             script.upper().count("ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES"), 4
         )
@@ -1270,6 +1275,9 @@ class PlatformControlContractTests(unittest.TestCase):
             "duplicate narrow grant": script
             + "\nGRANT UPDATE (status, result_code, completed_at) "
             "ON TABLE public.runtime_access_requests TO platform_control;\n",
+            "duplicate supervisor state grant": script
+            + "\nGRANT UPDATE (status, ready_at) ON TABLE "
+            "public.state_allocations TO platform_supervisor;\n",
         }
         for name, mutated in mutations.items():
             with self.subTest(name=name):

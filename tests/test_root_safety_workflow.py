@@ -612,6 +612,8 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test "${undeclared_table_privilege_count}" = "0"',
         "column_privileges=",
         'test "${column_privileges}" =',
+        "supervisor_state_column_privileges=",
+        'test "${supervisor_state_column_privileges}" =',
         "column_acl_inventory=",
         'test "${column_acl_inventory}" =',
         "object_acl_before=",
@@ -653,7 +655,7 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions',
         'expect_role_denied platform_supervisor update-alembic "UPDATE alembic_version',
         'expect_role_denied platform_supervisor update-template "UPDATE adapter_template_revisions',
-        'expect_role_denied platform_supervisor update-state "UPDATE state_allocations',
+        'expect_role_denied platform_supervisor update-state "UPDATE state_allocations SET generation',
         'expect_role_denied platform_supervisor update-secret-reference "UPDATE secret_references',
         'expect_role_denied platform_supervisor update-secret-version "UPDATE secret_version_metadata',
         'expect_role_denied platform_supervisor update-runtime-spec "UPDATE runtime_spec_revisions',
@@ -839,7 +841,7 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     for fragment in (
         "current_user = 'platform_supervisor'",
         "current_database() = 'platform'",
-        "(SELECT min(version_num) FROM public.alembic_version) = '20260717_0006'",
+        "(SELECT min(version_num) FROM public.alembic_version) = '20260717_0007'",
     ):
         if fragment not in raw_active_sql_payload:
             errors.append(f"least-privilege SQL payload missing: {fragment}")
@@ -2953,6 +2955,35 @@ sleep() {
                 mutated = workflow.replace(fragment, "removed-authority-acl", 1)
                 self.assertNotEqual(mutated, workflow)
                 self.assertTrue(validate_root_safety_workflow(mutated))
+
+    def test_supervisor_state_transition_columns_are_the_only_authority_writes(
+        self,
+    ) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+        fragments = (
+            "supervisor_state_column_privileges=",
+            "has_column_privilege(\n                  'platform_supervisor', "
+            "format('public.%I', table_name), column_name, 'UPDATE'",
+            'test "${supervisor_state_column_privileges}" = '
+            "$'state_allocations.ready_at\\nstate_allocations.status'",
+            "platform_supervisor|public|state_allocations|ready_at|UPDATE|f",
+            "platform_supervisor|public|state_allocations|status|UPDATE|f",
+            "SELECT 'column', 'public.state_allocations', column_name,\n"
+            "                       'platform_supervisor', 'UPDATE', "
+            "'postgres', false",
+            "FROM (VALUES ('status'), ('ready_at')) AS columns(column_name)",
+            'expect_role_denied platform_supervisor update-state "UPDATE '
+            "state_allocations SET generation = generation WHERE false\"",
+        )
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        self.assertNotIn(
+            'expect_role_denied platform_supervisor update-state "UPDATE '
+            "state_allocations SET status",
+            step,
+        )
 
     def test_contamination_preserves_production_owners_and_postgres_grantor(
         self,

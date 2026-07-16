@@ -154,8 +154,11 @@ SELECT on the seven Catalog/Registry tables, INSERT on
 `status`, `result_code`, and `completed_at` on `runtime_access_requests`.
 It cannot update lifecycle state such as `runtime_instances.desired_state`.
 
-`platform_supervisor` receives CONNECT/USAGE, SELECT on the seven tables, and
-INSERT/UPDATE on the six Registry tables. Neither role receives DELETE,
+`platform_supervisor` receives CONNECT/USAGE, SELECT on the seven Registry tables and
+the six persisted-authority tables, INSERT/UPDATE on the six mutable Registry tables,
+and column-level UPDATE only on `state_allocations.status` and
+`state_allocations.ready_at`. The role does not receive table-level UPDATE on
+`state_allocations` or write access to any other Authority field. Neither role receives DELETE,
 TRUNCATE, MAINTAIN, DDL, role-management, database-owner, broad default-table, or
 platform-control lifecycle authority. Root Safety checks the effective database
 matrix for both roles as `CONNECT=true`, `CREATE=false`, `TEMP=false`, then
