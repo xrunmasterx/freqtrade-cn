@@ -2864,6 +2864,25 @@ sleep() {
             "registered_instance.runtime_spec_revision_id",
             step,
         )
+        self.assertIn(
+            "adapter_template_revision_id, state_allocation_id,\n"
+            "            state_allocation_generation, resolved_secret_versions",
+            step,
+        )
+        self.assertIn(
+            "registered_spec.adapter_template_revision_id,\n"
+            "            registered_instance.state_allocation_id, "
+            "registered_state.generation,",
+            step,
+        )
+        self.assertIn(
+            "JOIN state_allocations AS registered_state\n"
+            "            ON registered_state.state_allocation_id = "
+            "registered_instance.state_allocation_id\n"
+            "            AND registered_state.state_allocation_id = "
+            "registered_spec.state_allocation_id",
+            step,
+        )
         self.assertEqual(step.count("FROM runtime_attempts AS fixture_attempt"), 2)
 
     def test_supervisor_login_uses_private_file_backed_tcp_authentication(self) -> None:
@@ -2963,6 +2982,7 @@ sleep() {
         step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
         fragments = (
             "supervisor_state_column_privileges=",
+            "AND table_name = 'state_allocations'",
             "has_column_privilege(\n                  'platform_supervisor', "
             "format('public.%I', table_name), column_name, 'UPDATE'",
             'test "${supervisor_state_column_privileges}" = '

@@ -1463,6 +1463,7 @@ jobs:
               SELECT string_agg(table_name || '.' || column_name, E'\\n' ORDER BY table_name, column_name)
               FROM information_schema.columns
               WHERE table_schema = 'public'
+                AND table_name = 'state_allocations'
                 AND has_column_privilege(
                   'platform_supervisor', format('public.%I', table_name), column_name, 'UPDATE'
                 )")"
@@ -1639,19 +1640,24 @@ jobs:
           WHERE registered_instance.instance_id = 'phase2-spot-paper-probe';
           INSERT INTO runtime_attempts (
             attempt_id, instance_id, attempt_number, runtime_spec_revision_id,
-            adapter_template_revision_id, resolved_secret_versions, image_id,
+            adapter_template_revision_id, state_allocation_id,
+            state_allocation_generation, resolved_secret_versions, image_id,
             root_commit, backend_commit, frontend_commit, strategies_commit,
             project_identity, container_identity, status, health_result,
             started_at, stopped_at, exit_code, failure_code
           ) SELECT
             'ci-attempt', 'ci-instance', 1, registered_instance.runtime_spec_revision_id,
             registered_spec.adapter_template_revision_id,
+            registered_instance.state_allocation_id, registered_state.generation,
             '{}'::json, 'sha256:ci-image', repeat('1', 40), repeat('2', 40),
             repeat('3', 40), repeat('4', 40), 'ci-project', 'ci-container',
             'healthy', '{}'::json, now(), NULL, NULL, NULL
           FROM runtime_instances AS registered_instance
           JOIN runtime_spec_revisions AS registered_spec
             ON registered_spec.runtime_spec_revision_id = registered_instance.runtime_spec_revision_id
+          JOIN state_allocations AS registered_state
+            ON registered_state.state_allocation_id = registered_instance.state_allocation_id
+            AND registered_state.state_allocation_id = registered_spec.state_allocation_id
           WHERE registered_instance.instance_id = 'ci-instance';
           SQL
 
