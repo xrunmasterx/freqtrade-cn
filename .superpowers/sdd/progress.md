@@ -21,3 +21,47 @@
   - Task 1B P0 launch-kernel extraction: complete (commits `b983ce9..6270a58`; review spec compliant and task quality approved with zero findings).
   - Whole-Task-1 closure: accepted root implementation SHA `6a0a7b0c2`; focused suite 75/75, full root suite 534 with 8 declared skips, import-purity and diff gates passed, whole-branch review found zero Critical, Important, or Minor findings, and GitHub Root Safety run `29436630894` completed successfully with functional steps 1-35 successful.
 - Master-plan Tasks 2-7: not implemented by this Task 1 slice. The next implementation task is Task 2, Supervisor repository attempt/job transactions.
+
+# Phase 2C Task 2 - Supervisor Repository Transactions
+
+- Backend implementation and review complete on `phase2c-supervisor-task2`:
+  `3bfcb49f3..bba70b038` (four commits).
+- Implemented typed, deeply immutable resolved material; exact RuntimeSpec/template/state/image/
+  component/secret-version provenance; atomic job/instance/attempt/lease/audit transitions;
+  explicit job-attempt binding; bounded owner-safe lease renewal; failure latching without automatic
+  retry; and deterministic provenance row locking.
+- Review repairs closed all identified material-validation, secret-provenance, active-attempt,
+  post-lock-clock, generic-completion, audit-binding, and PostgreSQL TOCTOU findings.
+- Fresh Backend verification: `89 passed, 12 skipped`; Ruff clean; exact three-file net scope; Backend
+  worktree clean.
+- Fresh isolated PostgreSQL 17.10 verification: both real two-transaction concurrency tests passed
+  (`2 passed, 42 deselected`). Final independent full-range review reported zero Critical,
+  Important, or Minor findings and `Assessment: Ready`.
+- Publication/closure remains intentionally pending. Phase 2C Task 7 must add
+  `tests/platform/test_supervisor_repository.py` to the existing Root Safety PostgreSQL selector,
+  require zero PostgreSQL skips, and pin the reviewed Backend gitlink before exact-SHA Root Safety
+  acceptance is claimed.
+- The next implementation task is Phase 2C Task 3; it has not been started.
+
+# Phase 2C Task 3A - Supervisor Contract Repair
+
+- Task 3A implementation and independent review are complete.
+- Backend contract repair committed as `ccaf070a6` on `phase2c-supervisor-task2`:
+  repository-owned candidate Attempt IDs without premature persistence; exact candidate
+  persistence with full transaction revalidation; immutable latest-attempt recovery material;
+  atomic reconciliation blocking that preserves the active Attempt; and honest already-absent
+  stop recording with a null exit code.
+- Root existing-state verification adds a distinct fresh/ready immutable input and a read-only,
+  fail-closed proof of the managed root, allocation, layout, permissions, identity marker,
+  containment, and final exact membership. It never creates, hardens, repairs, quarantines,
+  renames, or deletes existing state and permits legitimate writes inside Bot-owned data/log
+  directories.
+- Verification: Root full dependency-free suite `544 passed, 8 skipped`; focused Driver/State/
+  Secret suite `76 passed, 3 skipped`; Backend platform suite `572 passed, 54 environment skips`;
+  focused Backend suite `60 passed, 3 PostgreSQL-only skips`; isolated PostgreSQL 17.10 focused
+  selector `63 passed, 0 skipped`; Root and Backend Ruff plus diff checks passed.
+- Two independent final reviews reported zero Critical, Important, or Minor findings. Earlier
+  State TOCTOU and Backend test-validity findings were fixed and independently re-reviewed.
+- The reviewed Backend gitlink remains intentionally unpinned in the root repository until the
+  Phase 2C publication/Root Safety closure task. The next task is Task 3B, the driver-neutral,
+  action-aware reconciliation state machine; it has not been started.

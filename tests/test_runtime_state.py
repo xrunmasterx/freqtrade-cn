@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import fields
 from pathlib import Path
 from unittest import mock
@@ -52,9 +53,28 @@ class RuntimeStateTests(unittest.TestCase):
         values.update(changes)
         return runtime_state.StateAllocationReservation(**values)
 
+    def make_existing(self, **changes: object) -> runtime_state.ExistingStateAllocation:
+        values: dict[str, object] = {
+            "state_allocation_id": "allocation-1",
+            "instance_id": "runtime-1",
+            "layout_id": "freqtrade-state-v1",
+            "provider_id": "managed-local-v1",
+            "relative_path": "ft_userdata/runtime/instances/runtime-1",
+            "kind": "fresh",
+            "status": "ready",
+            "generation": 1,
+            "restore_source_bundle_id": None,
+        }
+        values.update(changes)
+        return runtime_state.ExistingStateAllocation(**values)
+
     def provider(
         self,
-        reservation: runtime_state.StateAllocationReservation | None = None,
+        reservation: (
+            runtime_state.StateAllocationReservation
+            | runtime_state.ExistingStateAllocation
+            | None
+        ) = None,
         *,
         state_root: Path | None = None,
     ) -> runtime_state.ManagedStateProvider:
@@ -69,6 +89,17 @@ class RuntimeStateTests(unittest.TestCase):
         provider: runtime_state.ManagedStateProvider | None = None,
     ) -> runtime_state.ProvisionedState:
         return (provider or self.provider()).provision(
+            "runtime-1",
+            "allocation-1",
+            "freqtrade-state-v1",
+        )
+
+    def verify_existing(
+        self,
+        allocation: runtime_state.ExistingStateAllocation | None = None,
+    ) -> runtime_state.ProvisionedState:
+        provider = self.provider(allocation or self.make_existing())
+        return provider.verify_existing(
             "runtime-1",
             "allocation-1",
             "freqtrade-state-v1",
@@ -172,6 +203,13 @@ class RuntimeStateTests(unittest.TestCase):
     def test_public_surface_has_no_path_fault_reuse_delete_or_enumeration(self) -> None:
         parameters = tuple(inspect.signature(runtime_state.ManagedStateProvider.provision).parameters)
         self.assertEqual(parameters, ("self", "instance_id", "allocation_id", "layout_id"))
+        verify_parameters = tuple(
+            inspect.signature(runtime_state.ManagedStateProvider.verify_existing).parameters
+        )
+        self.assertEqual(
+            verify_parameters,
+            ("self", "instance_id", "allocation_id", "layout_id"),
+        )
         for name in (
             "provision_with_fault",
             "reuse",
@@ -194,6 +232,361 @@ class RuntimeStateTests(unittest.TestCase):
                 "durability",
             ),
         )
+
+    def test_existing_allocation_is_a_closed_frozen_value(self) -> None:
+        allocation = self.make_existing()
+
+        self.assertEqual(
+            tuple(field.name for field in fields(runtime_state.ExistingStateAllocation)),
+            (
+                "state_allocation_id",
+                "instance_id",
+                "layout_id",
+                "provider_id",
+                "relative_path",
+                "kind",
+                "status",
+                "generation",
+                "restore_source_bundle_id",
+            ),
+        )
+        with self.assertRaises((AttributeError, TypeError)):
+            allocation.status = "reserved"  # type: ignore[misc]
+        with self.assertRaises((AttributeError, TypeError)):
+            allocation.unexpected = "authority"  # type: ignore[attr-defined]
+
+    def test_provider_methods_reject_the_other_allocation_lifecycle(self) -> None:
+        existing_provider = self.provider(self.make_existing())
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_reservation_invalid$",
+        ):
+            self.provision(existing_provider)
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_existing_invalid$",
+        ):
+            self.provider().verify_existing(
+                "runtime-1",
+                "allocation-1",
+                "freqtrade-state-v1",
+            )
+
+    def test_invalid_existing_allocation_rejects_before_filesystem_io(self) -> None:
+        mutations = (
+            {"state_allocation_id": "../allocation"},
+            {"instance_id": "Runtime-1"},
+            {"layout_id": "other-layout"},
+            {"provider_id": "other-provider"},
+            {"relative_path": "ft_userdata/runtime/instances/other"},
+            {"kind": "restored"},
+            {"status": "reserved"},
+            {"generation": 0},
+            {"generation": True},
+            {"restore_source_bundle_id": "bundle-1"},
+        )
+        missing_root = self.base / "does-not-exist"
+        for changes in mutations:
+            with self.subTest(changes=changes):
+                provider = self.provider(
+                    self.make_existing(**changes),
+                    state_root=missing_root,
+                )
+                with self.assertRaisesRegex(
+                    runtime_state.StateProvisionError,
+                    "^state_existing_invalid$",
+                ):
+                    provider.verify_existing(
+                        "runtime-1",
+                        "allocation-1",
+                        "freqtrade-state-v1",
+                    )
+
+        provider = self.provider(self.make_existing(), state_root=missing_root)
+        for arguments in (
+            ("runtime-2", "allocation-1", "freqtrade-state-v1"),
+            ("runtime-1", "allocation-2", "freqtrade-state-v1"),
+            ("runtime-1", "allocation-1", "other-layout"),
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(
+                    runtime_state.StateProvisionError,
+                    "^state_existing_invalid$",
+                ):
+                    provider.verify_existing(*arguments)
+        self.assertFalse(missing_root.exists())
+
+    def test_verify_existing_root_failure_is_fixed_and_redacted(self) -> None:
+        missing_root = self.base / "missing-existing-root"
+        provider = self.provider(self.make_existing(), state_root=missing_root)
+
+        with self.assertRaisesRegex(
+            runtime_state.StateProvisionError,
+            "^state_existing_verification_failed$",
+        ) as raised:
+            provider.verify_existing(
+                "runtime-1",
+                "allocation-1",
+                "freqtrade-state-v1",
+            )
+
+        self.assertNotIn(str(missing_root), str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(raised.exception.__suppress_context__)
+        self.assertFalse(missing_root.exists())
+
+    def test_verify_existing_returns_proof_without_mutating_managed_state(self) -> None:
+        expected = self.provision()
+        allocation = self.state_root / "runtime-1"
+        business_data = allocation / "data/strategy.sqlite"
+        business_data.write_bytes(b"opaque-business-data")
+        business_log = allocation / "logs/runtime.log"
+        business_log.write_text("opaque-business-log", encoding="utf-8")
+        before = {
+            path.relative_to(self.state_root): (
+                path.stat().st_dev,
+                path.stat().st_ino,
+                path.stat().st_mode,
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+            )
+            for path in (allocation, *allocation.iterdir())
+        }
+
+        with (
+            mock.patch.object(runtime_state.os, "mkdir") as mkdir,
+            mock.patch.object(runtime_state.os, "rename") as rename,
+            mock.patch.object(runtime_state.os, "chmod") as chmod,
+            mock.patch.object(
+                runtime_state,
+                "_harden_managed_state_directory",
+            ) as harden_directory,
+            mock.patch.object(
+                runtime_state,
+                "_harden_managed_state_identity_file",
+            ) as harden_identity,
+            mock.patch.object(runtime_state, "_sync_directory") as sync_directory,
+            mock.patch.object(runtime_state, "_sync_descriptor") as sync_descriptor,
+            mock.patch.object(runtime_state, "_publish_no_replace") as publish,
+            mock.patch.object(runtime_state, "_quarantine_owned_allocation") as quarantine,
+        ):
+            actual = self.verify_existing()
+
+        after = {
+            path.relative_to(self.state_root): (
+                path.stat().st_dev,
+                path.stat().st_ino,
+                path.stat().st_mode,
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+            )
+            for path in (allocation, *allocation.iterdir())
+        }
+        self.assertEqual(actual, expected)
+        self.assertEqual(after, before)
+        self.assertEqual(business_data.read_bytes(), b"opaque-business-data")
+        self.assertEqual(business_log.read_text(encoding="utf-8"), "opaque-business-log")
+        for mutation in (
+            mkdir,
+            rename,
+            chmod,
+            harden_directory,
+            harden_identity,
+            sync_directory,
+            sync_descriptor,
+            publish,
+            quarantine,
+        ):
+            mutation.assert_not_called()
+
+    def test_verify_existing_rejects_structure_identity_and_permission_drift(self) -> None:
+        cases = ("structure", "identity", "permission")
+        for index, case in enumerate(cases, start=1):
+            with self.subTest(case=case):
+                instance_id = f"runtime-existing-{index}"
+                allocation_id = f"allocation-existing-{index}"
+                reservation = self.make_reservation(
+                    state_allocation_id=allocation_id,
+                    instance_id=instance_id,
+                    relative_path=f"ft_userdata/runtime/instances/{instance_id}",
+                )
+                self.provider(reservation).provision(
+                    instance_id,
+                    allocation_id,
+                    "freqtrade-state-v1",
+                )
+                path = self.state_root / instance_id
+                if case == "structure":
+                    (path / "unexpected").write_text("evidence", encoding="utf-8")
+                elif case == "identity":
+                    marker = path / f".allocation-{allocation_id}"
+                    marker.write_text("forged", encoding="utf-8")
+                else:
+                    os.chmod(path / "data", 0o755)
+
+                permission_check = nullcontext()
+                if case == "permission" and os.name == "nt":
+
+                    def reject_data(target: Path, runtime_uid: int) -> None:
+                        del runtime_uid
+                        if Path(target) == path / "data":
+                            raise ValueError("permission drift")
+
+                    permission_check = mock.patch.object(
+                        runtime_state,
+                        "_verify_managed_state_directory",
+                        side_effect=reject_data,
+                    )
+
+                existing = self.make_existing(
+                    state_allocation_id=allocation_id,
+                    instance_id=instance_id,
+                    relative_path=f"ft_userdata/runtime/instances/{instance_id}",
+                )
+                with permission_check:
+                    with self.assertRaisesRegex(
+                        runtime_state.StateProvisionError,
+                        "^state_existing_verification_failed$",
+                    ) as raised:
+                        self.provider(existing).verify_existing(
+                            instance_id,
+                            allocation_id,
+                            "freqtrade-state-v1",
+                        )
+                self.assertNotIn(str(path), str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+
+    def test_verify_existing_detects_allocation_replacement(self) -> None:
+        self.provision()
+        allocation = self.state_root / "runtime-1"
+        displaced = self.state_root / "runtime-1-displaced"
+        real_validate = runtime_state._validated_directory_status
+        replaced = False
+
+        def replace_after_data(path: Path, runtime_uid: int) -> os.stat_result:
+            nonlocal replaced
+            result = real_validate(path, runtime_uid)
+            if path.name == "data" and not replaced:
+                replaced = True
+                os.rename(allocation, displaced)
+                allocation.mkdir()
+                os.chmod(allocation, 0o700)
+            return result
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_validated_directory_status",
+                side_effect=replace_after_data,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_existing_verification_failed$",
+            ),
+        ):
+            self.verify_existing()
+
+        self.assertTrue(replaced)
+        self.assertTrue(displaced.is_dir())
+
+    def test_verify_existing_allows_business_data_created_during_validation(self) -> None:
+        self.provision()
+        allocation = self.state_root / "runtime-1"
+        business_data = allocation / "data/live.sqlite-wal"
+        real_validate = runtime_state._validated_directory_status
+        data_validations = 0
+
+        def create_business_data(path: Path, runtime_uid: int) -> os.stat_result:
+            nonlocal data_validations
+            if path == allocation / "data":
+                data_validations += 1
+                if data_validations == 2:
+                    business_data.write_bytes(b"legitimate-runtime-write")
+            status = real_validate(path, runtime_uid)
+            if path == allocation / "data" and data_validations == 2:
+                return mock.Mock(
+                    st_dev=status.st_dev,
+                    st_ino=status.st_ino,
+                    st_mode=status.st_mode,
+                    st_nlink=status.st_nlink,
+                    st_size=status.st_size + 1,
+                )
+            return status
+
+        with mock.patch.object(
+            runtime_state,
+            "_validated_directory_status",
+            side_effect=create_business_data,
+        ):
+            state = self.verify_existing()
+
+        self.assertEqual(state.state_allocation_id, "allocation-1")
+        self.assertEqual(business_data.read_bytes(), b"legitimate-runtime-write")
+        self.assertEqual(data_validations, 2)
+
+    def test_verify_existing_rejects_top_level_member_added_after_initial_scan(self) -> None:
+        self.provision()
+        allocation = self.state_root / "runtime-1"
+        real_verify_identity = runtime_state._verify_managed_state_identity_file
+        identity_validations = 0
+
+        def add_member_during_final_identity_check(path: Path, runtime_uid: int) -> None:
+            nonlocal identity_validations
+            real_verify_identity(path, runtime_uid)
+            identity_validations += 1
+            if identity_validations == 3:
+                (allocation / "unexpected").write_text("evidence", encoding="utf-8")
+
+        with (
+            mock.patch.object(
+                runtime_state,
+                "_verify_managed_state_identity_file",
+                side_effect=add_member_during_final_identity_check,
+            ),
+            self.assertRaisesRegex(
+                runtime_state.StateProvisionError,
+                "^state_existing_verification_failed$",
+            ),
+        ):
+            self.verify_existing()
+
+        self.assertEqual(identity_validations, 3)
+
+    def test_verify_existing_identity_descriptor_closes_on_success_and_failure(self) -> None:
+        self.provision()
+        identity = self.state_root / "runtime-1/.allocation-allocation-1"
+        real_open = os.open
+
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                descriptors: list[int] = []
+
+                def capture(path: Path, flags: int, *args: object) -> int:
+                    descriptor = real_open(path, flags, *args)
+                    if Path(path) == identity:
+                        descriptors.append(descriptor)
+                    return descriptor
+
+                read = mock.DEFAULT
+                if failure:
+                    read = mock.Mock(side_effect=OSError("read fault"))
+                with mock.patch.object(runtime_state.os, "open", side_effect=capture):
+                    if failure:
+                        with (
+                            mock.patch.object(runtime_state.os, "read", new=read),
+                            self.assertRaisesRegex(
+                                runtime_state.StateProvisionError,
+                                "^state_existing_verification_failed$",
+                            ),
+                        ):
+                            self.verify_existing()
+                    else:
+                        self.verify_existing()
+
+                self.assertEqual(len(descriptors), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(descriptors[0])
 
     def test_invalid_root_is_rejected_without_path_disclosure(self) -> None:
         invalid = self.base / "invalid-root"
