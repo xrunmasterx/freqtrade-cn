@@ -1069,7 +1069,19 @@ def _same_path_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _require_same_path(left: os.stat_result, right: os.stat_result) -> None:
-    if not _same_path_snapshot(left, right):
+    fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_uid",
+        "st_gid",
+        "st_file_attributes",
+        "st_reparse_tag",
+    )
+    if not all(
+        getattr(left, field, None) == getattr(right, field, None)
+        for field in fields
+    ):
         raise OSError
 
 
