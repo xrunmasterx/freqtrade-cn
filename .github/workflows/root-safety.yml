@@ -1385,6 +1385,12 @@ jobs:
                   ('platform_control', 'runtime_access_requests', true, true, false),
                   ('platform_control', 'runtime_audit_events', true, true, false),
                   ('platform_supervisor', 'platform_catalog_revisions', true, false, false),
+                  ('platform_supervisor', 'alembic_version', true, false, false),
+                  ('platform_supervisor', 'adapter_template_revisions', true, false, false),
+                  ('platform_supervisor', 'state_allocations', true, false, false),
+                  ('platform_supervisor', 'secret_references', true, false, false),
+                  ('platform_supervisor', 'secret_version_metadata', true, false, false),
+                  ('platform_supervisor', 'runtime_spec_revisions', true, false, false),
                   ('platform_supervisor', 'runtime_instances', true, true, true),
                   ('platform_supervisor', 'runtime_attempts', true, true, true),
                   ('platform_supervisor', 'runtime_lifecycle_jobs', true, true, true),
@@ -1415,10 +1421,20 @@ jobs:
                 AND namespace.nspname !~ '^pg_'
                 AND NOT (
                   namespace.nspname = 'public'
-                  AND relation.relname IN (
-                    'platform_catalog_revisions', 'runtime_instances', 'runtime_attempts',
-                    'runtime_lifecycle_jobs', 'runtime_endpoints',
-                    'runtime_access_requests', 'runtime_audit_events'
+                  AND (
+                    relation.relname IN (
+                      'platform_catalog_revisions', 'runtime_instances',
+                      'runtime_attempts', 'runtime_lifecycle_jobs', 'runtime_endpoints',
+                      'runtime_access_requests', 'runtime_audit_events'
+                    )
+                    OR (
+                      role_name = 'platform_supervisor'
+                      AND relation.relname IN (
+                        'alembic_version', 'adapter_template_revisions', 'state_allocations',
+                        'secret_references', 'secret_version_metadata',
+                        'runtime_spec_revisions'
+                      )
+                    )
                   )
                 )
                 AND (has_table_privilege(role_name, relation.oid, 'SELECT')
@@ -1514,6 +1530,10 @@ jobs:
                 VALUES ('runtime_instances'), ('runtime_attempts'),
                        ('runtime_lifecycle_jobs'), ('runtime_endpoints'),
                        ('runtime_access_requests'), ('runtime_audit_events')
+              ), supervisor_authority(table_name) AS (
+                VALUES ('alembic_version'), ('adapter_template_revisions'),
+                       ('state_allocations'), ('secret_references'),
+                       ('secret_version_metadata'), ('runtime_spec_revisions')
               ), actual(
                 object_kind, object_name, column_name, role_name,
                 privilege_type, grantor_name, is_grantable
@@ -1572,6 +1592,10 @@ jobs:
                 SELECT 'table', 'public.' || table_name, '', 'platform_supervisor',
                        privilege_type, 'postgres', false
                 FROM supervisor_writes CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS grants(privilege_type)
+                UNION ALL
+                SELECT 'table', 'public.' || table_name, '', 'platform_supervisor',
+                       'SELECT', 'postgres', false
+                FROM supervisor_authority
                 UNION ALL
                 SELECT 'column', 'public.runtime_access_requests', column_name,
                        'platform_control', 'UPDATE', 'postgres', false
@@ -1646,10 +1670,51 @@ jobs:
           ROLLBACK;
           SQL
 
-          docker exec --interactive platform-postgres-ci \
-            psql --username platform_supervisor --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          supervisor_pgpass="${platform_ci_dir}/supervisor.pgpass"
+          cleanup_supervisor_pgpass() {
+            rm -f "${supervisor_pgpass}"
+          }
+          trap cleanup_supervisor_pgpass EXIT
+          python - "${platform_ci_dir}/platform_supervisor_db_password" "${supervisor_pgpass}" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          password = Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\r\n")
+          if not password or any(character in password for character in "\r\n\x00"):
+              raise SystemExit("invalid platform supervisor database password")
+          escaped_password = password.replace("\\", "\\\\").replace(":", "\\:")
+          descriptor = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as passfile:
+              passfile.write(
+                  f"127.0.0.1:55432:platform:platform_supervisor:{escaped_password}\n"
+              )
+          PY
+          test "$(stat --format '%a' "${supervisor_pgpass}")" = "600"
+          command -v psql >/dev/null
+          supervisor_psql() {
+            env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
+              PGPASSFILE="${supervisor_pgpass}" psql \
+              --host 127.0.0.1 --port 55432 \
+              --username platform_supervisor --dbname platform \
+              --set ON_ERROR_STOP=on "$@"
+          }
+
+          supervisor_psql <<'SQL'
           BEGIN;
+          SELECT 1 / CASE
+            WHEN current_user = 'platform_supervisor'
+             AND current_database() = 'platform'
+             AND (SELECT count(*) FROM public.alembic_version) = 1
+             AND (SELECT min(version_num) FROM public.alembic_version) = '20260717_0006'
+            THEN 1 ELSE 0
+          END AS supervisor_database_authority_valid;
           SELECT instance_id FROM runtime_instances WHERE instance_id = 'ci-instance';
+          SELECT count(*) FROM adapter_template_revisions;
+          SELECT count(*) FROM state_allocations;
+          SELECT count(*) FROM secret_references;
+          SELECT count(*) FROM secret_version_metadata;
+          SELECT count(*) FROM runtime_spec_revisions;
           UPDATE runtime_instances
           SET lifecycle_status = lifecycle_status
           WHERE instance_id = 'ci-instance';
@@ -1681,10 +1746,15 @@ jobs:
             probe_name="$2"
             statement="$3"
             set +e
-            docker exec platform-postgres-ci \
-              psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \
-              --command "BEGIN; ${statement}; ROLLBACK;" \
-              >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            if test "${role_name}" = "platform_supervisor"; then
+              supervisor_psql --command "BEGIN; ${statement}; ROLLBACK;" \
+                >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            else
+              docker exec platform-postgres-ci \
+                psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \
+                --command "BEGIN; ${statement}; ROLLBACK;" \
+                >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            fi
             denied_status=$?
             set -e
             test "${denied_status}" -ne 0
@@ -1705,6 +1775,15 @@ jobs:
           expect_role_denied platform_supervisor delete "DELETE FROM runtime_instances WHERE instance_id = 'ci-instance'"
           expect_role_denied platform_supervisor truncate "TRUNCATE TABLE runtime_instances"
           expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions SET payload = payload"
+          expect_role_denied platform_supervisor update-alembic "UPDATE alembic_version SET version_num = version_num WHERE false"
+          expect_role_denied platform_supervisor update-template "UPDATE adapter_template_revisions SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-state "UPDATE state_allocations SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-secret-reference "UPDATE secret_references SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-secret-version "UPDATE secret_version_metadata SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-runtime-spec "UPDATE runtime_spec_revisions SET payload_digest = payload_digest WHERE false"
+          expect_role_denied platform_control read-runtime-spec "SELECT * FROM runtime_spec_revisions"
+          expect_role_denied platform_control read-alembic "SELECT * FROM alembic_version"
+          expect_role_denied platform_control read-secret-version "SELECT * FROM secret_version_metadata"
           expect_role_denied platform_control database-create "CREATE SCHEMA phase2a_control_database_probe"
           expect_role_denied platform_control delegated-table "DELETE FROM public.platform_ci_acl_table"
           expect_role_denied platform_supervisor delegated-sequence "SELECT setval('public.platform_ci_acl_sequence', 1)"

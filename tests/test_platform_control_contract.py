@@ -830,6 +830,39 @@ class PlatformControlContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, compact)
 
+    def test_role_script_grants_supervisor_exact_read_only_authority_tables(self) -> None:
+        script = runtime_contract._active_platform_role_script(self.role_script())
+        compact = " ".join(script.split())
+        self.assertEqual(
+            runtime_contract._role_table_inventory(
+                compact,
+                "SUPERVISOR_AUTHORITY",
+            ),
+            [
+                "ALEMBIC_VERSION",
+                "ADAPTER_TEMPLATE_REVISIONS",
+                "STATE_ALLOCATIONS",
+                "SECRET_REFERENCES",
+                "SECRET_VERSION_METADATA",
+                "RUNTIME_SPEC_REVISIONS",
+            ],
+        )
+        self.assertEqual(
+            compact.count(
+                "GRANT SELECT ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR"
+            ),
+            1,
+        )
+        for forbidden in (
+            "GRANT INSERT ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT UPDATE ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT DELETE ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT TRUNCATE ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT REFERENCES ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT TRIGGER ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+        ):
+            self.assertNotIn(forbidden, compact)
+
     def test_role_script_clears_residual_column_privileges_before_regrant(self) -> None:
         script = " ".join(self.role_script().upper().split())
         self.assertIn(

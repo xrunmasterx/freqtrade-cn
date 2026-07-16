@@ -475,10 +475,15 @@ REVIEWED_DENIAL_HELPER_BODY = (
     '  probe_name="$2"\n'
     '  statement="$3"\n'
     "  set +e\n"
-    "  docker exec platform-postgres-ci \\\n"
-    '    psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \\\n'
-    '    --command "BEGIN; ${statement}; ROLLBACK;" \\\n'
-    '    >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1\n'
+    '  if test "${role_name}" = "platform_supervisor"; then\n'
+    '    supervisor_psql --command "BEGIN; ${statement}; ROLLBACK;" \\\n'
+    '      >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1\n'
+    "  else\n"
+    "    docker exec platform-postgres-ci \\\n"
+    '      psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \\\n'
+    '      --command "BEGIN; ${statement}; ROLLBACK;" \\\n'
+    '      >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1\n'
+    "  fi\n"
     "  denied_status=$?\n"
     "  set -e\n"
     '  test "${denied_status}" -ne 0\n'
@@ -623,8 +628,10 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'test "${grantable_count}" = "0"',
         "acl_inventory_difference_count=",
         'test "${acl_inventory_difference_count}" = "0"',
+        "supervisor_authority(table_name) AS (",
+        "FROM supervisor_authority",
         "psql --username platform_control --dbname platform",
-        "psql --username platform_supervisor --dbname platform",
+        "supervisor_psql <<'SQL'",
         'expect_role_denied platform_control temp "CREATE TEMP TABLE',
         'expect_role_denied platform_control create "CREATE TABLE',
         'expect_role_denied platform_control alter "ALTER TABLE',
@@ -639,6 +646,15 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'expect_role_denied platform_supervisor delete "DELETE FROM',
         'expect_role_denied platform_supervisor truncate "TRUNCATE TABLE',
         'expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions',
+        'expect_role_denied platform_supervisor update-alembic "UPDATE alembic_version',
+        'expect_role_denied platform_supervisor update-template "UPDATE adapter_template_revisions',
+        'expect_role_denied platform_supervisor update-state "UPDATE state_allocations',
+        'expect_role_denied platform_supervisor update-secret-reference "UPDATE secret_references',
+        'expect_role_denied platform_supervisor update-secret-version "UPDATE secret_version_metadata',
+        'expect_role_denied platform_supervisor update-runtime-spec "UPDATE runtime_spec_revisions',
+        'expect_role_denied platform_control read-runtime-spec "SELECT * FROM runtime_spec_revisions"',
+        'expect_role_denied platform_control read-alembic "SELECT * FROM alembic_version"',
+        'expect_role_denied platform_control read-secret-version "SELECT * FROM secret_version_metadata"',
         'expect_role_denied platform_control database-create "CREATE SCHEMA',
         'expect_role_denied platform_control delegated-table "DELETE FROM public.platform_ci_acl_table"',
         'expect_role_denied platform_supervisor delegated-sequence "SELECT setval(',
@@ -796,8 +812,8 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
                 errors.append("secret scan reviewed step differs")
     least_privilege = scripts.get(PLATFORM_CI_STEPS[4], "")
     active_shell = "\n".join(executable_shell_statements(least_privilege))
-    active_sql_payload = "\n".join(executable_sql_payloads(least_privilege))
-    active_sql_payload = re.sub(r"'(?:''|[^'])*'", "''", active_sql_payload)
+    raw_active_sql_payload = "\n".join(executable_sql_payloads(least_privilege))
+    active_sql_payload = re.sub(r"'(?:''|[^'])*'", "''", raw_active_sql_payload)
     for fragment in (
         "ALTER ROLE platform_control WITH SUPERUSER",
         "GRANT UPDATE (desired_state) ON TABLE public.runtime_instances",
@@ -806,8 +822,21 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
         "GRANT UPDATE ON SEQUENCE public.platform_ci_acl_sequence",
         "GRANT USAGE ON SCHEMA platform_ci_private",
         "GRANT SELECT ON TABLE platform_ci_private.probe",
+        "(SELECT count(*) FROM public.alembic_version) = 1",
+        "SELECT count(*) FROM adapter_template_revisions",
+        "SELECT count(*) FROM state_allocations",
+        "SELECT count(*) FROM secret_references",
+        "SELECT count(*) FROM secret_version_metadata",
+        "SELECT count(*) FROM runtime_spec_revisions",
     ):
         if fragment not in active_sql_payload:
+            errors.append(f"least-privilege SQL payload missing: {fragment}")
+    for fragment in (
+        "current_user = 'platform_supervisor'",
+        "current_database() = 'platform'",
+        "(SELECT min(version_num) FROM public.alembic_version) = '20260717_0006'",
+    ):
+        if fragment not in raw_active_sql_payload:
             errors.append(f"least-privilege SQL payload missing: {fragment}")
     owner_changing_fragments = (
         "ALTER DATABASE platform OWNER",
@@ -835,6 +864,31 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     )
     if least_privilege.count(expected_schema_grantor) != 1:
         errors.append("least-privilege expected ACL grantor differs")
+    expected_supervisor_authority_grant = (
+        "SELECT 'table', 'public.' || table_name, '', 'platform_supervisor', "
+        "'SELECT', 'postgres', false FROM supervisor_authority"
+    )
+    if " ".join(least_privilege.split()).count(expected_supervisor_authority_grant) != 1:
+        errors.append("least-privilege supervisor authority grant differs")
+    supervisor_authority_matches = re.findall(
+        r"supervisor_authority\(table_name\) AS \(\s*VALUES(.*?)\)\s*, actual\(",
+        least_privilege,
+        flags=re.DOTALL,
+    )
+    expected_supervisor_authority = (
+        "alembic_version",
+        "adapter_template_revisions",
+        "state_allocations",
+        "secret_references",
+        "secret_version_metadata",
+        "runtime_spec_revisions",
+    )
+    if (
+        len(supervisor_authority_matches) != 1
+        or tuple(re.findall(r"'([a-z_]+)'", supervisor_authority_matches[0]))
+        != expected_supervisor_authority
+    ):
+        errors.append("least-privilege supervisor authority ACL differs")
     for fragment in (
         "has_database_privilege(role_name, 'platform', 'TEMPORARY')",
         "has_column_privilege('platform_control'",
@@ -847,6 +901,22 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
     )
     if active_shell.count(sentinel_matcher) != 1:
         errors.append("least-privilege query sentinel matcher differs")
+
+    supervisor_psql_bodies = active_shell_function_bodies(
+        least_privilege, "supervisor_psql"
+    )
+    if len(supervisor_psql_bodies) != 1 or any(
+        fragment not in supervisor_psql_bodies[0]
+        for fragment in (
+            "env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS",
+            'PGPASSFILE="${supervisor_pgpass}"',
+            "--host 127.0.0.1",
+            "--port 55432",
+            "--username platform_supervisor",
+            "--dbname platform",
+        )
+    ):
+        errors.append("supervisor login helper differs")
 
     operator_privilege = scripts.get(OPERATOR_CI_STEPS[1], "")
     operator_sql_payload = "\n".join(executable_sql_payloads(operator_privilege))
@@ -924,6 +994,8 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
         denial_statements = executable_shell_statements(denial_body)
         denial_text = "\n".join(denial_statements)
         denial_fragments = (
+            'if test "${role_name}" = "platform_supervisor"',
+            "supervisor_psql --command",
             'psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on',
             "denied_status=$?",
             'test "${denied_status}" -ne 0',
@@ -949,7 +1021,6 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
             denial_body != REVIEWED_DENIAL_HELPER_BODY
             or any(position < 0 for position in denial_positions)
             or denial_positions != sorted(denial_positions)
-            or denial_positions[1] != denial_positions[0] + 1
             or len(role_assignments) != 1
             or role_assignments[0][1] != 'role_name="$1"'
             or role_assignments[0][0] >= denial_positions[0]
@@ -2294,7 +2365,8 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(helper)
         helper_text = helper.group(0) if helper is not None else ""
         probe_anchor = (
-            "            set +e\n            docker exec platform-postgres-ci \\\n"
+            '            set +e\n            if test "${role_name}" = '
+            '"platform_supervisor"; then\n'
         )
         mutations = {
             "postgres substitution": workflow.replace(
@@ -2338,7 +2410,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                 probe_anchor,
                 "            set +e\n"
                 "            role_name=platform_supervisor\n"
-                "            docker exec platform-postgres-ci \\",
+                '            if test "${role_name}" = "platform_supervisor"; then\n',
                 1,
             ),
             **{
@@ -2346,7 +2418,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
                     probe_anchor,
                     "            set +e\n"
                     f"            {statement}\n"
-                    "            docker exec platform-postgres-ci \\",
+                    '            if test "${role_name}" = "platform_supervisor"; then\n',
                     1,
                 )
                 for statement in (
@@ -2441,7 +2513,7 @@ class RootSafetyWorkflowTests(unittest.TestCase):
         )
         identity_fragments = (
             "psql --username platform_control --dbname platform",
-            "psql --username platform_supervisor --dbname platform",
+            "supervisor_psql <<'SQL'",
         )
         for fragment in (*deny_fragments, *identity_fragments):
             with self.subTest(fragment=fragment):
@@ -2786,6 +2858,57 @@ sleep() {
             step,
         )
         self.assertEqual(step.count("FROM runtime_attempts AS fixture_attempt"), 2)
+
+    def test_supervisor_login_uses_private_file_backed_tcp_authentication(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+        for fragment in (
+            'supervisor_pgpass="${platform_ci_dir}/supervisor.pgpass"',
+            '"${platform_ci_dir}/platform_supervisor_db_password"',
+            "os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)",
+            'test "$(stat --format \'%a\' "${supervisor_pgpass}")" = "600"',
+            "cleanup_supervisor_pgpass() {",
+            'rm -f "${supervisor_pgpass}"',
+            "trap cleanup_supervisor_pgpass EXIT",
+            'PGPASSFILE="${supervisor_pgpass}" psql',
+            "env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS",
+            "--host 127.0.0.1 --port 55432",
+            "--username platform_supervisor --dbname platform",
+            "supervisor_psql <<'SQL'",
+            "current_user = 'platform_supervisor'",
+            "current_database() = 'platform'",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+        for forbidden in (
+            "PGPASSWORD=",
+            "supervisor_password=",
+            "--env PGPASSWORD",
+            'docker exec --interactive platform-postgres-ci \\\n'
+            "            psql --username platform_supervisor",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, step)
+
+    def test_acl_inventory_includes_exact_supervisor_authority_reads(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        step = active_step_text(named_workflow_step(workflow, PLATFORM_CI_STEPS[4]))
+        fragments = (
+            "supervisor_authority(table_name) AS (",
+            "VALUES ('alembic_version'), ('adapter_template_revisions'),",
+            "('state_allocations'), ('secret_references'),",
+            "('secret_version_metadata'), ('runtime_spec_revisions')",
+            "FROM supervisor_authority",
+            "SELECT 'table', 'public.' || table_name, '', 'platform_supervisor',\n"
+            "                       'SELECT', 'postgres', false\n"
+            "                FROM supervisor_authority",
+        )
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, step)
+                mutated = workflow.replace(fragment, "removed-authority-acl", 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(validate_root_safety_workflow(mutated))
 
     def test_contamination_preserves_production_owners_and_postgres_grantor(
         self,

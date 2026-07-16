@@ -117,7 +117,7 @@ PLATFORM_CONTROL_ENVIRONMENT = {
     "PLATFORM_DATABASE_USERNAME": "platform_control",
 }
 PLATFORM_ROLE_SCRIPT_SHA256 = (
-    "f0f8bd73375a3e90f5931b46f77c4ac22075688cf25e9ec39eadf85b2fd7a6d4"
+    "1ad89a2ceb593489f0727e77d496da6662615224d9f847d9748eaecfa3ddc5a7"
 )
 EXPECTED_CONTAINER_NAMES = {
     "freqtrade": "freqtrade-cn",
@@ -1212,6 +1212,14 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
     ]
     expected_control_writes = ["RUNTIME_ACCESS_REQUESTS", "RUNTIME_AUDIT_EVENTS"]
     expected_supervisor_writes = expected_catalog[1:]
+    expected_supervisor_authority = [
+        "ALEMBIC_VERSION",
+        "ADAPTER_TEMPLATE_REVISIONS",
+        "STATE_ALLOCATIONS",
+        "SECRET_REFERENCES",
+        "SECRET_VERSION_METADATA",
+        "RUNTIME_SPEC_REVISIONS",
+    ]
     expected_operator_tables = [
         "PLATFORM_CATALOG_REVISIONS",
         "ADAPTER_TEMPLATE_REVISIONS",
@@ -1228,6 +1236,7 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         "GRANT USAGE ON SCHEMA PUBLIC TO PLATFORM_OPERATOR;",
         "GRANT SELECT, INSERT ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
         "GRANT SELECT ON TABLE PUBLIC.%I TO PLATFORM_CONTROL, PLATFORM_SUPERVISOR",
+        "GRANT SELECT ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
         "GRANT INSERT ON TABLE PUBLIC.%I TO PLATFORM_CONTROL",
         "GRANT UPDATE (STATUS, RESULT_CODE, COMPLETED_AT) ON TABLE "
         "PUBLIC.RUNTIME_ACCESS_REQUESTS TO PLATFORM_CONTROL",
@@ -1240,6 +1249,8 @@ def _validate_platform_role_script(repo_root: Path) -> list[str]:
         or _role_table_inventory(compact, "CONTROL_WRITES") != expected_control_writes
         or _role_table_inventory(compact, "SUPERVISOR_WRITES")
         != expected_supervisor_writes
+        or _role_table_inventory(compact, "SUPERVISOR_AUTHORITY")
+        != expected_supervisor_authority
         or _role_table_inventory(compact, "OPERATOR_TABLES")
         != expected_operator_tables
     ):
