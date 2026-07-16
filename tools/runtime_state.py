@@ -32,6 +32,8 @@ _ROOT_ERROR: Final = "state_root_invalid"
 _EXISTS_ERROR: Final = "state_allocation_exists"
 _PROVISION_ERROR: Final = "state_provision_failed"
 _QUARANTINE_ERROR: Final = "state_quarantine_failed"
+_EXISTING_ERROR: Final = "state_existing_invalid"
+_VERIFY_EXISTING_ERROR: Final = "state_existing_verification_failed"
 
 
 class StateProvisionError(RuntimeError):
@@ -40,6 +42,19 @@ class StateProvisionError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class StateAllocationReservation:
+    state_allocation_id: str
+    instance_id: str
+    layout_id: str
+    provider_id: str
+    relative_path: str
+    kind: str
+    status: str
+    generation: int
+    restore_source_bundle_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingStateAllocation:
     state_allocation_id: str
     instance_id: str
     layout_id: str
@@ -67,7 +82,7 @@ class ManagedStateProvider:
 
     def __init__(
         self,
-        reservation: StateAllocationReservation,
+        reservation: StateAllocationReservation | ExistingStateAllocation,
         *,
         runtime_uid: int,
         state_root: Path = DEFAULT_STATE_ROOT,
@@ -170,6 +185,46 @@ class ManagedStateProvider:
             ),
         )
 
+    def verify_existing(
+        self,
+        instance_id: str,
+        allocation_id: str,
+        layout_id: str,
+    ) -> ProvisionedState:
+        allocation_record = self._reservation
+        if not _existing_is_valid(
+            allocation_record,
+            self._runtime_uid,
+            instance_id,
+            allocation_id,
+            layout_id,
+        ):
+            raise StateProvisionError(_EXISTING_ERROR)
+
+        try:
+            root_status = _validate_root(self._state_root, self._runtime_uid)
+            _verify_existing_layout(
+                self._state_root,
+                root_status,
+                instance_id,
+                allocation_id,
+                self._runtime_uid,
+            )
+        except (OSError, RuntimeError, StateProvisionError, ValueError):
+            raise StateProvisionError(_VERIFY_EXISTING_ERROR) from None
+
+        return ProvisionedState(
+            state_allocation_id=allocation_id,
+            instance_id=instance_id,
+            layout_id=layout_id,
+            provider_id=allocation_record.provider_id,
+            generation=allocation_record.generation,
+            relative_path=allocation_record.relative_path,
+            durability=(
+                "atomic-process-crash" if _is_windows() else "power-loss-posix"
+            ),
+        )
+
 
 def _reservation_is_valid(
     reservation: object,
@@ -206,6 +261,46 @@ def _reservation_is_valid(
         and type(reservation.generation) is int
         and reservation.generation >= 1
         and reservation.restore_source_bundle_id is None
+        and type(runtime_uid) is int
+        and runtime_uid >= 0
+    )
+
+
+def _existing_is_valid(
+    allocation: object,
+    runtime_uid: object,
+    instance_id: object,
+    allocation_id: object,
+    layout_id: object,
+) -> bool:
+    if not isinstance(allocation, ExistingStateAllocation):
+        return False
+    identifiers = (
+        allocation.state_allocation_id,
+        allocation.instance_id,
+        allocation.layout_id,
+        allocation.provider_id,
+        instance_id,
+        allocation_id,
+        layout_id,
+    )
+    if not all(
+        isinstance(value, str) and _IDENTIFIER_PATTERN.fullmatch(value)
+        for value in identifiers
+    ):
+        return False
+    expected_relative_path = f"ft_userdata/runtime/instances/{allocation.instance_id}"
+    return (
+        allocation.state_allocation_id == allocation_id
+        and allocation.instance_id == instance_id
+        and allocation.layout_id == layout_id == _LAYOUT_ID
+        and allocation.provider_id == _PROVIDER_ID
+        and allocation.relative_path == expected_relative_path
+        and allocation.kind == "fresh"
+        and allocation.status == "ready"
+        and type(allocation.generation) is int
+        and allocation.generation >= 1
+        and allocation.restore_source_bundle_id is None
         and type(runtime_uid) is int
         and runtime_uid >= 0
     )
@@ -352,6 +447,102 @@ def _validate_final_layout(
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def _verify_existing_layout(
+    state_root: Path,
+    root_status: os.stat_result,
+    instance_id: str,
+    allocation_id: str,
+    runtime_uid: int,
+) -> None:
+    allocation = state_root / instance_id
+    if os.path.lexists(state_root / f".{allocation_id}.quarantine"):
+        raise OSError
+
+    allocation_status = _validated_directory_status(allocation, runtime_uid)
+    _require_root_identity(state_root, root_status, runtime_uid)
+    _require_contained_allocation(state_root, allocation)
+
+    identity_name = f".allocation-{allocation_id}"
+    expected_names = {*_LAYOUT_DIRECTORIES, identity_name}
+    with os.scandir(allocation) as entries:
+        if {entry.name for entry in entries} != expected_names:
+            raise OSError
+
+    component_statuses = {
+        name: _validated_directory_status(allocation / name, runtime_uid)
+        for name in _LAYOUT_DIRECTORIES
+    }
+
+    identity = allocation / identity_name
+    identity_status = os.lstat(identity)
+    _require_empty_identity_file(identity_status)
+    _verify_managed_state_identity_file(identity, runtime_uid)
+    verified_identity_status = os.lstat(identity)
+    _require_empty_identity_file(verified_identity_status)
+    if not _same_snapshot(identity_status, verified_identity_status):
+        raise OSError
+
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(identity, _read_only_flags())
+        opened_before = os.fstat(descriptor)
+        _require_empty_identity_file(opened_before)
+        if not _same_snapshot(verified_identity_status, opened_before):
+            raise OSError
+        if os.read(descriptor, 1) != b"":
+            raise OSError
+        opened_after = os.fstat(descriptor)
+        _require_empty_identity_file(opened_after)
+        if not _same_snapshot(opened_before, opened_after):
+            raise OSError
+
+        named_after = os.lstat(identity)
+        _require_empty_identity_file(named_after)
+        if not _same_snapshot(opened_after, named_after):
+            raise OSError
+        _verify_managed_state_identity_file(identity, runtime_uid)
+        named_verified = os.lstat(identity)
+        _require_empty_identity_file(named_verified)
+        if not _same_snapshot(named_after, named_verified):
+            raise OSError
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    _require_root_identity(state_root, root_status, runtime_uid)
+    _require_contained_allocation(state_root, allocation)
+    if os.path.lexists(state_root / f".{allocation_id}.quarantine"):
+        raise OSError
+    final_allocation_status = _validated_directory_status(allocation, runtime_uid)
+    if not _same_snapshot(allocation_status, final_allocation_status):
+        raise OSError
+    for name, expected in component_statuses.items():
+        current = _validated_directory_status(allocation / name, runtime_uid)
+        if not _same_identity(expected, current):
+            raise OSError
+
+    final_identity_status = os.lstat(identity)
+    _require_empty_identity_file(final_identity_status)
+    _verify_managed_state_identity_file(identity, runtime_uid)
+    identity_after_permission = os.lstat(identity)
+    _require_empty_identity_file(identity_after_permission)
+    if not _same_snapshot(final_identity_status, identity_after_permission):
+        raise OSError
+    if not _same_snapshot(verified_identity_status, identity_after_permission):
+        raise OSError
+
+    with os.scandir(allocation) as entries:
+        if {entry.name for entry in entries} != expected_names:
+            raise OSError
+
+
+def _require_contained_allocation(state_root: Path, allocation: Path) -> None:
+    try:
+        allocation.resolve(strict=True).relative_to(state_root.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        raise OSError from None
 
 
 def _quarantine_owned_allocation(

@@ -42,3 +42,26 @@
   require zero PostgreSQL skips, and pin the reviewed Backend gitlink before exact-SHA Root Safety
   acceptance is claimed.
 - The next implementation task is Phase 2C Task 3; it has not been started.
+
+# Phase 2C Task 3A - Supervisor Contract Repair
+
+- Task 3A implementation and independent review are complete.
+- Backend contract repair committed as `ccaf070a6` on `phase2c-supervisor-task2`:
+  repository-owned candidate Attempt IDs without premature persistence; exact candidate
+  persistence with full transaction revalidation; immutable latest-attempt recovery material;
+  atomic reconciliation blocking that preserves the active Attempt; and honest already-absent
+  stop recording with a null exit code.
+- Root existing-state verification adds a distinct fresh/ready immutable input and a read-only,
+  fail-closed proof of the managed root, allocation, layout, permissions, identity marker,
+  containment, and final exact membership. It never creates, hardens, repairs, quarantines,
+  renames, or deletes existing state and permits legitimate writes inside Bot-owned data/log
+  directories.
+- Verification: Root full dependency-free suite `544 passed, 8 skipped`; focused Driver/State/
+  Secret suite `76 passed, 3 skipped`; Backend platform suite `572 passed, 54 environment skips`;
+  focused Backend suite `60 passed, 3 PostgreSQL-only skips`; isolated PostgreSQL 17.10 focused
+  selector `63 passed, 0 skipped`; Root and Backend Ruff plus diff checks passed.
+- Two independent final reviews reported zero Critical, Important, or Minor findings. Earlier
+  State TOCTOU and Backend test-validity findings were fixed and independently re-reviewed.
+- The reviewed Backend gitlink remains intentionally unpinned in the root repository until the
+  Phase 2C publication/Root Safety closure task. The next task is Task 3B, the driver-neutral,
+  action-aware reconciliation state machine; it has not been started.
