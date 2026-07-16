@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import re
@@ -320,17 +321,43 @@ class PlatformControlContractTests(unittest.TestCase):
         operator_stage = dockerfile.split(
             "FROM runtime-image AS platform-operator-image", 1
         )[1].split("FROM runtime-image AS final-runtime-image", 1)[0]
-        for module in (
-            "tools/__init__.py",
-            "tools/committed_git.py",
-            "tools/runtime_driver.py",
-            "tools/runtime_launch_policy.py",
-            "tools/runtime_templates.py",
-            "tools/bootstrap_runtime.py",
-            "tools/runtime_artifacts.py",
-            "tools/runtime_registry_cli.py",
-        ):
-            self.assertIn(module, operator_stage)
+        required_tool_modules = {"tools/__init__.py"}
+        pending_tool_modules = ["tools.runtime_registry_cli"]
+        while pending_tool_modules:
+            module_name = pending_tool_modules.pop()
+            relative_path = f"{module_name.replace('.', '/')}.py"
+            if relative_path in required_tool_modules:
+                continue
+            module_path = REPO_ROOT / relative_path
+            self.assertTrue(
+                module_path.is_file(), f"missing local module: {module_name}"
+            )
+            required_tool_modules.add(relative_path)
+            syntax_tree = ast.parse(
+                module_path.read_text(encoding="utf-8"), filename=str(module_path)
+            )
+            for node in ast.walk(syntax_tree):
+                if isinstance(node, ast.Import):
+                    pending_tool_modules.extend(
+                        alias.name
+                        for alias in node.names
+                        if alias.name.startswith("tools.")
+                    )
+                elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                    if node.module == "tools":
+                        pending_tool_modules.extend(
+                            f"tools.{alias.name}" for alias in node.names
+                        )
+                    elif node.module.startswith("tools."):
+                        pending_tool_modules.append(node.module)
+        copied_tool_modules = set(
+            re.findall(
+                r"^\s+(tools/[A-Za-z0-9_./-]+\.py)\s+\\$",
+                operator_stage,
+                re.MULTILINE,
+            )
+        )
+        self.assertEqual(copied_tool_modules, required_tool_modules)
         self.assertNotIn("COPY tools/", operator_stage)
         self.assertIn("*[!0-9a-f]*", operator_stage)
         self.assertIn("${#PLATFORM_OPERATOR_ROOT_COMMIT}", operator_stage)
