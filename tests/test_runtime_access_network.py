@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.test_safe_compose_driver import (
     APPROVED_ENVIRONMENT,
@@ -36,6 +37,11 @@ from tools.runtime_driver import (
 )
 from tools.safe_compose_driver import SafeComposeRuntimeDriver
 from tools.runtime_snapshot import compile_launch_snapshot
+from tools.runtime_supervisor.writer_guard import (
+    SupervisorDockerWriterGuard,
+    SupervisorWriterGuardError,
+)
+from tools.runtime_supervisor.daemon import SupervisorProcessLock
 
 try:
     from tools.runtime_access_network import (
@@ -495,6 +501,13 @@ class SafeComposeAccessNetworkAdapterTests(unittest.TestCase):
         self.platform = platform_control_identity()
         self.lease = _active_lease(self.authority)
         self.resolver = AuthorityResolver(self.authority, self.lease)
+        self.writer_authority = SupervisorProcessLock(
+            Path(self.temporary.name) / "supervisor.lock"
+        )
+        self.writer_authority.acquire()
+        self.addCleanup(self.writer_authority.release)
+        self.writer_guard = SupervisorDockerWriterGuard()
+        self.writer_guard.activate(self.writer_authority)
 
     def driver(self, runner):
         return SafeComposeRuntimeDriver(
@@ -508,8 +521,40 @@ class SafeComposeAccessNetworkAdapterTests(unittest.TestCase):
             temporary_directory=Path(self.temporary.name),
             authority_resolver=self.resolver,
             platform_control_identity_provider=self.resolver,
+            writer_guard=self.writer_guard,
+            writer_authority=self.writer_authority,
             command_runner=runner,
         )
+
+    def test_revoked_guard_blocks_network_mutations_before_runner(self) -> None:
+        runner = mock.Mock()
+        driver = self.driver(runner)
+        self.writer_guard.revoke(self.writer_authority)
+
+        for operation in (
+            lambda: driver.ensure_access_network(self.access, self.platform),
+            lambda: driver.remove_access_network_if_empty(self.access),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(
+                SupervisorWriterGuardError
+            ):
+                operation()
+
+        self.assertEqual(runner.mock_calls, [])
+
+    def test_revocation_after_read_only_inspection_blocks_network_create(self) -> None:
+        engine = NetworkEngineRunner(self.snapshot, self.platform)
+
+        def runner(command, **kwargs):
+            result = engine(command, **kwargs)
+            if command[1:3] == ["network", "ls"]:
+                self.writer_guard.revoke(self.writer_authority)
+            return result
+
+        with self.assertRaises(SupervisorWriterGuardError):
+            self.driver(runner).ensure_access_network(self.access, self.platform)
+
+        self.assertEqual(engine.mutations(), [])
 
     def test_ensure_creates_then_connects_only_exact_platform_control(self) -> None:
         runner = NetworkEngineRunner(self.snapshot, self.platform)

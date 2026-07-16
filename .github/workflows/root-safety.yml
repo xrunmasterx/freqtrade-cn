@@ -157,6 +157,12 @@ jobs:
           echo "image_id=${image_id}" >> "${GITHUB_OUTPUT}"
           docker tag "${image_id}" freqtrade-cn:local
 
+      - name: Run Phase 2C offline supervisor acceptance
+        env:
+          REVIEWED_IMAGE_ID: ${{ steps.reviewed-image.outputs.image_id }}
+        run: |
+          python -S -m tools.runtime_supervisor.offline_acceptance --root-commit "${GITHUB_SHA}" --image-id "${REVIEWED_IMAGE_ID}"
+
       - name: Build platform operator image
         id: reviewed-operator-image
         shell: bash
@@ -345,6 +351,7 @@ jobs:
           python -m pytest \
             tests/platform/test_platform_migrations.py \
             tests/platform/test_runtime_repository.py \
+            tests/platform/test_supervisor_repository.py \
             tests/platform/test_template_repository_postgres.py \
             tests/platform/test_runtime_registration_repository_postgres.py \
             -q -p no:cacheprovider \
@@ -530,6 +537,39 @@ jobs:
               fi
             done
             printf '%s\n' 'operator_invalid_arguments_phase_complete' >&2
+
+            lifecycle_jobs_before="$(docker exec platform-postgres-ci \
+              psql --username postgres --dbname platform --tuples-only --no-align \
+              --command 'SELECT count(*) FROM runtime_lifecycle_jobs')"
+            lifecycle_container="platform-operator-lifecycle-disabled-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-ci"
+            set +e
+            lifecycle_container_id="$(docker compose --profile platform-operator run --detach \
+              --name "${lifecycle_container}" --no-deps -T platform-operator \
+              runtime-registry start --actor platform-operator \
+              --instance-id phase2-spot-paper-probe --expected-version 0 \
+              --idempotency-key root-safety-disabled-start 2>/dev/null)"
+            lifecycle_create_status=$?
+            set -e
+            test "${lifecycle_create_status}" -eq 0
+            [[ "${lifecycle_container_id}" =~ ^[0-9a-f]{64}$ ]]
+            set +e
+            lifecycle_status="$(docker wait "${lifecycle_container_id}" 2>/dev/null)"
+            lifecycle_wait_status=$?
+            lifecycle_output="$(docker logs "${lifecycle_container_id}" 2>&1)"
+            lifecycle_log_status=$?
+            docker rm "${lifecycle_container_id}" >/dev/null 2>&1
+            lifecycle_cleanup_status=$?
+            set -e
+            test "${lifecycle_wait_status}" -eq 0
+            test "${lifecycle_log_status}" -eq 0
+            test "${lifecycle_cleanup_status}" -eq 0
+            test "${lifecycle_status}" = "78"
+            test "${lifecycle_output}" = "runtime_supervisor_not_enabled"
+            lifecycle_jobs_after="$(docker exec platform-postgres-ci \
+              psql --username postgres --dbname platform --tuples-only --no-align \
+              --command 'SELECT count(*) FROM runtime_lifecycle_jobs')"
+            test "${lifecycle_jobs_after}" = "${lifecycle_jobs_before}"
+            printf '%s\n' 'operator_lifecycle_disabled_phase_complete' >&2
           )
 
           python - \

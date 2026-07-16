@@ -262,6 +262,85 @@ class RuntimeRegistryCliTests(unittest.TestCase):
             )
         self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
 
+    def test_lifecycle_mutations_fail_closed_without_loading_backend(self) -> None:
+        for command in ("start", "stop", "retry", "retire"):
+            with (
+                self.subTest(command=command),
+                mock.patch.object(
+                    runtime_registry_cli,
+                    "_load_backend_bindings",
+                ) as load_bindings,
+            ):
+                code, stdout, stderr = self.run_cli(
+                    "runtime-registry",
+                    command,
+                    "--actor",
+                    "platform-operator",
+                    "--instance-id",
+                    INSTANCE_ID,
+                    "--expected-version",
+                    "0",
+                    "--idempotency-key",
+                    f"paper-{command}-1",
+                )
+            self.assertEqual(
+                (code, stdout, stderr),
+                (78, "", "runtime_supervisor_not_enabled\n"),
+            )
+            load_bindings.assert_not_called()
+
+    def test_every_lifecycle_mutation_requires_closed_typed_arguments(self) -> None:
+        invalid_invocations = (
+            ("runtime-registry", "start", "--instance-id", INSTANCE_ID),
+            (
+                "runtime-registry",
+                "stop",
+                "--actor",
+                "platform-operator",
+                "--instance-id",
+                INSTANCE_ID,
+                "--expected-version",
+                "-1",
+                "--idempotency-key",
+                "paper-stop-1",
+            ),
+            (
+                "runtime-registry",
+                "retry",
+                "--actor",
+                "platform-operator",
+                "--instance-id",
+                INSTANCE_ID,
+                "--expected-version",
+                "0",
+                "--idempotency-key",
+                "INVALID",
+            ),
+            (
+                "runtime-registry",
+                "retire",
+                "--actor",
+                "root",
+                "--instance-id",
+                INSTANCE_ID,
+                "--expected-version",
+                "0",
+                "--idempotency-key",
+                "paper-retire-1",
+            ),
+        )
+        for invocation in invalid_invocations:
+            with (
+                self.subTest(invocation=invocation),
+                mock.patch.object(
+                    runtime_registry_cli,
+                    "_load_backend_bindings",
+                ) as load_bindings,
+            ):
+                code, stdout, stderr = self.run_cli(*invocation)
+            self.assertEqual((code, stdout, stderr), (2, "", "invalid_arguments\n"))
+            load_bindings.assert_not_called()
+
     def test_validate_remains_offline_when_backend_imports_are_unavailable(
         self,
     ) -> None:

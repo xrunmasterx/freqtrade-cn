@@ -33,6 +33,8 @@ DATABASE_PASSWORD_FILE = Path("/run/secrets/database_password")
 PAPER_PROBE_TEMPLATE_ID = "freqtrade-paper-probe-v1"
 PAPER_PROBE_INSTANCE_ID = "phase2-spot-paper-probe"
 PLATFORM_OPERATOR_ACTOR = "platform-operator"
+LIFECYCLE_COMMANDS = frozenset({"start", "stop", "retry", "retire"})
+SUPERVISOR_NOT_ENABLED_EXIT_CODE = 78
 
 _GIT_IDENTITY = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})\n")
 
@@ -99,6 +101,21 @@ def _load_backend_bindings() -> _BackendBindings:
     )
 
 
+def _non_negative_integer(value: str) -> int:
+    if not value.isascii() or not value.isdigit():
+        raise argparse.ArgumentTypeError("invalid integer")
+    parsed = int(value)
+    if parsed > 2_147_483_647:
+        raise argparse.ArgumentTypeError("invalid integer")
+    return parsed
+
+
+def _identifier(value: str) -> str:
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", value) is None:
+        raise argparse.ArgumentTypeError("invalid identifier")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _ClosedArgumentParser(prog="runtime-registry-cli")
     domains = parser.add_subparsers(dest="domain", required=True)
@@ -128,6 +145,28 @@ def _parser() -> argparse.ArgumentParser:
         choices=(PAPER_PROBE_INSTANCE_ID,),
         required=True,
     )
+    for name in ("start", "stop", "retry", "retire"):
+        command = registry_commands.add_parser(name)
+        command.add_argument(
+            "--actor",
+            choices=(PLATFORM_OPERATOR_ACTOR,),
+            required=True,
+        )
+        command.add_argument(
+            "--instance-id",
+            choices=(PAPER_PROBE_INSTANCE_ID,),
+            required=True,
+        )
+        command.add_argument(
+            "--expected-version",
+            type=_non_negative_integer,
+            required=True,
+        )
+        command.add_argument(
+            "--idempotency-key",
+            type=_identifier,
+            required=True,
+        )
     return parser
 
 
@@ -333,11 +372,19 @@ def _execute(arguments: argparse.Namespace) -> dict[str, object]:
         return _publish(arguments.actor)
     if arguments.command in {"register-paper-probe", "compile"}:
         return _ensure_registration(arguments.actor)
-    return _registration_status(arguments.instance_id)
+    if arguments.command == "status":
+        return _registration_status(arguments.instance_id)
+    raise AssertionError("unsupported parsed command")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if (
+        arguments.domain == "runtime-registry"
+        and arguments.command in LIFECYCLE_COMMANDS
+    ):
+        sys.stderr.write("runtime_supervisor_not_enabled\n")
+        return SUPERVISOR_NOT_ENABLED_EXIT_CODE
     try:
         result = _execute(arguments)
     except Exception:

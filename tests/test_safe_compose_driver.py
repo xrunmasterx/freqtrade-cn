@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event, Thread
 from unittest import mock
 
 from tests.test_runtime_snapshot import valid_authority
@@ -24,6 +25,11 @@ from tools.runtime_driver import (
 )
 from tools.runtime_preparation_lease import ActiveLaunchAuthorityLease
 from tools.runtime_snapshot import compile_launch_snapshot
+from tools.runtime_supervisor.writer_guard import (
+    SupervisorDockerWriterGuard,
+    SupervisorWriterGuardError,
+)
+from tools.runtime_supervisor.daemon import SupervisorProcessLock
 
 try:
     from tools.safe_compose_driver import (
@@ -207,6 +213,89 @@ class SafePlatformControlIdentityProviderTests(unittest.TestCase):
             self.provider(runner).resolve_platform_control_identity()
 
 
+class SupervisorDockerWriterGuardTests(unittest.TestCase):
+    def test_guard_binds_only_one_object_identity_and_revocation_is_final(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            authority = SupervisorProcessLock(Path(directory) / "first.lock")
+            different_authority = SupervisorProcessLock(
+                Path(directory) / "second.lock"
+            )
+            authority.acquire()
+            different_authority.acquire()
+            try:
+                guard = SupervisorDockerWriterGuard()
+
+                self.assertIs(guard.activate(authority), guard)
+                guard.require_active(authority)
+                with guard.mutation_scope(authority):
+                    pass
+                with self.assertRaises(SupervisorWriterGuardError):
+                    guard.require_active(different_authority)
+                with self.assertRaises(SupervisorWriterGuardError):
+                    guard.revoke(different_authority)
+
+                guard.revoke(authority)
+                guard.revoke(authority)
+                with self.assertRaises(SupervisorWriterGuardError):
+                    guard.require_active(authority)
+                with self.assertRaises(SupervisorWriterGuardError):
+                    guard.activate(authority)
+            finally:
+                different_authority.release()
+                authority.release()
+
+    def test_guard_rejects_string_and_path_authority_derivation(self) -> None:
+        for authority in ("supervisor.lock", Path("supervisor.lock")):
+            with self.subTest(authority=authority), self.assertRaises(
+                SupervisorWriterGuardError
+            ):
+                SupervisorDockerWriterGuard().activate(authority)
+
+    def test_guard_rejects_an_unheld_process_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            authority = SupervisorProcessLock(Path(directory) / "supervisor.lock")
+            with self.assertRaises(SupervisorWriterGuardError):
+                SupervisorDockerWriterGuard().activate(authority)
+
+    def test_mutation_scope_allows_only_one_writer_at_a_time(self) -> None:
+        guard = SupervisorDockerWriterGuard()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        authority = SupervisorProcessLock(Path(temporary.name) / "supervisor.lock")
+        authority.acquire()
+        self.addCleanup(authority.release)
+        guard.activate(authority)
+        first_entered = Event()
+        release_first = Event()
+        second_started = Event()
+        second_entered = Event()
+
+        def first_writer() -> None:
+            with guard.mutation_scope(authority):
+                first_entered.set()
+                release_first.wait(timeout=1)
+
+        def second_writer() -> None:
+            second_started.set()
+            with guard.mutation_scope(authority):
+                second_entered.set()
+
+        first = Thread(target=first_writer)
+        second = Thread(target=second_writer)
+        first.start()
+        self.assertTrue(first_entered.wait(timeout=1))
+        second.start()
+        self.assertTrue(second_started.wait(timeout=1))
+        self.assertFalse(second_entered.wait(timeout=0.05))
+        release_first.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertTrue(second_entered.is_set())
+
+
 def _container_document(
     snapshot,
     *,
@@ -321,8 +410,19 @@ class SafeComposeDriverTests(unittest.TestCase):
         self.lease = _active_lease(self.authority)
         self.resolver = AuthorityResolver(self.authority, self.lease)
         self.network_driver = NetworkDriverSpy()
+        self.writer_authority = SupervisorProcessLock(
+            Path(self.temporary.name) / "supervisor.lock"
+        )
+        self.writer_authority.acquire()
+        self.writer_guard = SupervisorDockerWriterGuard()
+        self.writer_guard.activate(self.writer_authority)
 
     def tearDown(self) -> None:
+        try:
+            self.writer_guard.revoke(self.writer_authority)
+        except SupervisorWriterGuardError:
+            pass
+        self.writer_authority.release()
         self.temporary.cleanup()
 
     def driver(
@@ -332,6 +432,8 @@ class SafeComposeDriverTests(unittest.TestCase):
         environment=None,
         resolver=None,
         temporary_directory=None,
+        writer_guard=None,
+        writer_authority=None,
     ):
         return SafeComposeRuntimeDriver(
             docker_executable=DOCKER,
@@ -349,8 +451,65 @@ class SafeComposeDriverTests(unittest.TestCase):
             authority_resolver=self.resolver if resolver is None else resolver,
             platform_control_identity_provider=self.resolver,
             access_network_driver=self.network_driver,
+            writer_guard=(
+                self.writer_guard if writer_guard is None else writer_guard
+            ),
+            writer_authority=(
+                self.writer_authority
+                if writer_authority is None
+                else writer_authority
+            ),
             command_runner=runner,
         )
+
+    def test_constructor_requires_the_exact_active_writer_guard(self) -> None:
+        runner = mock.Mock()
+
+        with self.assertRaises(DriverPolicyError):
+            self.driver(runner, writer_guard=object())
+        with self.assertRaises(SupervisorWriterGuardError):
+            self.driver(
+                runner,
+                writer_authority=SupervisorProcessLock(
+                    Path(self.temporary.name) / "unheld.lock"
+                ),
+            )
+
+        self.assertEqual(runner.mock_calls, [])
+
+    def test_revoked_guard_blocks_launch_and_stop_before_runner(self) -> None:
+        runner = mock.Mock()
+        driver = self.driver(runner)
+        self.writer_guard.revoke(self.writer_authority)
+
+        for operation in (
+            lambda: driver.launch(self.snapshot),
+            lambda: driver.stop(self.snapshot.identity),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(
+                SupervisorWriterGuardError
+            ):
+                operation()
+
+        self.assertEqual(runner.mock_calls, [])
+
+    def test_revocation_during_render_blocks_compose_create(self) -> None:
+        runner = DockerRunner(self.snapshot, [None, None])
+
+        def revoke_after_render(payload):
+            self.writer_guard.revoke(self.writer_authority)
+            return payload
+
+        runner.render_transform = revoke_after_render
+
+        with mock.patch.object(
+            ActiveLaunchAuthorityLease,
+            "revalidate_for_runtime_action",
+            return_value=None,
+        ), self.assertRaises(SupervisorWriterGuardError):
+            self.driver(runner).launch(self.snapshot)
+
+        self.assertEqual(runner.compose_commands("create"), [])
 
     def test_launch_uses_one_safe_action_and_real_post_action_inspection(self) -> None:
         created = _container_document(self.snapshot, status="created")
