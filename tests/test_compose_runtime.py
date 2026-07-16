@@ -188,10 +188,13 @@ class ComposeRuntimeTests(unittest.TestCase):
         self.assertIs(result, completed)
         arguments = kernel.call_args.kwargs
         self.assertEqual(arguments["service"], "freqtrade")
+        self.assertEqual(arguments["project_name"], "freqtrade-cn")
         self.assertEqual(arguments["root"], self.root)
-        self.assertEqual(arguments["manifest"], MANIFEST)
-        self.assertEqual(arguments["image_id"], INSPECTED_IMAGE.image_id)
-        self.assertEqual(arguments["commit_identity"], COMMIT_IDENTITY)
+        self.assertEqual(arguments["compose_command"], ("docker", "compose"))
+        self.assertEqual(
+            arguments["compose_files"], (self.root / "docker-compose.yml",)
+        )
+        self.assertIn("--force-recreate", arguments["action_arguments"])
         self.assertIn("services:", arguments["override"])
 
     def test_extracted_kernel_validates_before_fixed_action_and_cleans_snapshot(
@@ -201,46 +204,193 @@ class ComposeRuntimeTests(unittest.TestCase):
         events: list[str] = []
         snapshot_path: Path | None = None
 
-        def validate(
-            root,
-            manifest,
-            command_prefix,
-            override,
-            environment,
-            service,
-            image_id,
-            snapshot,
-            commit_identity,
-        ) -> None:
+        def validate(snapshot: Path) -> None:
             nonlocal snapshot_path
             snapshot_path = snapshot
             events.append("validate")
-            snapshot_path.write_text('{"services":{}}\n', encoding="utf-8")
 
         def run(command, **kwargs):
+            if "config" in command:
+                events.append("render")
+                return subprocess.CompletedProcess(command, 0, '{"services":{}}\n', "")
             events.append("action")
             self.assertIn("--no-build", command)
             self.assertIn("--no-deps", command)
             self.assertEqual(command[-1], "freqtrade")
             return completed
 
-        with (
-            mock.patch.object(compose_runtime, "_validate_launch", side_effect=validate),
-            mock.patch.object(compose_runtime.subprocess, "run", side_effect=run),
-        ):
+        with mock.patch.object(compose_runtime.subprocess, "run", side_effect=run):
             result = compose_runtime._run_validated_snapshot_launch(
                 service="freqtrade",
+                project_name="freqtrade-cn",
                 root=self.root,
-                manifest=MANIFEST,
-                image_id=INSPECTED_IMAGE.image_id,
-                commit_identity=COMMIT_IDENTITY,
+                compose_command=("docker", "compose"),
+                compose_files=(self.root / "docker-compose.yml",),
+                profiles=("trading", "research"),
                 override="services: {}\n",
+                environment={},
+                validate_pre_render=lambda: None,
+                validate_rendered_snapshot=validate,
+                validate_pre_action=lambda: None,
+                action_arguments=(
+                    "up",
+                    "--detach",
+                    "--wait",
+                    "--wait-timeout",
+                    str(compose_runtime.COMPOSE_WAIT_TIMEOUT_SECONDS),
+                    "--force-recreate",
+                    "--no-build",
+                    "--no-deps",
+                    "freqtrade",
+                ),
+                render_timeout_seconds=None,
+                action_timeout_seconds=None,
+                capture_output=False,
             )
 
         self.assertIs(result, completed)
-        self.assertEqual(events, ["validate", "action"])
+        self.assertEqual(events, ["render", "validate", "action"])
         self.assertIsNotNone(snapshot_path)
         self.assertFalse(snapshot_path.exists())
+
+    def test_kernel_uses_explicit_executable_environment_and_final_callback(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        docker_executable = "C:/trusted/docker.exe"
+        environment = {"DOCKER_HOST": "npipe:////./pipe/docker_engine"}
+        events: list[str] = []
+
+        def validate(snapshot: Path) -> None:
+            events.append("validate")
+            self.assertEqual(
+                snapshot.read_text(encoding="utf-8"),
+                '{"services":{"runtime":{}}}\n',
+            )
+
+        def pre_action() -> None:
+            events.append("pre_action")
+
+        def run(command, **kwargs):
+            if "config" in command:
+                events.append("render")
+                self.assertEqual(command[0], docker_executable)
+                self.assertIs(kwargs["env"], environment)
+                return subprocess.CompletedProcess(
+                    command, 0, '{"services":{"runtime":{}}}\n', ""
+                )
+            events.append("action")
+            self.assertEqual(command[0], docker_executable)
+            self.assertIs(kwargs["env"], environment)
+            return completed
+
+        with mock.patch.object(
+            compose_runtime.subprocess, "run", side_effect=run
+        ) as action:
+            result = compose_runtime._run_validated_snapshot_launch(
+                service="runtime",
+                project_name="runtime-paper-probe-1",
+                root=self.root,
+                compose_command=(docker_executable,),
+                compose_files=(),
+                profiles=(),
+                override='{"services":{"runtime":{}}}\n',
+                environment=environment,
+                validate_pre_render=lambda: None,
+                validate_rendered_snapshot=validate,
+                validate_pre_action=pre_action,
+                action_arguments=(
+                    "create",
+                    "--no-recreate",
+                    "--no-build",
+                    "--pull",
+                    "never",
+                    "runtime",
+                ),
+                render_timeout_seconds=30,
+                action_timeout_seconds=60,
+                capture_output=True,
+            )
+
+        self.assertIs(result, completed)
+        self.assertEqual(events, ["render", "validate", "pre_action", "action"])
+        self.assertEqual(action.call_count, 2)
+        command = action.call_args_list[1].args[0]
+        self.assertIn("--no-recreate", command)
+        self.assertNotIn("--force-recreate", command)
+
+    def test_kernel_pre_action_failure_performs_zero_action(self) -> None:
+        def run(command, **_kwargs):
+            return subprocess.CompletedProcess(
+                command, 0, '{"services":{"runtime":{}}}\n', ""
+            )
+
+        with (
+            mock.patch.object(
+                compose_runtime.subprocess, "run", side_effect=run
+            ) as action,
+            self.assertRaisesRegex(ValueError, "^blocked$"),
+        ):
+            compose_runtime._run_validated_snapshot_launch(
+                service="runtime",
+                project_name="runtime-paper-probe-1",
+                root=self.root,
+                compose_command=("C:/trusted/docker.exe",),
+                compose_files=(),
+                profiles=(),
+                override='{"services":{"runtime":{}}}\n',
+                environment={},
+                validate_pre_render=lambda: None,
+                validate_rendered_snapshot=lambda _snapshot: None,
+                validate_pre_action=mock.Mock(side_effect=ValueError("blocked")),
+                action_arguments=(
+                    "create",
+                    "--no-recreate",
+                    "--no-build",
+                    "--pull",
+                    "never",
+                    "runtime",
+                ),
+                render_timeout_seconds=30,
+                action_timeout_seconds=60,
+                capture_output=True,
+            )
+        self.assertEqual(action.call_count, 1)
+
+    def test_kernel_rejects_unapproved_actions_before_render(self) -> None:
+        forbidden = (
+            ("down", "--volumes"),
+            ("rm", "runtime"),
+            ("restart", "runtime"),
+            ("create", "--no-recreate", "other-service"),
+            ("create", "--no-recreate", "runtime", "other-service"),
+            ("create", "--no-recreate"),
+        )
+        for action_arguments in forbidden:
+            with self.subTest(action_arguments=action_arguments):
+                runner = mock.Mock()
+                pre_render = mock.Mock()
+                with self.assertRaisesRegex(ValueError, "^compose action is invalid$"):
+                    compose_runtime._run_validated_snapshot_launch(
+                        service="runtime",
+                        project_name="runtime-paper-probe-1",
+                        root=self.root,
+                        compose_command=("C:/trusted/docker-compose.exe",),
+                        compose_files=(),
+                        profiles=(),
+                        override='{"services":{"runtime":{}}}\n',
+                        environment={},
+                        validate_pre_render=pre_render,
+                        validate_rendered_snapshot=lambda _snapshot: None,
+                        validate_pre_action=lambda: None,
+                        action_arguments=action_arguments,
+                        render_timeout_seconds=30,
+                        action_timeout_seconds=60,
+                        capture_output=True,
+                        process_runner=runner,
+                    )
+                pre_render.assert_not_called()
+                runner.assert_not_called()
 
     def test_up_rejects_identity_change_during_build_before_preflight(self) -> None:
         with (
