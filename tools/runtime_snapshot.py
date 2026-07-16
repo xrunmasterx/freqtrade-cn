@@ -18,6 +18,7 @@ from tools.runtime_driver import (
     LaunchSnapshot,
     ReadOnlyMount,
     ResourceLimits,
+    RuntimeNetworkBinding,
     RuntimeUser,
     SecretMount,
     SecretPathEnvironmentBinding,
@@ -30,6 +31,7 @@ from tools.runtime_launch_policy import (
     ImageIdentitySource,
     NetworkIdentitySource,
     NetworkNameDerivation,
+    NetworkRule,
     ResolvedLaunchPolicyBundle,
     validate_resolved_launch_policy_bundle,
 )
@@ -49,6 +51,7 @@ _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _MATERIAL_PROVIDER_ID = "committed-paper-probe-material-v1"
 _STATE_PROVIDER_ID = "managed-local-v1"
 _SECRET_PROVIDER_ID = "local-file-secret-v1"
+_NETWORK_ALIAS_DERIVATION = "sha256-instance-nul-attempt-v1"
 _MATERIAL_PATHS = {
     "runtime_config": "ft_userdata/user_data/config.example.json",
     "safety_policy": "ops/config/trading-safety.json",
@@ -697,15 +700,63 @@ def _validate_authority(authority: LaunchCompilationAuthority) -> None:
 
 
 def _derived_network_names(authority: LaunchCompilationAuthority) -> tuple[str, ...]:
-    names: list[str] = []
+    return tuple(
+        sorted(binding.network_name for binding in _derived_network_bindings(authority))
+    )
+
+
+def _runtime_alias(identity: DriverIdentity) -> str:
+    digest = hashlib.sha256(
+        f"{identity.instance_id}\0{identity.attempt_id}".encode("utf-8")
+    ).hexdigest()
+    return f"runtime-{digest[:24]}"
+
+
+def _network_policy_digest(network_policy_id: str, rule: NetworkRule) -> str:
+    payload = {
+        "network_policy_id": network_policy_id,
+        "role": rule.role,
+        "identity_source": rule.identity_source.value,
+        "derivation": rule.derivation.value,
+        "prefix": rule.prefix,
+        "digest_characters": rule.digest_characters,
+        "suffix": rule.suffix,
+        "internal": rule.internal,
+        "requires_upstream_access": rule.requires_upstream_access,
+        "requires_platform_control": rule.requires_platform_control,
+    }
+    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _derived_network_bindings(
+    authority: LaunchCompilationAuthority,
+) -> tuple[RuntimeNetworkBinding, ...]:
+    bindings: list[RuntimeNetworkBinding] = []
     for rule in authority.policies.network_rules:
         _policy(rule.identity_source is NetworkIdentitySource.INSTANCE_ID)
         _policy(rule.derivation is NetworkNameDerivation.SHA256_PREFIX_V1)
         digest = hashlib.sha256(
             authority.identity.instance_id.encode("utf-8")
         ).hexdigest()
-        names.append(f"{rule.prefix}{digest[: rule.digest_characters]}{rule.suffix}")
-    return tuple(sorted(set(names)))
+        network_name = (
+            f"{rule.prefix}{digest[: rule.digest_characters]}{rule.suffix}"
+        )
+        bindings.append(
+            RuntimeNetworkBinding(
+                role=rule.role,
+                network_name=network_name,
+                runtime_alias=_runtime_alias(authority.identity),
+                policy_digest=_network_policy_digest(
+                    authority.policies.network_policy_id,
+                    rule,
+                ),
+                internal=rule.internal,
+                requires_upstream_access=rule.requires_upstream_access,
+                requires_platform_control=rule.requires_platform_control,
+            )
+        )
+    return tuple(sorted(bindings, key=lambda binding: binding.role))
 
 
 def _expanded_command(authority: LaunchCompilationAuthority) -> tuple[str, ...]:
@@ -775,6 +826,7 @@ def _authority_projection(
     attempt = authority.attempt
     policies = authority.policies
     identity = authority.identity
+    network_bindings = _derived_network_bindings(authority)
     return {
         "schema_version": 1,
         "runtime_spec": {
@@ -962,6 +1014,19 @@ def _authority_projection(
             "image_id": identity.image_id,
             "network_names": list(identity.network_names),
         },
+        "network_alias_derivation": _NETWORK_ALIAS_DERIVATION,
+        "network_bindings": [
+            {
+                "role": value.role,
+                "network_name": value.network_name,
+                "runtime_alias": value.runtime_alias,
+                "policy_digest": value.policy_digest,
+                "internal": value.internal,
+                "requires_upstream_access": value.requires_upstream_access,
+                "requires_platform_control": value.requires_platform_control,
+            }
+            for value in network_bindings
+        ],
         "secret_path_environment_bindings": [
             {"name": value.name, "target": str(value.target)}
             for value in secret_environment
@@ -1025,6 +1090,7 @@ def compile_launch_snapshot(authority: LaunchCompilationAuthority) -> LaunchSnap
         internal_ports=authority.policies.internal_ports,
         health_profile=authority.policies.health_profile,
         resource_limits=authority.policies.resource_limits,
+        network_bindings=_derived_network_bindings(authority),
     )
     return snapshot
 

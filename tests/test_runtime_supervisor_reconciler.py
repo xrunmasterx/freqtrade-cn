@@ -18,6 +18,7 @@ from tools.runtime_driver import (
     HealthProfile,
     LaunchSnapshot,
     ResourceLimits,
+    RuntimeNetworkBinding,
     RuntimeUser,
     SecretMount,
     SecretPathEnvironmentBinding,
@@ -110,6 +111,18 @@ def launch_snapshot(identity: DriverIdentity) -> LaunchSnapshot:
             cpu_millis=1000,
             memory_bytes=1024,
             pids_limit=64,
+        ),
+        network_bindings=tuple(
+            RuntimeNetworkBinding(
+                role="access" if index == 0 else f"private-{index}",
+                network_name=network_name,
+                runtime_alias=identity.container_name,
+                policy_digest="d" * 64,
+                internal=index > 0,
+                requires_upstream_access=index == 0,
+                requires_platform_control=index == 0,
+            )
+            for index, network_name in enumerate(identity.network_names)
         ),
     )
 

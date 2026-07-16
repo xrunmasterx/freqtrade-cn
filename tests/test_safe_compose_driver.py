@@ -253,6 +253,17 @@ class SafeComposeDriverTests(unittest.TestCase):
         self.assertEqual(kwargs["env"], APPROVED_ENVIRONMENT)
         starts = runner.commands(("container", "start"))
         self.assertEqual(starts, [(str(DOCKER), "container", "start", "c" * 64)])
+        _config_command, config_kwargs = next(
+            (command, kwargs)
+            for command, kwargs in runner.calls
+            if command[0] == str(COMPOSE) and "config" in command
+        )
+        compose_document = json.loads(config_kwargs["input"])
+        binding = self.snapshot.network_bindings[0]
+        self.assertEqual(
+            compose_document["services"]["runtime"]["networks"],
+            {binding.network_name: {"aliases": [binding.runtime_alias]}},
+        )
 
     def test_mapping_ingress_fails_before_docker_or_authority_resolution(self) -> None:
         runner = mock.Mock()
@@ -476,9 +487,15 @@ class SafeComposeDriverTests(unittest.TestCase):
                 service = document["services"]["runtime"]
                 if name == "health_disable":
                     service["healthcheck"]["disable"] = True
-                elif name == "network_alias":
+                elif name == "network_wrong_alias":
                     network = next(iter(service["networks"]))
                     service["networks"][network] = {"aliases": ["platform-control"]}
+                elif name == "network_missing_alias":
+                    network = next(iter(service["networks"]))
+                    service["networks"][network] = {}
+                elif name == "network_extra_alias":
+                    network = next(iter(service["networks"]))
+                    service["networks"][network]["aliases"].append("attacker")
                 elif name == "bind_propagation":
                     service["volumes"][0]["bind"]["propagation"] = "rshared"
                 elif name == "network_attachable":
@@ -492,11 +509,84 @@ class SafeComposeDriverTests(unittest.TestCase):
 
         for name in (
             "health_disable",
-            "network_alias",
+            "network_wrong_alias",
+            "network_missing_alias",
+            "network_extra_alias",
             "bind_propagation",
             "network_attachable",
             "default_command",
         ):
+            with self.subTest(name=name):
+                runner = DockerRunner(
+                    self.snapshot,
+                    [None],
+                    render_transform=mutation(name),
+                )
+                with (
+                    mock.patch.object(
+                        ActiveLaunchAuthorityLease,
+                        "revalidate_for_runtime_action",
+                    ),
+                    self.assertRaisesRegex(
+                        DriverPolicyError,
+                        "^driver_policy_error$",
+                    ),
+                ):
+                    self.driver(runner).launch(self.snapshot)
+                self.assertFalse(runner.compose_commands("create"))
+
+    def test_actual_render_accepts_only_known_compose_normalizations(self) -> None:
+        def normalize(document_text):
+            document = json.loads(document_text)
+            for definition in document["networks"].values():
+                definition["ipam"] = {}
+            for mount in document["services"]["runtime"]["volumes"]:
+                if mount["read_only"] is False:
+                    del mount["read_only"]
+            service = document["services"]["runtime"]
+            service["mem_limit"] = str(service["mem_limit"])
+            return json.dumps(document)
+
+        created = _container_document(self.snapshot, status="created")
+        observed = _container_document(self.snapshot)
+        runner = DockerRunner(
+            self.snapshot,
+            [None, None, created, created, observed],
+            render_transform=normalize,
+        )
+        with mock.patch.object(
+            ActiveLaunchAuthorityLease,
+            "revalidate_for_runtime_action",
+        ):
+            result = self.driver(runner).launch(self.snapshot)
+
+        self.assertIs(result.state, DriverState.RUNNING)
+        self.assertEqual(len(runner.compose_commands("create")), 1)
+
+    def test_actual_render_rejects_behavioral_compose_network_and_mount_changes(
+        self,
+    ) -> None:
+        def mutation(name):
+            def transform(document_text):
+                document = json.loads(document_text)
+                service = document["services"]["runtime"]
+                if name == "network_ipam":
+                    network = next(iter(document["networks"]))
+                    document["networks"][network]["ipam"] = {
+                        "config": [{"subnet": "10.0.0.0/24"}]
+                    }
+                elif name == "readonly_omitted":
+                    mount = next(
+                        value for value in service["volumes"] if value["read_only"]
+                    )
+                    del mount["read_only"]
+                elif name == "memory_suffix":
+                    service["mem_limit"] = "512m"
+                return json.dumps(document)
+
+            return transform
+
+        for name in ("network_ipam", "readonly_omitted", "memory_suffix"):
             with self.subTest(name=name):
                 runner = DockerRunner(
                     self.snapshot,

@@ -353,6 +353,37 @@ class SecretPathEnvironmentBinding(_StrictValue):
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeNetworkBinding(_StrictValue):
+    role: str
+    network_name: str
+    runtime_alias: str
+    policy_digest: str
+    internal: bool
+    requires_upstream_access: bool
+    requires_platform_control: bool
+
+    @classmethod
+    def model_validate(cls, value: object) -> "RuntimeNetworkBinding":
+        if type(value) is cls:
+            return value
+        raise DriverValidationError()
+
+    def __post_init__(self) -> None:
+        for value in (self.role, self.network_name, self.runtime_alias):
+            _require_identifier(value)
+        if (
+            type(self.policy_digest) is not str
+            or _DIGEST.fullmatch(self.policy_digest) is None
+            or type(self.internal) is not bool
+            or type(self.requires_upstream_access) is not bool
+            or type(self.requires_platform_control) is not bool
+            or self.internal is self.requires_upstream_access
+            or (self.role == "access" and not self.requires_platform_control)
+        ):
+            raise DriverValidationError()
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeUser(_StrictValue):
     uid: int
     gid: int
@@ -399,6 +430,7 @@ class LaunchSnapshot(_StrictValue):
     internal_ports: tuple[int, ...]
     health_profile: HealthProfile
     resource_limits: ResourceLimits
+    network_bindings: tuple[RuntimeNetworkBinding, ...]
 
     @property
     def secret_path_environment(
@@ -493,6 +525,21 @@ class LaunchSnapshot(_StrictValue):
         if any(type(port) is not int or port < 1 or port > 65535 for port in ports):
             raise DriverValidationError()
         if ports != tuple(sorted(set(ports))):
+            raise DriverValidationError()
+
+        network_bindings = _require_tuple(self.network_bindings, allow_empty=False)
+        if any(
+            type(binding) is not RuntimeNetworkBinding
+            for binding in network_bindings
+        ):
+            raise DriverValidationError()
+        binding_roles = tuple(binding.role for binding in network_bindings)
+        binding_names = tuple(binding.network_name for binding in network_bindings)
+        if (
+            binding_roles != tuple(sorted(set(binding_roles)))
+            or len(binding_names) != len(set(binding_names))
+            or tuple(sorted(binding_names)) != self.identity.network_names
+        ):
             raise DriverValidationError()
 
 

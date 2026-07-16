@@ -220,7 +220,13 @@ def _render_snapshot_policy(
     )
 
 
-def _compose_document(rendered: RenderedContainerPolicy) -> str:
+def _compose_document(
+    rendered: RenderedContainerPolicy,
+    snapshot: LaunchSnapshot,
+) -> str:
+    bindings = {binding.network_name: binding for binding in snapshot.network_bindings}
+    if tuple(sorted(bindings)) != rendered.network_names:
+        raise DriverPolicyError()
     service = {
         "cap_drop": list(rendered.cap_drop),
         "command": [],
@@ -239,7 +245,10 @@ def _compose_document(rendered: RenderedContainerPolicy) -> str:
         "image": rendered.image_id,
         "labels": {label.name: label.value for label in rendered.labels},
         "mem_limit": rendered.resource_limits.memory_bytes,
-        "networks": {name: None for name in rendered.network_names},
+        "networks": {
+            name: {"aliases": [bindings[name].runtime_alias]}
+            for name in rendered.network_names
+        },
         "pids_limit": rendered.resource_limits.pids_limit,
         "privileged": False,
         "pull_policy": "never",
@@ -313,9 +322,11 @@ def _parse_actual_render(
         definition = actual_network_definitions[name]
         if (
             type(definition) is not dict
-            or set(definition) != {"external", "name"}
+            or set(definition)
+            not in ({"external", "name"}, {"external", "ipam", "name"})
             or definition.get("external") is not True
             or definition.get("name") != name
+            or ("ipam" in definition and definition["ipam"] != {})
         ):
             raise DriverPolicyError()
     expected_mounts = {str(mount.target): mount for mount in expected.mounts}
@@ -324,18 +335,19 @@ def _parse_actual_render(
         raise DriverPolicyError()
     actual_mounts = []
     for raw_mount in raw_mounts:
-        if (
-            type(raw_mount) is not dict
-            or set(raw_mount) != {"bind", "read_only", "source", "target", "type"}
-            or raw_mount.get("type") != "bind"
-        ):
+        if type(raw_mount) is not dict or raw_mount.get("type") != "bind":
             raise DriverPolicyError()
         source = raw_mount.get("source")
         target = raw_mount.get("target")
         expected_mount = expected_mounts.get(target)
         bind = raw_mount.get("bind")
+        expected_keys = {"bind", "source", "target", "type"}
+        if expected_mount is not None and expected_mount.read_only:
+            expected_keys.add("read_only")
         if (
             expected_mount is None
+            or set(raw_mount) not in (expected_keys, expected_keys | {"read_only"})
+            or raw_mount.get("read_only", False) is not expected_mount.read_only
             or type(source) is not str
             or type(bind) is not dict
             or set(bind) != {"create_host_path"}
@@ -348,7 +360,7 @@ def _parse_actual_render(
                 expected_mount.role,
                 Path(source),
                 PurePosixPath(target),
-                raw_mount.get("read_only"),
+                raw_mount.get("read_only", False),
             )
         )
 
@@ -363,9 +375,13 @@ def _parse_actual_render(
         or type(networks) is not dict
     ):
         raise DriverPolicyError()
+    expected_network_attachments = {
+        binding.network_name: {"aliases": [binding.runtime_alias]}
+        for binding in snapshot.network_bindings
+    }
     if (
         set(health) != {"interval", "retries", "start_period", "test", "timeout"}
-        or any(value not in (None, {}) for value in networks.values())
+        or networks != expected_network_attachments
         or ("name" in document and document["name"] != snapshot.identity.project_name)
     ):
         raise DriverPolicyError()
@@ -380,6 +396,13 @@ def _parse_actual_render(
         cpu_millis = int(Decimal(str(service.get("cpus"))) * 1000)
     except (InvalidOperation, ValueError):
         raise DriverPolicyError() from None
+    memory_bytes = service.get("mem_limit")
+    if type(memory_bytes) is str:
+        if not memory_bytes.isascii() or not memory_bytes.isdecimal():
+            raise DriverPolicyError()
+        memory_bytes = int(memory_bytes)
+    if type(memory_bytes) is not int or memory_bytes <= 0:
+        raise DriverPolicyError()
 
     rendered = RenderedContainerPolicy(
         identity=snapshot.identity,
@@ -406,7 +429,7 @@ def _parse_actual_render(
         ),
         resource_limits=snapshot.resource_limits.__class__(
             cpu_millis=cpu_millis,
-            memory_bytes=service.get("mem_limit"),
+            memory_bytes=memory_bytes,
             pids_limit=service.get("pids_limit"),
         ),
         network_names=tuple(sorted(networks)),
@@ -535,7 +558,7 @@ class SafeComposeRuntimeDriver:
                 compose_command=(str(self._compose_executable),),
                 compose_files=(),
                 profiles=(),
-                override=_compose_document(expected_render),
+                override=_compose_document(expected_render, snapshot),
                 environment=self._environment,
                 validate_pre_render=self._validate_compose_launch_context,
                 validate_rendered_snapshot=validate_actual,

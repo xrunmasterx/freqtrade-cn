@@ -21,6 +21,7 @@ from tools.runtime_driver import (
     LaunchSnapshot,
     ReadOnlyMount,
     ResourceLimits,
+    RuntimeNetworkBinding,
     RuntimeUser,
     SecretMount,
     WritableStateMount,
@@ -714,6 +715,128 @@ class RuntimeSnapshotCompilerTests(unittest.TestCase):
         self.assertEqual(first.internal_ports, (8080,))
         self.assertEqual(first.health_profile, authority.policies.health_profile)
         self.assertEqual(first.resource_limits, authority.policies.resource_limits)
+        self.assertEqual(len(first.network_bindings), 1)
+        binding = first.network_bindings[0]
+        self.assertIsInstance(binding, RuntimeNetworkBinding)
+        self.assertEqual(binding.role, "access")
+        self.assertEqual(binding.network_name, first.identity.network_names[0])
+        alias_digest = hashlib.sha256(
+            f"{INSTANCE_ID}\0{ATTEMPT_ID}".encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(binding.runtime_alias, f"runtime-{alias_digest[:24]}")
+        self.assertRegex(binding.policy_digest, r"^[0-9a-f]{64}$")
+        self.assertFalse(binding.internal)
+        self.assertTrue(binding.requires_upstream_access)
+        self.assertTrue(binding.requires_platform_control)
+
+    def test_network_name_is_instance_stable_and_alias_is_attempt_unique(self) -> None:
+        first_authority = valid_authority()
+        first = compile_launch_snapshot(first_authority)
+        attempt_id = "attempt-2"
+        second_authority = dataclasses.replace(
+            first_authority,
+            attempt=dataclasses.replace(
+                first_authority.attempt,
+                attempt_id=attempt_id,
+                container_identity="runtime-paper-probe-1-worker-attempt-2",
+            ),
+            state=dataclasses.replace(first_authority.state, attempt_id=attempt_id),
+            materials=tuple(
+                dataclasses.replace(material, attempt_id=attempt_id)
+                for material in first_authority.materials
+            ),
+            secrets=tuple(
+                dataclasses.replace(secret, attempt_id=attempt_id)
+                for secret in first_authority.secrets
+            ),
+            identity=dataclasses.replace(
+                first_authority.identity,
+                attempt_id=attempt_id,
+                container_name="runtime-paper-probe-1-worker-attempt-2",
+            ),
+        )
+        second = compile_launch_snapshot(second_authority)
+
+        self.assertEqual(
+            first.network_bindings[0].network_name,
+            second.network_bindings[0].network_name,
+        )
+        self.assertNotEqual(
+            first.network_bindings[0].runtime_alias,
+            second.network_bindings[0].runtime_alias,
+        )
+        self.assertEqual(
+            first.network_bindings[0].policy_digest,
+            second.network_bindings[0].policy_digest,
+        )
+        self.assertNotEqual(
+            first.launch_authority_digest,
+            second.launch_authority_digest,
+        )
+
+    def test_network_bindings_support_role_and_name_orders_that_differ(self) -> None:
+        from tools.runtime_snapshot import (
+            _derived_network_bindings,
+            _derived_network_names,
+        )
+
+        authority = valid_authority()
+        access = dataclasses.replace(
+            authority.policies.network_rules[0],
+            prefix="zzz-",
+        )
+        private = NetworkRule(
+            role="private",
+            identity_source=NetworkIdentitySource.INSTANCE_ID,
+            derivation=NetworkNameDerivation.SHA256_PREFIX_V1,
+            prefix="aaa-",
+            digest_characters=24,
+            suffix="-private",
+            internal=True,
+            requires_upstream_access=False,
+            requires_platform_control=False,
+        )
+        digest = hashlib.sha256(INSTANCE_ID.encode("utf-8")).hexdigest()[:24]
+        authority = dataclasses.replace(
+            authority,
+            policies=dataclasses.replace(
+                authority.policies,
+                network_rules=(access, private),
+            ),
+            identity=dataclasses.replace(
+                authority.identity,
+                network_names=(f"aaa-{digest}-private", f"zzz-{digest}-access"),
+            ),
+        )
+
+        bindings = _derived_network_bindings(authority)
+
+        self.assertEqual(
+            tuple(binding.role for binding in bindings),
+            ("access", "private"),
+        )
+        self.assertEqual(
+            _derived_network_names(authority),
+            (f"aaa-{digest}-private", f"zzz-{digest}-access"),
+        )
+
+    def test_launch_authority_digest_binds_compiled_network_alias(self) -> None:
+        authority = valid_authority()
+        original = compile_launch_snapshot(authority)
+        with mock.patch(
+            "tools.runtime_snapshot._runtime_alias",
+            return_value="runtime-different-alias",
+        ):
+            changed = compile_launch_snapshot(authority)
+
+        self.assertNotEqual(
+            original.network_bindings[0].runtime_alias,
+            changed.network_bindings[0].runtime_alias,
+        )
+        self.assertNotEqual(
+            original.launch_authority_digest,
+            changed.launch_authority_digest,
+        )
 
     def test_compilation_and_validation_perform_no_io(self) -> None:
         authority = valid_authority()
@@ -755,6 +878,19 @@ class RuntimeSnapshotCompilerTests(unittest.TestCase):
             "^driver_policy_error$",
         ):
             validate_launch_snapshot(changed, authority)
+
+        changed_binding = dataclasses.replace(
+            snapshot.network_bindings[0],
+            runtime_alias="runtime-attacker",
+        )
+        with self.assertRaisesRegex(
+            DriverPolicyError,
+            "^driver_policy_error$",
+        ):
+            validate_launch_snapshot(
+                dataclasses.replace(snapshot, network_bindings=(changed_binding,)),
+                authority,
+            )
 
     def test_rejects_legacy_spec_without_strategy_class(self) -> None:
         authority = valid_authority()

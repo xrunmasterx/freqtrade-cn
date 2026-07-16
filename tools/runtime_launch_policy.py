@@ -305,8 +305,12 @@ class NetworkRule:
             )
         ):
             raise ValueError("network flags must be booleans")
-        if self.internal and self.requires_upstream_access:
-            raise ValueError("an internal network cannot require upstream access")
+        if self.internal is self.requires_upstream_access:
+            raise ValueError(
+                "network isolation must match its upstream access requirement"
+            )
+        if self.role == "access" and not self.requires_platform_control:
+            raise ValueError("the access network must include platform control")
 
 
 @dataclass(frozen=True, slots=True)
