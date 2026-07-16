@@ -2,9 +2,9 @@
 
 **Acceptance date:** 2026-07-16
 
-**Status:** Local implementation, independent review, and local automated acceptance
-complete. Backend publication, Root gitlink integration, GitHub Root Safety, and merge
-remain pending.
+**Status:** Local implementation, independent review, local automated acceptance, Backend
+publication, and Root gitlink integration complete. Root publication, GitHub Root Safety,
+and Root merge remain pending.
 
 **Scope:** Phase 2C Task 4A, closed launch authority, provider leases, and pure
 `LaunchSnapshot` compilation.
@@ -19,6 +19,9 @@ feat(runtime): persist launch strategy authority
 
 Root 793d54fee4ccec109c0e0be2a48d349684fec493
 feat(runtime): compile closed launch snapshots
+
+Root integration eb05fcb215f1988bb0bc9c255d2825ee1e881ef7
+chore(runtime): integrate launch authority backend
 ```
 
 Task 4A now provides:
@@ -109,17 +112,20 @@ implementation was missing. Windows ACL and share-lock counterparts ran on this 
 
 ## 5. Publication boundary
 
-This report is local evidence only. Task 4A is not yet published or merged.
+Backend PR [#4](https://github.com/xrunmasterx/freqtrade/pull/4) merged the reviewed
+Backend head `d2843d0d4b2fad53b0fcbdf204de8f29d6889355` into Backend `main` as merge commit
+`637fcc661b650b10eec5ad1ebca1a5b6fa29c069`. The Root integration commit records that
+exact Backend `main` commit as its `freqtrade` gitlink.
+
+The Root changes are still local evidence only. Task 4A is not yet accepted by Root Safety
+or merged to Root `main`.
 
 The required publication sequence is:
 
-1. commit and publish the reviewed Backend changes;
-2. merge the exact Backend commit to Backend `main`;
-3. update the Root `freqtrade` gitlink to that exact Backend commit;
-4. commit and publish the reviewed Root implementation and this report;
-5. run Root Safety against the exact Root PR head with no PostgreSQL skip;
-6. merge Root only after the exact-head Root Safety result is green;
-7. perform a fresh recursive checkout of merged Root `main` and rerun the final static
+1. publish the reviewed Root implementation, integration commit, and this report;
+2. run Root Safety against the exact Root PR head with no PostgreSQL skip;
+3. merge Root only after the exact-head Root Safety result is green;
+4. perform a fresh recursive checkout of merged Root `main` and rerun the final static
    checkout checks.
 
 Task 4B may begin locally only after Task 4A is committed on its isolated branch; production
