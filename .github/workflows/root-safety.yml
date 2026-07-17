@@ -1144,10 +1144,6 @@ jobs:
         run: |
           set -euo pipefail
           platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
-          docker network disconnect bridge platform-postgres-ci
-          database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
-          printf 'platform PostgreSQL networks after isolation: %s\n' "${database_networks}"
-          test "${database_networks}" = "freqtrade-platform-ci"
           docker exec --interactive platform-postgres-ci \
             psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'
           CREATE ROLE platform_ci_control_inbound NOLOGIN;
@@ -1855,6 +1851,11 @@ jobs:
           expect_role_denied platform_supervisor delegated-sequence "SELECT setval('public.platform_ci_acl_sequence', 1)"
           expect_role_denied platform_control private-schema "SELECT * FROM platform_ci_private.probe"
           expect_role_denied platform_supervisor private-table "SELECT * FROM platform_ci_private.probe"
+
+          docker network disconnect bridge platform-postgres-ci
+          database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
+          printf 'platform PostgreSQL networks after isolation: %s\n' "${database_networks}"
+          test "${database_networks}" = "freqtrade-platform-ci"
 
           docker create \
             --name platform-control-ci \

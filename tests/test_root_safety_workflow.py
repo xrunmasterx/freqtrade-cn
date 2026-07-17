@@ -665,6 +665,8 @@ WORKFLOW_EXECUTABLE_CONTRACT = {
         'expect_role_denied platform_control database-create "CREATE SCHEMA',
         'expect_role_denied platform_control delegated-table "DELETE FROM public.platform_ci_acl_table"',
         'expect_role_denied platform_supervisor delegated-sequence "SELECT setval(',
+        'expect_role_denied platform_control private-schema "SELECT * FROM platform_ci_private.probe"',
+        'expect_role_denied platform_supervisor private-table "SELECT * FROM platform_ci_private.probe"',
         'query_status="$(curl --config "${platform_ci_dir}/query-rejection.curl")"',
         'grep --quiet --fixed-strings --file "${platform_ci_dir}/query-sentinel"',
         "--user 1000:1000",
@@ -813,6 +815,44 @@ def validate_root_safety_workflow(workflow: str) -> list[str]:
             ]:
                 errors.append(
                     "Verify platform-control least privilege: network mutation inventory differs"
+                )
+            supervisor_tcp_positions = [
+                executable_statement_position(statements, "supervisor_psql <<'SQL'"),
+                executable_statement_position(
+                    statements, "PLATFORM_TEST_SUPERVISOR_POSTGRES_URL="
+                ),
+                *(
+                    executable_statement_position(statements, statement)
+                    for statement in statements
+                    if statement.startswith("expect_role_denied platform_supervisor ")
+                ),
+            ]
+            disconnect_position = executable_statement_position(
+                statements, "docker network disconnect bridge platform-postgres-ci"
+            )
+            isolated_inventory_position = executable_statement_position(
+                statements, "database_networks="
+            )
+            isolated_assertion_position = executable_statement_position(
+                statements, 'test "${database_networks}" = "freqtrade-platform-ci"'
+            )
+            control_create_position = executable_statement_position(
+                statements, "docker create"
+            )
+            if (
+                not supervisor_tcp_positions
+                or any(position < 0 for position in supervisor_tcp_positions)
+                or disconnect_position < 0
+                or max(supervisor_tcp_positions) >= disconnect_position
+                or not (
+                    disconnect_position
+                    < isolated_inventory_position
+                    < isolated_assertion_position
+                    < control_create_position
+                )
+            ):
+                errors.append(
+                    "Verify platform-control least privilege: database isolation order differs"
                 )
         if step_name == SECRET_SCAN_STEP:
             if named_workflow_step(workflow, step_name) != REVIEWED_SECRET_SCAN_STEP:
@@ -3158,6 +3198,43 @@ sleep() {
                     "Verify platform-control least privilege: network mutation inventory differs",
                     validate_root_safety_workflow(mutated),
                 )
+
+        final_tcp_probe = (
+            'expect_role_denied platform_supervisor private-table '
+            '"SELECT * FROM platform_ci_private.probe"'
+        )
+        disconnect = "docker network disconnect bridge platform-postgres-ci"
+        reordered = workflow.replace(
+            final_tcp_probe, "database-isolation-order-placeholder", 1
+        )
+        reordered = reordered.replace(disconnect, final_tcp_probe, 1)
+        reordered = reordered.replace(
+            "database-isolation-order-placeholder", disconnect, 1
+        )
+        self.assertIn(
+            "Verify platform-control least privilege: database isolation order differs",
+            validate_root_safety_workflow(reordered),
+        )
+
+        removed_final_probe = workflow.replace(f"          {final_tcp_probe}\n", "", 1)
+        self.assertNotEqual(removed_final_probe, workflow)
+        self.assertTrue(validate_root_safety_workflow(removed_final_probe))
+
+        delegated_probe = (
+            'expect_role_denied platform_supervisor delegated-sequence '
+            '"SELECT setval(\'public.platform_ci_acl_sequence\', 1)"'
+        )
+        moved_probe = workflow.replace(f"          {delegated_probe}\n", "", 1)
+        moved_probe = moved_probe.replace(
+            f"          {disconnect}\n",
+            f"          {disconnect}\n          {delegated_probe}\n",
+            1,
+        )
+        self.assertNotEqual(moved_probe, workflow)
+        self.assertIn(
+            "Verify platform-control least privilege: database isolation order differs",
+            validate_root_safety_workflow(moved_probe),
+        )
 
     def test_platform_cleanup_removes_exact_resources_and_asserts_no_volume_drift(
         self,
