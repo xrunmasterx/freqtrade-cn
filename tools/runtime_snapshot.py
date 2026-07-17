@@ -50,7 +50,7 @@ _LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,127}")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _MATERIAL_PROVIDER_ID = "committed-paper-probe-material-v1"
 _STATE_PROVIDER_ID = "managed-local-v1"
-_SECRET_PROVIDER_ID = "local-file-secret-v1"
+_SECRET_PROVIDER_ID = "local-file-v1"
 _NETWORK_ALIAS_DERIVATION = "sha256-instance-nul-attempt-v1"
 _MATERIAL_PATHS = {
     "runtime_config": "ft_userdata/user_data/config.example.json",
@@ -206,6 +206,7 @@ class ResolvedAttemptAuthority:
     runtime_spec_payload_digest: str
     adapter_template_revision_id: str
     state_allocation_id: str
+    state_allocation_generation: int
     resolved_secret_versions: tuple[ResolvedSecretVersionAuthority, ...]
     image_id: str
     root_commit: str
@@ -227,6 +228,11 @@ class ResolvedAttemptAuthority:
         ):
             _require_identifier(value)
         _require_digest(self.runtime_spec_payload_digest)
+        if (
+            type(self.state_allocation_generation) is not int
+            or self.state_allocation_generation < 1
+        ):
+            raise DriverValidationError()
         if type(self.image_id) is not str or _IMAGE_ID.fullmatch(self.image_id) is None:
             raise DriverValidationError()
         for value in (
@@ -642,6 +648,7 @@ def _validate_authority(authority: LaunchCompilationAuthority) -> None:
     _policy(state.instance_id == attempt.instance_id == identity.instance_id)
     _policy(state.state_allocation_id == spec.state_allocation_id)
     _policy(state.state_allocation_id == attempt.state_allocation_id)
+    _policy(state.generation == attempt.state_allocation_generation)
     _policy(state.state_allocation_id == identity.state_allocation_id)
     _policy(state.layout_id == spec.state_layout_id == policies.state_layout_id)
     _policy(state.provider_id == _STATE_PROVIDER_ID)
@@ -865,6 +872,7 @@ def _authority_projection(
             "runtime_spec_payload_digest": attempt.runtime_spec_payload_digest,
             "adapter_template_revision_id": attempt.adapter_template_revision_id,
             "state_allocation_id": attempt.state_allocation_id,
+            "state_allocation_generation": attempt.state_allocation_generation,
             "resolved_secret_versions": [
                 {
                     "secret_reference_id": value.secret_reference_id,

@@ -23,7 +23,7 @@ _MINIMUM_CLASS_LENGTHS: Final = {
     "ws_token": 32,
 }
 _MAXIMUM_MATERIAL_LENGTH: Final = 4096
-_PROVIDER_ID: Final = "local-file-secret-v1"
+_PROVIDER_ID: Final = "local-file-v1"
 _ADDITIONAL_LINE_BOUNDARIES: Final = (
     "\v",
     "\f",

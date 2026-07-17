@@ -193,6 +193,17 @@ class FakeLogSpawner:
 
 
 class OfflineIdentityValueTests(unittest.TestCase):
+    def test_identity_accepts_sha1_and_sha256_git_object_ids(self) -> None:
+        for length in (40, 64):
+            with self.subTest(length=length):
+                value = identity(
+                    root_commit="a" * length,
+                    backend_commit="b" * length,
+                    frontend_commit="c" * length,
+                    strategies_commit="d" * length,
+                )
+                self.assertEqual(len(value.root_commit), length)
+
     def test_identity_is_frozen_strict_and_canonical(self) -> None:
         value = identity()
         canonical = value.to_canonical_bytes()
@@ -240,6 +251,8 @@ class OfflineIdentityValueTests(unittest.TestCase):
             {"network_names": ("z", "a")},
             {"network_names": ("same", "same")},
             {"root_commit": "A" * 40},
+            {"root_commit": "a" * 41},
+            {"root_commit": "a" * 63},
             {"compose_service": "other"},
             {"schema_version": True},
         ):

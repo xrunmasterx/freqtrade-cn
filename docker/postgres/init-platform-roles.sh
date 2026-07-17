@@ -667,6 +667,26 @@ WHERE to_regclass(format('public.%I', table_name)) IS NOT NULL
 \gexec
 
 SELECT format(
+    'GRANT SELECT ON TABLE public.%I TO platform_supervisor',
+    table_name
+)
+FROM (VALUES
+    ('alembic_version'),
+    ('adapter_template_revisions'),
+    ('state_allocations'),
+    ('secret_references'),
+    ('secret_version_metadata'),
+    ('runtime_spec_revisions')
+) AS supervisor_authority(table_name)
+WHERE to_regclass(format('public.%I', table_name)) IS NOT NULL
+\gexec
+
+SELECT 'GRANT UPDATE (status, ready_at) '
+       'ON TABLE public.state_allocations TO platform_supervisor'
+WHERE to_regclass('public.state_allocations') IS NOT NULL
+\gexec
+
+SELECT format(
     'GRANT INSERT ON TABLE public.%I TO platform_control',
     table_name
 )

@@ -38,7 +38,7 @@ PAPER_PROBE_INSTANCE_ID = "phase2-spot-paper-probe"
 PAPER_PROBE_ATTEMPT_ID = "phase2-offline-attempt"
 PAPER_PROBE_STATE_ALLOCATION_ID = "state-phase2-spot-paper-probe-v1"
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
-_COMMIT = re.compile(r"[0-9a-f]{40}")
+_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _SECRET_REQUIREMENTS = (
     SecretMaterialRequirement(
         "secret-phase2-spot-paper-probe-api-password-v1",
@@ -234,6 +234,7 @@ def verify_offline_paper_probe(
             runtime_spec_payload_digest=spec.payload_digest,
             adapter_template_revision_id=spec.adapter_template_revision_id,
             state_allocation_id=spec.state_allocation_id,
+            state_allocation_generation=state.generation,
             resolved_secret_versions=tuple(
                 ResolvedSecretVersionAuthority(
                     requirement.reference_id,

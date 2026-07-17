@@ -45,6 +45,31 @@ stable error `runtime_supervisor_not_enabled`. They must do so before opening a
 database connection, claiming a job, preparing state or secrets, or invoking a
 runtime Driver. Operators must not work around this gate.
 
+## Task 7B internal persisted-authority assembly seam
+
+Task 7B adds a typed internal assembly seam for tests. Its fixed construction order is
+the Supervisor database identity/schema gate, the Backend runtime repository, persisted
+authority preparation, an injected Driver, the access-network gate, the Reconciler and
+the serial Daemon. A schema mismatch or database outage therefore stops before either
+the Repository or Driver is constructed. The seam accepts typed factories and ports;
+it does not accept a database URL, Docker mapping, caller-provided runtime names or a
+deserialized launch snapshot.
+
+This internal seam is deliberately not imported or called by the public CLI. The
+machine-readable boundary remains:
+
+```text
+PRODUCTION_ASSEMBLY_ENABLED = False
+INTERNAL_PERSISTED_ASSEMBLY_SEAM_AVAILABLE = True
+HOST_RUNTIME_MUTATION_BRIDGE_ENABLED = False
+```
+
+The first flag is the public cutover authority. The second is test evidence only. The
+third records that the reviewed host runtime-mutation bridge is not yet deployable. The
+active launch authority resolver exists only inside the typed internal seam until that
+bridge is separately reviewed. No combination of the latter two flags
+authorizes Docker lifecycle activity, exchange connectivity or trading.
+
 ## Lifecycle CLI boundary
 
 `start`, `stop`, `retry` and `retire` retain their closed typed argument
@@ -153,6 +178,7 @@ exist, blocker 4 remains open and the current entry points stay disabled.
 | Create a typed lifecycle database job | Disabled, stable fail-closed |
 | Read paper-probe registration status | Supported |
 | Read lifecycle Job status | Not supported in Task 7A |
+| Assemble typed persisted dependencies in an isolated test | Supported; no runtime action |
 | Run the production Supervisor loop | Disabled, stable fail-closed |
 | Reconcile one production job | Disabled, stable fail-closed |
 | Online paper connectivity | Separately authorized and not part of Task 7A |

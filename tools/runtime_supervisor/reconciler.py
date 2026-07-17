@@ -63,7 +63,7 @@ _HEALTH_HEALTHY = "health_probe_healthy"
 _HEALTH_UNHEALTHY = "health_probe_unhealthy"
 _HEALTH_INTERRUPTED = "health_probe_interrupted"
 _DIGEST = re.compile(r"[0-9a-f]{64}")
-_COMMIT = re.compile(r"[0-9a-f]{40}")
+_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
 
 class PersistedHealthResultLike(Protocol):
@@ -266,6 +266,12 @@ class PreparationPort(Protocol):
         secrets: object,
     ) -> LaunchSnapshot: ...
 
+    def revalidate_for_runtime_action(
+        self,
+        revalidated: RevalidatedAttempt,
+        snapshot: LaunchSnapshot,
+    ) -> None: ...
+
     def compile_access_network_plan(
         self,
         revalidated: RevalidatedAttempt,
@@ -353,6 +359,16 @@ class RuntimeSupervisorReconciler:
         ):
             return self._block(job, active_binding, "persisted_identity_mismatch")
 
+        if status in _TERMINAL_ATTEMPT_STATUSES:
+            if job.action is ReconciliationAction.STOP:
+                return self._block(job, None, "stop_without_active_attempt")
+            observed = self._driver.inspect(expected)
+            if observed.state is not DriverState.ABSENT:
+                return self._block(job, None, "terminal_runtime_present")
+            return self._launch_candidate(job, latest, expected)
+        if status not in _ACTIVE_ATTEMPT_STATUSES:
+            return self._block(job, None, "attempt_status_invalid")
+
         try:
             revalidated = self._preparation.revalidate(
                 job, latest.attempt_id, latest
@@ -366,48 +382,34 @@ class RuntimeSupervisorReconciler:
         if revalidated.identity != expected:
             return self._block(job, active_binding, "revalidated_identity_mismatch")
 
-        if status in _ACTIVE_ATTEMPT_STATUSES:
-            if revalidated.resolved_material != latest.resolved_material:
-                return self._block(
-                    job,
-                    latest.attempt_id,
-                    "revalidated_material_mismatch",
-                )
-            if (
-                job.action is ReconciliationAction.START
-                and status not in _START_TRANSITIONABLE_ATTEMPT_STATUSES
-            ):
-                return self._block(
-                    job,
-                    latest.attempt_id,
-                    "active_attempt_status_inconsistent",
-                )
-            try:
-                return self._reconcile_active(job, revalidated, latest)
-            except DriverTransportError:
-                return self._block(
-                    job, latest.attempt_id, "runtime_transport_error"
-                )
-            except DriverIdentityMismatch:
-                return self._block(
-                    job,
-                    latest.attempt_id,
-                    "runtime_identity_mismatch",
-                    ReconciliationDecision.IDENTITY_MISMATCH,
-                )
-            except DriverPolicyError:
-                return self._block(
-                    job, latest.attempt_id, "runtime_policy_invalid"
-                )
-        if status not in _TERMINAL_ATTEMPT_STATUSES:
-            return self._block(job, None, "attempt_status_invalid")
-
-        if job.action is ReconciliationAction.STOP:
-            return self._block(job, None, "stop_without_active_attempt")
-        observed = self._driver.inspect(expected)
-        if observed.state is not DriverState.ABSENT:
-            return self._block(job, None, "terminal_runtime_present")
-        return self._launch_candidate(job, latest, expected)
+        if revalidated.resolved_material != latest.resolved_material:
+            return self._block(
+                job,
+                latest.attempt_id,
+                "revalidated_material_mismatch",
+            )
+        if (
+            job.action is ReconciliationAction.START
+            and status not in _START_TRANSITIONABLE_ATTEMPT_STATUSES
+        ):
+            return self._block(
+                job,
+                latest.attempt_id,
+                "active_attempt_status_inconsistent",
+            )
+        try:
+            return self._reconcile_active(job, revalidated, latest)
+        except DriverTransportError:
+            return self._block(job, latest.attempt_id, "runtime_transport_error")
+        except DriverIdentityMismatch:
+            return self._block(
+                job,
+                latest.attempt_id,
+                "runtime_identity_mismatch",
+                ReconciliationDecision.IDENTITY_MISMATCH,
+            )
+        except DriverPolicyError:
+            return self._block(job, latest.attempt_id, "runtime_policy_invalid")
 
     def _reconcile_active(
         self,
@@ -523,140 +525,152 @@ class RuntimeSupervisorReconciler:
         terminal_identity: DriverIdentity | None,
     ) -> ReconciliationOutcome:
         identity = revalidated.identity
-        state = self._preparation.resolve_state(revalidated)
-        with self._preparation.resolve_secrets(revalidated) as secrets:
-            snapshot = self._preparation.compile_snapshot(revalidated, state, secrets)
-            if type(snapshot) is not LaunchSnapshot:
-                raise TypeError("launch snapshot must be a LaunchSnapshot")
-            if snapshot.identity != identity:
-                return self._block(
-                    job,
-                    None,
-                    "compiled_snapshot_identity_mismatch",
-                    ReconciliationDecision.IDENTITY_MISMATCH,
-                )
-            if (
-                snapshot.launch_authority_digest
-                != revalidated.provenance.launch_authority_digest
-            ):
-                return self._block(
-                    job,
-                    None,
-                    "compiled_snapshot_authority_mismatch",
-                    ReconciliationDecision.IDENTITY_MISMATCH,
-                )
-
-            candidate_observed = self._driver.inspect(identity)
-            if candidate_observed.state is not DriverState.ABSENT:
-                return self._block(job, None, "candidate_runtime_occupied")
-            if terminal_latest is not None:
-                if terminal_identity is None:
-                    raise RuntimeError("terminal identity is required")
-                predecessor = self._driver.inspect(terminal_identity)
-                if predecessor.state is not DriverState.ABSENT:
-                    return self._block(job, None, "terminal_runtime_present")
-
-            begun = self._repository.begin_attempt(
-                job.job_id,
-                prepared_attempt_id,
-                revalidated.resolved_material,
-                job.lease_owner,
-                job.lease_generation,
-            )
-            started_at = begun.started_at
-            if not _is_utc_datetime(started_at):
-                return self._block(
-                    job,
-                    identity.attempt_id,
-                    "attempt_start_time_invalid",
-                )
-            try:
-                return self._launch_begun(
-                    job, revalidated, snapshot, started_at
-                )
-            except DriverTransportError:
-                return self._block(
-                    job, identity.attempt_id, "runtime_transport_error"
-                )
-            except DriverIdentityMismatch:
-                return self._block(
-                    job,
-                    identity.attempt_id,
-                    "runtime_identity_mismatch",
-                    ReconciliationDecision.IDENTITY_MISMATCH,
-                )
-            except DriverPolicyError:
-                return self._block(
-                    job, identity.attempt_id, "runtime_policy_invalid"
-                )
-
-    def _launch_begun(
-        self,
-        job: ReconciliationJob,
-        revalidated: RevalidatedAttempt,
-        snapshot: LaunchSnapshot,
-        started_at: datetime,
-    ) -> ReconciliationOutcome:
-        identity = revalidated.identity
-        if not _is_utc_datetime(started_at):
-            raise RuntimeError("begun attempt requires UTC start time")
-        if not self._lease_matches_job(job):
-            return self._block(
-                job,
-                identity.attempt_id,
-                "instance_revision_mismatch",
-            )
+        begun_attempt_id: str | None = None
+        pending_failure: tuple[
+            str | None,
+            str,
+            ReconciliationDecision,
+        ] | None = None
+        observed: DriverInspection | None = None
+        ambiguous_launch = False
+        started_at: datetime | None = None
         try:
-            observed = self._driver.launch(snapshot)
-        except AmbiguousDriverOutcome:
-            try:
-                observed = self._driver.inspect(identity)
-            except DriverTransportError:
-                return self._continue_ambiguous_launch(
-                    job,
+            state = self._preparation.resolve_state(revalidated)
+            with self._preparation.resolve_secrets(revalidated) as secrets:
+                snapshot = self._preparation.compile_snapshot(
                     revalidated,
-                    started_at,
-                    "ambiguous_launch_transport",
+                    state,
+                    secrets,
                 )
-            except (DriverIdentityMismatch, DriverPolicyError):
-                return self._block(
-                    job,
-                    identity.attempt_id,
-                    "ambiguous_launch_identity_mismatch",
-                    ReconciliationDecision.IDENTITY_MISMATCH,
-                )
-            if observed.state is DriverState.ABSENT:
-                return self._continue_ambiguous_launch(
-                    job,
-                    revalidated,
-                    started_at,
-                    "ambiguous_launch_absent",
-                )
+                if type(snapshot) is not LaunchSnapshot:
+                    raise TypeError("launch snapshot must be a LaunchSnapshot")
+                if snapshot.identity != identity:
+                    pending_failure = (
+                        None,
+                        "compiled_snapshot_identity_mismatch",
+                        ReconciliationDecision.IDENTITY_MISMATCH,
+                    )
+                elif (
+                    snapshot.launch_authority_digest
+                    != revalidated.provenance.launch_authority_digest
+                ):
+                    pending_failure = (
+                        None,
+                        "compiled_snapshot_authority_mismatch",
+                        ReconciliationDecision.IDENTITY_MISMATCH,
+                    )
+
+                if pending_failure is None:
+                    candidate_observed = self._driver.inspect(identity)
+                    if candidate_observed.state is not DriverState.ABSENT:
+                        pending_failure = (
+                            None,
+                            "candidate_runtime_occupied",
+                            ReconciliationDecision.FAIL_LATCHED,
+                        )
+                if pending_failure is None and terminal_latest is not None:
+                    if terminal_identity is None:
+                        raise RuntimeError("terminal identity is required")
+                    predecessor = self._driver.inspect(terminal_identity)
+                    if predecessor.state is not DriverState.ABSENT:
+                        pending_failure = (
+                            None,
+                            "terminal_runtime_present",
+                            ReconciliationDecision.FAIL_LATCHED,
+                        )
+
+                if pending_failure is None:
+                    begun = self._repository.begin_attempt(
+                        job.job_id,
+                        prepared_attempt_id,
+                        revalidated.resolved_material,
+                        job.lease_owner,
+                        job.lease_generation,
+                    )
+                    begun_attempt_id = identity.attempt_id
+                    started_at = begun.started_at
+                    if not _is_utc_datetime(started_at):
+                        pending_failure = (
+                            identity.attempt_id,
+                            "attempt_start_time_invalid",
+                            ReconciliationDecision.FAIL_LATCHED,
+                        )
+                    elif not self._lease_matches_job(job):
+                        pending_failure = (
+                            identity.attempt_id,
+                            "instance_revision_mismatch",
+                            ReconciliationDecision.FAIL_LATCHED,
+                        )
+                    else:
+                        try:
+                            self._preparation.revalidate_for_runtime_action(
+                                revalidated,
+                                snapshot,
+                            )
+                            observed = self._driver.launch(snapshot)
+                        except AmbiguousDriverOutcome:
+                            ambiguous_launch = True
         except DriverTransportError:
-            return self._block(
-                job,
-                identity.attempt_id,
-                "runtime_transport_error",
-            )
+            return self._block(job, begun_attempt_id, "runtime_transport_error")
         except DriverIdentityMismatch:
             return self._block(
                 job,
-                identity.attempt_id,
+                begun_attempt_id,
                 "runtime_identity_mismatch",
                 ReconciliationDecision.IDENTITY_MISMATCH,
             )
         except DriverPolicyError:
+            return self._block(job, begun_attempt_id, "runtime_policy_invalid")
+
+        try:
+            if pending_failure is not None:
+                attempt_id, failure_code, decision = pending_failure
+                return self._block(job, attempt_id, failure_code, decision)
+            if not _is_utc_datetime(started_at):
+                raise RuntimeError("begun attempt requires UTC start time")
+            if ambiguous_launch:
+                try:
+                    observed = self._driver.inspect(identity)
+                except DriverTransportError:
+                    return self._continue_ambiguous_launch(
+                        job,
+                        revalidated,
+                        started_at,
+                        "ambiguous_launch_transport",
+                    )
+                except (DriverIdentityMismatch, DriverPolicyError):
+                    return self._block(
+                        job,
+                        identity.attempt_id,
+                        "ambiguous_launch_identity_mismatch",
+                        ReconciliationDecision.IDENTITY_MISMATCH,
+                    )
+                if observed.state is DriverState.ABSENT:
+                    return self._continue_ambiguous_launch(
+                        job,
+                        revalidated,
+                        started_at,
+                        "ambiguous_launch_absent",
+                    )
+            if observed is None:
+                raise RuntimeError("launch observation is required")
+            return self._record_launch_observation(
+                job,
+                revalidated,
+                observed,
+                started_at,
+            )
+        except DriverTransportError:
+            return self._block(job, begun_attempt_id, "runtime_transport_error")
+        except DriverIdentityMismatch:
             return self._block(
                 job,
-                identity.attempt_id,
-                "runtime_policy_invalid",
+                begun_attempt_id,
+                "runtime_identity_mismatch",
+                ReconciliationDecision.IDENTITY_MISMATCH,
             )
-        return self._record_launch_observation(
-            job,
-            revalidated,
-            observed,
-            started_at,
-        )
+        except DriverPolicyError:
+            return self._block(job, begun_attempt_id, "runtime_policy_invalid")
 
     def _record_launch_observation(
         self,

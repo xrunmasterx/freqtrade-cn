@@ -1144,10 +1144,6 @@ jobs:
         run: |
           set -euo pipefail
           platform_ci_dir="${RUNNER_TEMP}/platform-control-ci"
-          docker network disconnect bridge platform-postgres-ci
-          database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
-          printf 'platform PostgreSQL networks after isolation: %s\n' "${database_networks}"
-          test "${database_networks}" = "freqtrade-platform-ci"
           docker exec --interactive platform-postgres-ci \
             psql --username postgres --dbname platform --set ON_ERROR_STOP=on <<'SQL'
           CREATE ROLE platform_ci_control_inbound NOLOGIN;
@@ -1385,6 +1381,12 @@ jobs:
                   ('platform_control', 'runtime_access_requests', true, true, false),
                   ('platform_control', 'runtime_audit_events', true, true, false),
                   ('platform_supervisor', 'platform_catalog_revisions', true, false, false),
+                  ('platform_supervisor', 'alembic_version', true, false, false),
+                  ('platform_supervisor', 'adapter_template_revisions', true, false, false),
+                  ('platform_supervisor', 'state_allocations', true, false, false),
+                  ('platform_supervisor', 'secret_references', true, false, false),
+                  ('platform_supervisor', 'secret_version_metadata', true, false, false),
+                  ('platform_supervisor', 'runtime_spec_revisions', true, false, false),
                   ('platform_supervisor', 'runtime_instances', true, true, true),
                   ('platform_supervisor', 'runtime_attempts', true, true, true),
                   ('platform_supervisor', 'runtime_lifecycle_jobs', true, true, true),
@@ -1415,10 +1417,20 @@ jobs:
                 AND namespace.nspname !~ '^pg_'
                 AND NOT (
                   namespace.nspname = 'public'
-                  AND relation.relname IN (
-                    'platform_catalog_revisions', 'runtime_instances', 'runtime_attempts',
-                    'runtime_lifecycle_jobs', 'runtime_endpoints',
-                    'runtime_access_requests', 'runtime_audit_events'
+                  AND (
+                    relation.relname IN (
+                      'platform_catalog_revisions', 'runtime_instances',
+                      'runtime_attempts', 'runtime_lifecycle_jobs', 'runtime_endpoints',
+                      'runtime_access_requests', 'runtime_audit_events'
+                    )
+                    OR (
+                      role_name = 'platform_supervisor'
+                      AND relation.relname IN (
+                        'alembic_version', 'adapter_template_revisions', 'state_allocations',
+                        'secret_references', 'secret_version_metadata',
+                        'runtime_spec_revisions'
+                      )
+                    )
                   )
                 )
                 AND (has_table_privilege(role_name, relation.oid, 'SELECT')
@@ -1441,6 +1453,18 @@ jobs:
                 )")"
           test "${column_privileges}" = $'runtime_access_requests.completed_at\nruntime_access_requests.result_code\nruntime_access_requests.status'
 
+          supervisor_state_column_privileges="$(docker exec platform-postgres-ci \
+            psql --username postgres --dbname platform --tuples-only --no-align \
+            --command "
+              SELECT string_agg(table_name || '.' || column_name, E'\\n' ORDER BY table_name, column_name)
+              FROM information_schema.columns
+              WHERE table_schema = 'public'
+                AND table_name = 'state_allocations'
+                AND has_column_privilege(
+                  'platform_supervisor', format('public.%I', table_name), column_name, 'UPDATE'
+                )")"
+          test "${supervisor_state_column_privileges}" = $'state_allocations.ready_at\nstate_allocations.status'
+
           column_acl_inventory="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
             --command "
@@ -1454,7 +1478,7 @@ jobs:
               WHERE grantee.rolname IN ('platform_control', 'platform_supervisor')
               ORDER BY grantee.rolname, namespace.nspname, relation.relname,
                        attribute.attname, privilege.privilege_type")"
-          test "${column_acl_inventory}" = $'platform_control|public|runtime_access_requests|completed_at|UPDATE|f\nplatform_control|public|runtime_access_requests|result_code|UPDATE|f\nplatform_control|public|runtime_access_requests|status|UPDATE|f'
+          test "${column_acl_inventory}" = $'platform_control|public|runtime_access_requests|completed_at|UPDATE|f\nplatform_control|public|runtime_access_requests|result_code|UPDATE|f\nplatform_control|public|runtime_access_requests|status|UPDATE|f\nplatform_supervisor|public|state_allocations|ready_at|UPDATE|f\nplatform_supervisor|public|state_allocations|status|UPDATE|f'
 
           sequence_privilege_count="$(docker exec platform-postgres-ci \
             psql --username postgres --dbname platform --tuples-only --no-align \
@@ -1514,6 +1538,10 @@ jobs:
                 VALUES ('runtime_instances'), ('runtime_attempts'),
                        ('runtime_lifecycle_jobs'), ('runtime_endpoints'),
                        ('runtime_access_requests'), ('runtime_audit_events')
+              ), supervisor_authority(table_name) AS (
+                VALUES ('alembic_version'), ('adapter_template_revisions'),
+                       ('state_allocations'), ('secret_references'),
+                       ('secret_version_metadata'), ('runtime_spec_revisions')
               ), actual(
                 object_kind, object_name, column_name, role_name,
                 privilege_type, grantor_name, is_grantable
@@ -1573,9 +1601,17 @@ jobs:
                        privilege_type, 'postgres', false
                 FROM supervisor_writes CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS grants(privilege_type)
                 UNION ALL
+                SELECT 'table', 'public.' || table_name, '', 'platform_supervisor',
+                       'SELECT', 'postgres', false
+                FROM supervisor_authority
+                UNION ALL
                 SELECT 'column', 'public.runtime_access_requests', column_name,
                        'platform_control', 'UPDATE', 'postgres', false
                 FROM (VALUES ('status'), ('result_code'), ('completed_at')) AS columns(column_name)
+                UNION ALL
+                SELECT 'column', 'public.state_allocations', column_name,
+                       'platform_supervisor', 'UPDATE', 'postgres', false
+                FROM (VALUES ('status'), ('ready_at')) AS columns(column_name)
               ), differences AS (
                 (SELECT * FROM actual EXCEPT SELECT * FROM expected)
                 UNION ALL
@@ -1600,19 +1636,24 @@ jobs:
           WHERE registered_instance.instance_id = 'phase2-spot-paper-probe';
           INSERT INTO runtime_attempts (
             attempt_id, instance_id, attempt_number, runtime_spec_revision_id,
-            adapter_template_revision_id, resolved_secret_versions, image_id,
+            adapter_template_revision_id, state_allocation_id,
+            state_allocation_generation, resolved_secret_versions, image_id,
             root_commit, backend_commit, frontend_commit, strategies_commit,
             project_identity, container_identity, status, health_result,
             started_at, stopped_at, exit_code, failure_code
           ) SELECT
             'ci-attempt', 'ci-instance', 1, registered_instance.runtime_spec_revision_id,
             registered_spec.adapter_template_revision_id,
+            registered_instance.state_allocation_id, registered_state.generation,
             '{}'::json, 'sha256:ci-image', repeat('1', 40), repeat('2', 40),
             repeat('3', 40), repeat('4', 40), 'ci-project', 'ci-container',
             'healthy', '{}'::json, now(), NULL, NULL, NULL
           FROM runtime_instances AS registered_instance
           JOIN runtime_spec_revisions AS registered_spec
             ON registered_spec.runtime_spec_revision_id = registered_instance.runtime_spec_revision_id
+          JOIN state_allocations AS registered_state
+            ON registered_state.state_allocation_id = registered_instance.state_allocation_id
+            AND registered_state.state_allocation_id = registered_spec.state_allocation_id
           WHERE registered_instance.instance_id = 'ci-instance';
           SQL
 
@@ -1646,10 +1687,74 @@ jobs:
           ROLLBACK;
           SQL
 
-          docker exec --interactive platform-postgres-ci \
-            psql --username platform_supervisor --dbname platform --set ON_ERROR_STOP=on <<'SQL'
+          supervisor_pgpass="${platform_ci_dir}/supervisor.pgpass"
+          cleanup_supervisor_pgpass() {
+            rm -f "${supervisor_pgpass}"
+          }
+          trap cleanup_supervisor_pgpass EXIT
+          python - \
+            "${platform_ci_dir}/postgres_admin_password" \
+            "${platform_ci_dir}/platform_supervisor_db_password" \
+            "${supervisor_pgpass}" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          def read_password(path_value):
+              password = Path(path_value).read_text(encoding="utf-8").rstrip("\r\n")
+              if not password or any(character in password for character in "\r\n\x00"):
+                  raise SystemExit("invalid restricted PostgreSQL test password")
+              return password.replace("\\", "\\\\").replace(":", "\\:")
+
+          admin_password = read_password(sys.argv[1])
+          supervisor_password = read_password(sys.argv[2])
+          descriptor = os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as passfile:
+              passfile.write(
+                  f"127.0.0.1:55432:platform:postgres:{admin_password}\n"
+                  f"127.0.0.1:55432:platform:platform_supervisor:{supervisor_password}\n"
+              )
+          PY
+          test "$(stat --format '%a' "${supervisor_pgpass}")" = "600"
+          command -v psql >/dev/null
+          supervisor_database_sentinel="$(python - <<'PY'
+          import secrets
+
+          print(f"root-safety-ephemeral-platform-ci:{secrets.token_hex(16)}")
+          PY
+          )"
+          test "${#supervisor_database_sentinel}" -eq 66
+          env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
+            PGPASSFILE="${supervisor_pgpass}" \
+            psql --host 127.0.0.1 --port 55432 \
+              --username postgres --dbname platform --set ON_ERROR_STOP=on \
+              --set="database_sentinel=${supervisor_database_sentinel}" <<'SQL'
+          COMMENT ON DATABASE platform IS :'database_sentinel';
+          SQL
+
+          supervisor_psql() {
+            env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
+              PGPASSFILE="${supervisor_pgpass}" psql \
+              --host 127.0.0.1 --port 55432 \
+              --username platform_supervisor --dbname platform \
+              --set ON_ERROR_STOP=on "$@"
+          }
+
+          supervisor_psql <<'SQL'
           BEGIN;
+          SELECT 1 / CASE
+            WHEN current_user = 'platform_supervisor'
+             AND current_database() = 'platform'
+             AND (SELECT count(*) FROM public.alembic_version) = 1
+             AND (SELECT min(version_num) FROM public.alembic_version) = '20260717_0008'
+            THEN 1 ELSE 0
+          END AS supervisor_database_authority_valid;
           SELECT instance_id FROM runtime_instances WHERE instance_id = 'ci-instance';
+          SELECT count(*) FROM adapter_template_revisions;
+          SELECT count(*) FROM state_allocations;
+          SELECT count(*) FROM secret_references;
+          SELECT count(*) FROM secret_version_metadata;
+          SELECT count(*) FROM runtime_spec_revisions;
           UPDATE runtime_instances
           SET lifecycle_status = lifecycle_status
           WHERE instance_id = 'ci-instance';
@@ -1676,15 +1781,42 @@ jobs:
           ROLLBACK;
           SQL
 
+          supervisor_junit="${platform_ci_dir}/supervisor-repository.xml"
+          env -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS \
+            PGPASSFILE="${supervisor_pgpass}" \
+            PLATFORM_TEST_SUPERVISOR_ADMIN_POSTGRES_URL="postgresql+psycopg://postgres@127.0.0.1:55432/platform" \
+            PLATFORM_TEST_SUPERVISOR_POSTGRES_URL="postgresql+psycopg://platform_supervisor@127.0.0.1:55432/platform" \
+            PLATFORM_TEST_SUPERVISOR_DATABASE_SENTINEL="${supervisor_database_sentinel}" \
+            python -m pytest \
+              freqtrade/tests/platform/test_supervisor_repository_postgres.py \
+              --junitxml="${supervisor_junit}" -q -p no:cacheprovider
+          python - "${supervisor_junit}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = tuple(root.iter("testsuite"))
+          tests = sum(int(suite.attrib.get("tests", "0")) for suite in suites)
+          skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in suites)
+          if tests < 1 or skipped != 0:
+              raise SystemExit("restricted Supervisor repository selector skipped tests")
+          PY
+          printf '%s\n' 'supervisor_repository_lifecycle_zero_skip' >&2
+
           expect_role_denied() {
             role_name="$1"
             probe_name="$2"
             statement="$3"
             set +e
-            docker exec platform-postgres-ci \
-              psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \
-              --command "BEGIN; ${statement}; ROLLBACK;" \
-              >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            if test "${role_name}" = "platform_supervisor"; then
+              supervisor_psql --command "BEGIN; ${statement}; ROLLBACK;" \
+                >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            else
+              docker exec platform-postgres-ci \
+                psql --username "${role_name}" --dbname platform --set ON_ERROR_STOP=on \
+                --command "BEGIN; ${statement}; ROLLBACK;" \
+                >"${platform_ci_dir}/denied-${role_name}-${probe_name}.log" 2>&1
+            fi
             denied_status=$?
             set -e
             test "${denied_status}" -ne 0
@@ -1705,11 +1837,25 @@ jobs:
           expect_role_denied platform_supervisor delete "DELETE FROM runtime_instances WHERE instance_id = 'ci-instance'"
           expect_role_denied platform_supervisor truncate "TRUNCATE TABLE runtime_instances"
           expect_role_denied platform_supervisor update "UPDATE platform_catalog_revisions SET payload = payload"
+          expect_role_denied platform_supervisor update-alembic "UPDATE alembic_version SET version_num = version_num WHERE false"
+          expect_role_denied platform_supervisor update-template "UPDATE adapter_template_revisions SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-state "UPDATE state_allocations SET generation = generation WHERE false"
+          expect_role_denied platform_supervisor update-secret-reference "UPDATE secret_references SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-secret-version "UPDATE secret_version_metadata SET status = status WHERE false"
+          expect_role_denied platform_supervisor update-runtime-spec "UPDATE runtime_spec_revisions SET payload_digest = payload_digest WHERE false"
+          expect_role_denied platform_control read-runtime-spec "SELECT * FROM runtime_spec_revisions"
+          expect_role_denied platform_control read-alembic "SELECT * FROM alembic_version"
+          expect_role_denied platform_control read-secret-version "SELECT * FROM secret_version_metadata"
           expect_role_denied platform_control database-create "CREATE SCHEMA phase2a_control_database_probe"
           expect_role_denied platform_control delegated-table "DELETE FROM public.platform_ci_acl_table"
           expect_role_denied platform_supervisor delegated-sequence "SELECT setval('public.platform_ci_acl_sequence', 1)"
           expect_role_denied platform_control private-schema "SELECT * FROM platform_ci_private.probe"
           expect_role_denied platform_supervisor private-table "SELECT * FROM platform_ci_private.probe"
+
+          docker network disconnect bridge platform-postgres-ci
+          database_networks="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' platform-postgres-ci | sort | sed '/^$/d')"
+          printf 'platform PostgreSQL networks after isolation: %s\n' "${database_networks}"
+          test "${database_networks}" = "freqtrade-platform-ci"
 
           docker create \
             --name platform-control-ci \

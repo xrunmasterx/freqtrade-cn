@@ -563,6 +563,11 @@ class PlatformControlContractTests(unittest.TestCase):
         self.assertIn("ACLDEFAULT('D', DATABASE.DATDBA)", script.upper())
         self.assertIn("PRIVILEGE.GRANTEE = 0", script.upper())
         self.assertIn("UPDATE (status, result_code, completed_at)", script)
+        self.assertIn("GRANT UPDATE (status, ready_at)", script)
+        self.assertIn(
+            "ON TABLE public.state_allocations TO platform_supervisor",
+            script,
+        )
         self.assertEqual(
             script.upper().count("ALTER DEFAULT PRIVILEGES FOR ROLE POSTGRES"), 4
         )
@@ -827,6 +832,39 @@ class PlatformControlContractTests(unittest.TestCase):
             "GRANT REFERENCES ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
             "GRANT TRIGGER ON TABLE PUBLIC.%I TO PLATFORM_OPERATOR",
             "GRANT USAGE ON SEQUENCE PUBLIC.%I TO PLATFORM_OPERATOR",
+        ):
+            self.assertNotIn(forbidden, compact)
+
+    def test_role_script_grants_supervisor_exact_read_only_authority_tables(self) -> None:
+        script = runtime_contract._active_platform_role_script(self.role_script())
+        compact = " ".join(script.split())
+        self.assertEqual(
+            runtime_contract._role_table_inventory(
+                compact,
+                "SUPERVISOR_AUTHORITY",
+            ),
+            [
+                "ALEMBIC_VERSION",
+                "ADAPTER_TEMPLATE_REVISIONS",
+                "STATE_ALLOCATIONS",
+                "SECRET_REFERENCES",
+                "SECRET_VERSION_METADATA",
+                "RUNTIME_SPEC_REVISIONS",
+            ],
+        )
+        self.assertEqual(
+            compact.count(
+                "GRANT SELECT ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR"
+            ),
+            1,
+        )
+        for forbidden in (
+            "GRANT INSERT ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT UPDATE ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT DELETE ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT TRUNCATE ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT REFERENCES ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
+            "GRANT TRIGGER ON TABLE PUBLIC.%I TO PLATFORM_SUPERVISOR",
         ):
             self.assertNotIn(forbidden, compact)
 
@@ -1237,6 +1275,9 @@ class PlatformControlContractTests(unittest.TestCase):
             "duplicate narrow grant": script
             + "\nGRANT UPDATE (status, result_code, completed_at) "
             "ON TABLE public.runtime_access_requests TO platform_control;\n",
+            "duplicate supervisor state grant": script
+            + "\nGRANT UPDATE (status, ready_at) ON TABLE "
+            "public.state_allocations TO platform_supervisor;\n",
         }
         for name, mutated in mutations.items():
             with self.subTest(name=name):

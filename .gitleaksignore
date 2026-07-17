@@ -10,10 +10,10 @@ freqtrade/docs/rest-api.md:jwt:342
 freqtrade/docs/rest-api.md:jwt:352
 freqtrade/tests/exchange/test_hyperliquid.py:generic-api-key:419
 freqtrade/tests/exchange/test_hyperliquid.py:generic-api-key:856
-freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:520
-freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1232
-freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1237
-freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1248
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:588
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1300
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1305
+freqtrade/tests/platform/test_platform_migrations.py:generic-api-key:1316
 freqtrade/tests/research/test_data_source.py:generic-api-key:50
 freqtrade/tests/rpc/test_api_catalog.py:generic-api-key:15
 freqtrade/tests/rpc/test_api_research.py:generic-api-key:29

@@ -17,6 +17,8 @@ from tools.runtime_supervisor.writer_guard import SupervisorDockerWriterGuard
 
 SUPERVISOR_LOCK_PATH = Path("/run/freqtrade-runtime-supervisor/supervisor.lock")
 PRODUCTION_ASSEMBLY_ENABLED = False
+INTERNAL_PERSISTED_ASSEMBLY_SEAM_AVAILABLE = True
+HOST_RUNTIME_MUTATION_BRIDGE_ENABLED = False
 
 
 class _ClosedArgumentParser(argparse.ArgumentParser):
