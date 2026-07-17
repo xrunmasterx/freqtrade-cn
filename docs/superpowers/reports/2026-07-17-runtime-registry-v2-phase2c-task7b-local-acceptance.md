@@ -2,9 +2,9 @@
 
 **Acceptance date:** 2026-07-17
 
-**Status:** local implementation and independent review accepted. Backend PR #9 is
-merged. Root exact-SHA Root Safety, merge and fresh recursive checkout remain required
-before closure.
+**Status:** implementation, independent review and the Root code exact-SHA safety run
+are accepted. Backend PR #9 is merged. The report commit must pass its own Root Safety
+before Root PR #11 is merged and verified by a fresh recursive checkout.
 
 **Scope:** persisted launch authority, Attempt-owned State Allocation generation,
 lease-fenced State preparation, internal typed Supervisor assembly and fail-closed
@@ -87,7 +87,7 @@ real registration order `State -> RuntimeSpec -> Instance`.
 | Gate | Result |
 |---|---:|
 | Root persisted-authority and Driver-focused suite | 335 passed, 8 declared environment skips |
-| Root full `unittest discover` | 875 passed, 14 declared platform/environment skips, 359.789 seconds |
+| Root full `unittest discover` | 875 tests run, 14 declared platform/environment skips, 359.789 seconds |
 | Backend Platform without PostgreSQL URL | 760 passed, 76 declared PostgreSQL/environment skips |
 | Backend Platform with isolated PostgreSQL 17 | 835 passed, 1 pre-existing restricted-role URL skip |
 | PostgreSQL migration suite | 61 passed, zero skips |
@@ -96,11 +96,31 @@ real registration order `State -> RuntimeSpec -> Instance`.
 | Alembic offline 0007-to-0008 SQL | passed |
 | Root and Backend `git diff --check` | passed |
 | Independent reviews after reproduced fixes | P0 0, P1 0 |
+| Root Safety on code SHA `56a4ccd6d24b69316e2914e3a3da08356c14069a` | all 36 primary steps passed |
+| Root Safety standard-library suite | 875 tests run, 12 declared CI environment skips |
+| Root Safety PostgreSQL integration | 234 passed, JUnit zero skips |
+| Root Safety restricted Supervisor repository lifecycle | 15 passed, JUnit zero skips |
+| Root Safety Secret scan | 20 reviewed fingerprints, zero unignored findings, one injected leak detected |
 
 The isolated PostgreSQL acceptance used a loopback-only PostgreSQL 17 container with
-`tmpfs` data. It was removed by exact test-container identity after the tests. The one
-remaining Backend skip requires the separately provisioned restricted Supervisor role;
-GitHub Root Safety must execute that selector with zero PostgreSQL skips before closure.
+`tmpfs` data. It was removed by exact test-container identity after the tests. GitHub
+Root Safety separately provisioned the restricted Supervisor role and executed its
+repository lifecycle selector with zero skips.
+
+The accepted code-head workflow is:
+
+```text
+run  https://github.com/xrunmasterx/freqtrade-cn/actions/runs/29544612027
+job  https://github.com/xrunmasterx/freqtrade-cn/actions/runs/29544612027/job/87774001301
+SHA  56a4ccd6d24b69316e2914e3a3da08356c14069a
+```
+
+The workflow executed all 36 primary steps. In particular, it ran the PostgreSQL
+selectors rather than skipping them, completed the restricted-role transaction and
+denial probes, verified the dynamic-UID runtime contract, and scanned a fresh archive of
+the Root plus all three submodules. The Secret gate first reproduced exactly 20 reviewed
+fixture fingerprints, then reported no unignored leaks, and finally detected a random
+64-character `api_key` mutation as one leak.
 
 ## 5. Reproduced failures and repairs
 
@@ -122,17 +142,33 @@ The review process reproduced and repaired the following material defects:
    waiting cycle.
 8. Root resource cleanup could occur after a durable terminal result; the Reconciler
    now releases all launch resources before recording that result.
+9. Linux Root Safety exposed three State recovery fixtures that inherited permissive
+   temporary-directory modes; the fixtures now establish the production-required
+   `0700` invariant explicitly without weakening the production check.
+10. The least-privilege gate initially interpreted table-level `UPDATE` as effective
+    access to every column and used a pre-0008 Attempt fixture. The gate now checks the
+    intended State Allocation columns and creates a fully closed 0008 binding.
+11. Disconnecting PostgreSQL from the default bridge before restricted Supervisor TCP
+    transactions made the database unreachable. Isolation now occurs after every
+    required TCP probe and before the platform-control container is created.
+12. Alembic 0008 inserted 68 lines before four reviewed migration-test fixtures, so
+    their exact Gitleaks fingerprints moved uniformly. The allowlist and its positive
+    and negative audit cases were advanced by exactly 68 lines; no wildcard, path or
+    detector exclusion was added.
 
 No failing gate was bypassed or weakened. Every accepted finding received a focused
 regression test.
 
-## 6. Remaining publication acceptance
+## 6. Final publication acceptance
 
-Task 7B is not closed until all of the following are complete:
+The implementation publication prerequisites are complete:
 
-1. merge the Backend PR and verify Backend `main` at the exact reviewed merge;
-2. update the Root `freqtrade` gitlink to that Backend `main` commit;
-3. publish the reviewed Root commits and run exact-head Root Safety;
-4. require the PostgreSQL and restricted-role selectors to report zero skips;
-5. record the final workflow URL and exact Root SHA in the closure report;
-6. merge the Root PR and verify a fresh recursive checkout.
+1. Backend PR #9 is merged and Backend `main` resolves to
+   `c5730bbc5fa7c97a8c93d92b25ddfd9e80a8f7c4`.
+2. The Root `freqtrade` gitlink resolves to that exact Backend merge commit.
+3. Root code SHA `56a4ccd6d24b69316e2914e3a3da08356c14069a` passed all 36
+   Root Safety steps, including zero-skip PostgreSQL and restricted-role selectors.
+
+The publication closes only after this report commit passes its own Root Safety, Root
+PR #11 is merged without changing the reviewed head, and a new remote recursive clone
+proves the merged Root and all submodule identities are clean and reproducible.
