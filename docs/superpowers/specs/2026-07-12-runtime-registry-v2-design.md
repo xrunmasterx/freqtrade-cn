@@ -1,7 +1,7 @@
 # Runtime Registry v2 and Platform Control Cutover Design
 
-**Status:** Approved governing design; Phases 2A-2C implemented and merged, Phase 2D in
-local development
+**Status:** Approved governing target design; Phases 2A-2C implemented and merged,
+remaining execution paused by the Product Phase 1 Baseline Capability Gate
 
 **Date:** 2026-07-12
 
@@ -15,6 +15,13 @@ local development
 > and Phase 2D/2E delivery order.
 > The remaining lifecycle, network, state, secret, and fail-closed constraints in this
 > design remain governing.
+>
+> **Current execution precondition:** Phase 2D Tasks 1-4 remain reusable, unpublished
+> backend assets. Phase 2D Tasks 5-8, Phase 2E, Experiment, dynamic Runtime, Paper
+> Observation, and 8090 UI work are paused until the compatibility-service
+> [Baseline Capability Gate](../plans/2026-07-30-phase1-baseline-capability-gate.md)
+> passes and one later journey is explicitly selected. The preconfigured 8081 service is
+> not a Registry RuntimeInstance or formal dynamic Paper acceptance.
 
 ## 1. Decision summary
 
@@ -881,11 +888,12 @@ proxying and caller-selected upstream destinations are forbidden.
 
 ### 13.1 Human and machine market-data refresh compatibility
 
-The existing multi-timeframe UI contract is preserved explicitly. A visible
-chart refreshes on a cadence materially lower than its selected candle timeframe
-so the forming candle, watch indicators, strategy overlays, and entry/exit points
-remain observable without waiting for the whole candle to close. Base candle
-availability is a platform market-data capability, not a Bot capability.
+The existing multi-timeframe UI contract is preserved explicitly. A visible chart
+refreshes on a cadence materially lower than its selected candle timeframe so the
+forming Market candle and provisional Watch Indicators remain observable without
+waiting for the whole candle to close. Official Strategy Indicators and Strategy
+Signals remain closed-candle evidence. Base candle availability is a platform
+market-data capability, not a Bot capability.
 
 The Phase 2 compatibility policy is the current production mapping:
 
@@ -906,6 +914,10 @@ only by a frontend constant or editable by an arbitrary API parameter. An adapte
 may declare a stricter provider limit or degraded cadence. Under healthy accepted
 conditions the compatibility cadence holds; otherwise the response exposes the
 effective cadence and degradation reason instead of pretending the data is fresh.
+
+`1m` is the minimum supported near-real-time watch timeframe, and approximately
+ten seconds is its fastest normal policy cadence. Phase 2 does not promise raw ticks,
+sub-minute candles, streaming latency, or HFT behavior.
 
 Phase 2 adds a read-only `MarketDataQueryService` behind `platform-control`:
 
@@ -942,23 +954,27 @@ must not disappear with the Bot.
 
 ### 13.2 Strategy observation and replay semantics
 
-The live chart composes two independently owned layers:
+The live chart composes separately owned evidence:
 
-- canonical base candles and deterministic watch indicators from Market Data;
-- strategy indicators, entry/exit signals, orders, positions, and risk state from
-  a selected Bot/Strategy read model.
+- canonical base candles and provisional Watch Indicators from Market Data;
+- closed-candle Strategy Indicators and entry/exit Strategy Signals from the selected
+  Bot/Strategy analyzed-output read model;
+- Orders, Fills, Trades, positions, and risk state from execution/persistence;
+- immutable decision evidence from Decision Snapshots when available.
 
-Both layers align by instrument, canonical timeframe, candle open time, and
-data-as-of time. Every signal marker distinguishes forming-candle/provisional
-state from closed-candle/confirmed state. Refreshing a chart may update the
-forming candle and provisional calculation but cannot rewrite a previously
-recorded Bot decision as though the new value had existed earlier.
+The layers align by instrument, canonical timeframe, candle open time, data-as-of
+time, and strategy context where applicable. Refreshing a chart may update the Forming
+Candle and Watch Indicators, but it cannot emit a new official Strategy Signal before
+the source candle closes or rewrite a recorded Bot decision as though the new value had
+existed earlier. A Strategy Signal never implies an Order, Fill, or Trade, and execution
+evidence is suppressed when its strategy context does not match the chart.
 
 Refresh is observation, not execution. A chart request never evaluates a trading
 strategy, creates an OrderIntent, wakes a Bot decision loop, changes a position,
-or submits an order. Strategy evaluation frequency and whether forming candles
-are permitted come from the immutable StrategyRelease/Bot policy. The chart only
-reads and composes the most recent recorded outputs.
+or submits an order. Strategy evaluation frequency comes from the immutable
+StrategyRelease/Bot policy, while official chart evidence in the current product
+baseline remains closed-candle only. The chart only reads and composes recorded
+outputs.
 
 True replay uses immutable decision evidence. The later Bot/Research phases add
 strategy release, Bot release, RuntimeAttempt, signal event time, decision time,
@@ -1367,6 +1383,10 @@ Gate:
 
 ### 21.4 Phase 2D: Market-Data and UI Compatibility
 
+This target phase is not active. Its first prerequisite is a passing exact-SHA Product
+Phase 1 Baseline Capability Gate across 8081 live watch/runtime observation and 8083
+standard Freqtrade backtest/analysis, followed by an explicit Phase 2D resume decision.
+
 Deliver the read-only canonical candle route on 8090, approved public-data
 adapter, immutable `MarketDataRefreshPolicy`, bounded TTL/in-flight coalescing,
 base-chart/strategy-overlay separation, internal `MarketDataReadPort`, and
@@ -1388,8 +1408,10 @@ Gate:
 - market/product/venue/instrument/timeframe capability is backend-enforced;
 - no trading credentials or exchange-write calls exist in the market-data path;
 - strategy-overlay failure does not erase the base chart;
-- forming and closed candles and provisional and confirmed signal markers are
-  distinguishable;
+- the Forming Candle remains market/watch observation, while official Strategy
+  Indicators and Strategy Signals use closed source candles;
+- Strategy Signals and Orders/Fills/Trades remain separately sourced and labelled, and
+  mismatched strategy execution evidence is not rendered;
 - chart or AI refresh never triggers strategy evaluation, OrderIntent creation,
   risk approval, or exchange execution;
 - a stopped or identity-mismatched runtime produces stable `runtime_unavailable`
@@ -1531,6 +1553,10 @@ Phase 2 is complete only when:
 19. authorized online acceptance proves paper-only behavior and no exchange write;
 20. whole-branch architecture, code-quality/security, compatibility, and
     execution-safety reviews are approved.
+21. official Strategy Indicators and Strategy Signals use closed source candles, while
+    Market/Watch forming-candle observation remains explicitly provisional;
+22. Strategy Signals and execution Trades/Orders/Fills remain distinct evidence and
+    require a matching strategy context before sharing a chart.
 
 Publishing, PR state changes, merge, online acceptance, exchange connectivity,
 and any live/order write remain separately authorized operations.

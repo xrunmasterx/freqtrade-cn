@@ -2,13 +2,21 @@
 
 **Date:** 2026-07-12
 
-**Status:** Approved target design; Phase 2 detailed planning in progress
+**Status:** Approved target architecture; current execution status is owned by
+`docs/superpowers/README.md`
 
 **Migration strategy:** Backward-compatible, staged migration
 
 **Deployment strategy:** Modular monolith control kernel with isolated workers
 
 **Execution strategy:** Layered execution; Freqtrade is one execution adapter
+
+> **Current delivery amendment (2026-07-30):** The long-term architecture remains
+> approved, but its numbered phases are a capability taxonomy rather than the active work
+> queue. Product Phase 1 first passes the existing compatibility-service
+> [Baseline Capability Gate](../plans/2026-07-30-phase1-baseline-capability-gate.md).
+> No new Experiment, dynamic Runtime, Paper Observation, Runtime Access, 8090 chart, or
+> cutover work starts before that Gate and a separate one-journey resume decision.
 
 ## 1. Background
 
@@ -60,7 +68,8 @@ The architecture must remove the three-service ceiling without discarding the P0
 
 ### 2.2 Product success criteria
 
-The architecture is successful when:
+The architecture is successful when the following target-state criteria are met. They are
+not the current Product Phase 1 acceptance checklist:
 
 - a fourth cryptocurrency paper bot can be registered and launched without changing `FORMAL_SERVICES` or adding a bespoke Compose service;
 - a new market can be added through catalog entries and adapters without modifying the bot core or risk decision flow;
@@ -112,6 +121,15 @@ This design does not:
 12. `platform-control` includes a Registry-bound Runtime Access Gateway so removal
     of per-instance ports does not remove Bot/Research application behavior. It
     accepts only committed route policies and never arbitrary upstream targets.
+13. The current compatibility baseline keeps live watch/runtime observation on 8081 and
+    standard Freqtrade backtest/analysis on the existing 8083 webserver-mode service.
+14. The Forming Candle is market/watch observation only; official Strategy Indicators
+    and Strategy Signals use closed source candles.
+15. Strategy Signals and executed or simulated Trades remain separate evidence, and
+    mismatched strategy execution evidence is never overlaid.
+16. Formal Product Phase 1 Paper acceptance later requires an explicit
+    ExperimentRevision, StrategyRelease, BotRelease, and dynamic isolated
+    RuntimeInstance; the preconfigured 8081 service is compatibility evidence only.
 
 ## 5. Product hierarchy
 
@@ -693,6 +711,10 @@ it does not store high-frequency candles in control-plane PostgreSQL. Later
 market-data workers and hot storage can replace that implementation without
 changing the UI contract.
 
+The minimum near-real-time watch timeframe is `1m`. Its normal fastest refresh is
+approximately ten seconds; the contract does not promise raw ticks, sub-minute candles,
+streaming latency, or HFT behavior.
+
 The current multi-timeframe cadence is preserved as a versioned backend policy:
 
 | Timeframe | Refresh interval |
@@ -782,10 +804,28 @@ application writes may be forwarded only through closed route policies, with
 instance-bound credentials, capability checks, audit, bounded timeout, and no
 automatic retry after an ambiguous result.
 
-Live views distinguish forming from closed candles and provisional from confirmed
-signals. Historical decision replay uses recorded Bot/strategy/data/Research/risk
-snapshot identities; a present-day recomputation over revised data is labelled
-analysis rather than replay.
+Live views distinguish forming from closed candles. The Forming Candle may update Market
+OHLCV and provisional Watch Indicators, but official Strategy Indicators and Strategy
+Signals use closed source candles only. A lower-timeframe chart may carry the latest
+closed continuous strategy value according to declared alignment; it must not imply a
+new forming-candle strategy evaluation.
+
+Strategy Signals are decision events, not proof of an Order, Fill, or Trade. Paper and
+backtest execution markers come from their recorded or simulated execution evidence and
+remain separately labelled; mismatched strategy contexts suppress those markers.
+
+The current compatibility route ownership is:
+
+- 8081 `/graph` for live watch and strategy review;
+- 8081 `/trade` for the preconfigured dry-run Spot compatibility service;
+- 8083 `/backtest`, `/lookahead_analysis`, and `/recursive_analysis` for standard
+  Freqtrade offline validation;
+- 8083 `/research` as a frozen compatibility surface whose simplified SMA calculation
+  is not the authoritative backtest.
+
+Historical decision replay uses recorded Bot/strategy/data/Research/risk snapshot
+identities; a present-day recomputation over revised data is labelled analysis rather
+than replay.
 
 Chart refresh is read-only observation. It never evaluates a trading strategy,
 creates an OrderIntent, wakes a Bot decision loop, changes a position, or submits
@@ -864,6 +904,11 @@ or silent state-root relocation is permitted.
 
 ## 18. Phased delivery plan
 
+> **Historical target taxonomy:** The numbered phases below preserve the approved
+> 2026-07-12 capability decomposition and estimates. They are not the current executable
+> backlog. Use `docs/superpowers/README.md` and the active Baseline Capability Gate for
+> current ordering.
+
 ### Phase 0: Freeze and document the safety baseline
 
 Deliver:
@@ -907,7 +952,8 @@ Deliver:
 - internal addressing;
 - canonical Bot-independent candle reads preserving the complete current multi-
   timeframe refresh policy, shared by UI and governed machine consumers;
-- forming/closed candle and provisional/confirmed signal semantics;
+- forming/closed Market candle semantics plus closed-candle-only official Strategy
+  Indicator and Strategy Signal semantics;
 - generalized health, emergency, backup, restore, and controlled cutover contracts.
 
 Gate:
@@ -1081,13 +1127,18 @@ Every phase must:
 13. audit all live write paths;
 14. record data source, freshness, and model provenance.
 
-## 20. Current PR policy
+## 20. Historical PR policy at publication
 
-The current P0 branch remains a valuable safety baseline, but its three formal services are not the final product model.
+> This section records the 2026-07-12 publication state. It is not current branch,
+> roadmap, or merge authority; use `docs/superpowers/README.md`.
 
-The root PR remains Draft while the team decides how Phase 1 and Phase 2 are incorporated. It must not be presented as a complete multi-market architecture.
+The then-current P0 branch remained a valuable safety baseline, but its three formal services were not the final product model.
 
-Recommended path:
+At publication, the root PR remained Draft while the team decided how the architecture
+phases would be incorporated. It was not to be presented as a complete multi-market
+architecture.
+
+The recommended path recorded at publication was:
 
 1. retain the current P0 commits;
 2. implement Phase 1 and Phase 2 compatibly on this line or a reviewed child line;
@@ -1131,3 +1182,9 @@ No merge or PR-state change is implied by approval of this design.
     behavior; access uses exact Registry identities and committed route policies.
 22. Runtime Access compatibility writes are not lifecycle authority and are
     replaced route by route by governed Platform Command/Central Risk APIs.
+23. One-minute candles with an approximately ten-second normal refresh are the
+    highest-frequency baseline watch contract; raw ticks and sub-minute strategy
+    decisions are out of scope.
+24. Official Strategy Indicators and Strategy Signals use closed source candles.
+25. Strategy Signals and execution Trades/Orders/Fills are distinct evidence and
+    require a matching strategy context before sharing a chart.

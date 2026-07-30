@@ -4,9 +4,10 @@
 > time. Every Runtime Access operation lands with its producer, actual consumer, focused
 > tests, and independent security review.
 
-**Current status (2026-07-30):** Planned. Do not start until the rebaselined Phase 2D Task
-8 gate passes, including every separately authorized paper-online prerequisite that gate
-marks as required.
+**Current status (2026-07-30):** Provisional and paused. The Product Phase 1 Baseline
+Capability Gate is an inherited prerequisite, but its pass does not activate this plan.
+Do not start until a later explicit Phase 2E decision revalidates the plan and every
+rebaselined Phase 2D prerequisite it still needs.
 
 **Governing amendment:**
 `../specs/2026-07-30-runtime-access-rebaseline-design.md`
@@ -25,7 +26,7 @@ new managed attempt becomes authoritative only after identity and health verific
 
 ## Inputs from Phase 2D
 
-Phase 2E may assume only:
+If Phase 2E is explicitly resumed later, it may assume only:
 
 - canonical Bot-independent market data and server-published refresh policy;
 - one same-origin 8090 platform chart;
@@ -210,8 +211,10 @@ authorized health/endpoint proof, add exactly:
 Each route first receives a versioned record with one verified backend method/path, strict
 schema, owner/environment capability, byte/time/concurrency bounds, and one actual FreqUI
 consumer. Research FreqUI uses the platform session and selected Workspace Worker; it no
-longer borrows `activeBot.api`. Manual backtest stays on the old 8083 path during this
-candidate stage because it initiates work.
+longer borrows `activeBot.api`. The authoritative standard Freqtrade `/backtest` and
+analysis journeys remain on the old 8083 path during this candidate stage because they
+initiate work. The simplified `/research` SMA calculation is frozen compatibility
+behavior and gains no new strategy, dataset, Experiment, Runtime, or Runtime Access scope.
 
 Required read tests cover exact instance/attempt/route isolation, no caller target, no
 redirect/retry/body/token logging, bounded response, zero active Bot client, fixed-listener
@@ -223,10 +226,13 @@ After the four reads pass, execute `AuthorityFrozen` through `ManagedAuthoritati
 different empty final allocation. Rebind the four reads to the final attempt and repeat
 their acceptance before migrating a write.
 
-Generate the remaining Research consumer inventory from actual code. Migrate manual
-backtest and any retained computation/write one semantic slice at a time. Treat every
-POST/PUT/PATCH/DELETE/action as a write unless proven otherwise. Require durable result and
-ambiguity evidence and the tested post-write rollback path.
+Generate the remaining Research consumer inventory from actual code. Preserve the
+authoritative standard Freqtrade backtest, history, result visualization, Lookahead, and
+Recursive journeys before removing 8083. Migrate each retained computation/write one
+semantic slice at a time. Treat every POST/PUT/PATCH/DELETE/action as a write unless
+proven otherwise. Require durable result and ambiguity evidence and the tested post-write
+rollback path. Retiring the simplified `/research` calculation is a separate
+compatibility decision; do not promote it into the authoritative backtest or expand it.
 
 ### Exit gate
 
@@ -263,6 +269,12 @@ For every retained journey, define one exact operation, test it, migrate that co
 and review before adding another. Do not mechanically import legacy Bot endpoints. Status,
 logs, configuration, trades, balance, and actions remain absent until a current consumer
 demonstrates need; lifecycle remains outside HTTP.
+
+The active-consumer inventory must preserve the accepted meanings of 8081 `/graph`
+(minute-candle watch and strategy review) and 8081 `/trade` (compatibility dry-run
+runtime observation/operations). These are parity obligations, not permission to add
+features or proxy endpoints mechanically. Standard Freqtrade backtest/analysis remains an
+8083 service-cycle obligation, not an 8081 Spot endpoint.
 
 Freeze old Spot and the disposable candidate, perform the final sync into a different
 empty allocation, verify the final managed attempt, then migrate any retained writes. Run
@@ -340,4 +352,5 @@ Only with explicit authorization for exact instances:
 - Exact-SHA fresh checkout and all offline gates pass.
 
 Do not push, open or mutate a PR, remove a listener, start an online runtime, or enable live
-trading without the corresponding explicit authorization.
+trading without the corresponding explicit authorization. Completion of any earlier Gate
+does not activate this plan without a new recorded Phase 2E decision.

@@ -11,21 +11,54 @@ not an active backlog.
 - Runtime Registry v2 Phases 2A, 2B, and 2C are merged into local Root `main`.
 - Phase 2C is accepted at its offline, fail-closed boundary. Production Supervisor
   assembly, online runtime acceptance, exchange writes, and live trading remain disabled.
-- Phase 2D Tasks 1-4 are complete only on the local, unpublished
-  `phase2d-runtime-access-rebaseline` branch. Root is at `2128646`; backend is at
-  `b9345c4a6`; frontend is unchanged at `09b235d8`.
-- Phase 2D Task 5, one authenticated base-only chart on 8090, is the next implementation
-  task.
-- Phase 2E remains planned and must not start before the rebaselined Phase 2D Task 8 gate.
+- Product Phase 1 now means the strategy-validation program in
+  [STRATEGY.md](STRATEGY.md), not the completed historical "Phase 1 Market Catalog."
+- The only active implementation entrypoint is the
+  [Phase 1 Baseline Capability Gate](plans/2026-07-30-phase1-baseline-capability-gate.md)
+  on branch `phase1-baseline-capability-gate`, starting from Root `f69c69e`, backend
+  `b9345c4a6`, frontend `09b235d8`, and strategies `dbd5b0b`.
+- The baseline is one product Gate across existing compatibility services: 8081
+  `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
+  `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
+  validation. The simplified 8083 `/research` SMA calculation is frozen and is not the
+  authoritative backtest.
+- The offline automated Gate is green: 62 backend chart tests, 17 selected backend
+  chart/backtest/analysis API tests, backend Ruff, 98 focused frontend chart/locale
+  tests, frontend typecheck/build and changed-file ESLint, and four local fully mocked
+  Chromium journeys covering backtest-result visibility, Lookahead Analysis, and
+  Recursive Analysis.
+- The working branch now guards official strategy output at the closed-candle boundary,
+  marks forming Market/Watch metadata as provisional, presents the Forming Candle as
+  observation-only, keeps Strategy Signals separate from runtime Trades, and suppresses
+  and reports Trades whose available strategy name or timeframe mismatches the chart.
+  These compatibility fields are not formal revision/release identity.
+- Docker 29.6.2, Compose 5.3.1, and the `desktop-linux` daemon are reachable through the
+  installed Docker executable, although the coordinator PowerShell `PATH` does not
+  resolve `docker` directly. The real 8081 and 8083 compatibility journeys passed on the
+  reviewed working tree: 1m watch refreshed at the expected cadence, strategy overlays
+  and signals rendered with forming-candle trust state, the standard Freqtrade backtest
+  completed and rendered, and Lookahead/Recursive Analysis completed. Exact committed
+  image provenance and its final receipt remain open; working-tree acceptance is not an
+  exact-SHA Gate pass.
+- Phase 2D Tasks 1-4 remain complete locally as reusable, unpublished backend assets. The
+  last implementation Root commit is `2128646`; the later Root documentation commit is
+  `f69c69e`.
+- Phase 2D Tasks 5-8, Phase 2E, new Experiment UI, dynamic Runtime, Paper Observation,
+  Runtime Access, and 8090 chart work are paused. Passing the baseline does not
+  automatically resume any of them.
 
 ## Active implementation entrypoints
 
 | Role | Document | Status |
 |---|---|---|
-| Coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Governing Phase 2 sequence and constraints |
-| Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved amendment; read before remaining Phase 2D work |
-| Next implementation | `plans/2026-07-12-runtime-registry-v2-phase2d-market-data-ui.md` | Active; Tasks 1-4 complete locally, Task 5 next |
-| Later implementation | `plans/2026-07-12-runtime-registry-v2-phase2e-cutover.md` | Planned; blocked on Phase 2D Task 8 |
+| Product purpose and sequencing | `STRATEGY.md` | Governing |
+| Shared domain language | `../../CONTEXT.md` | Governing glossary |
+| Current implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Active; exact-SHA finalization only |
+| Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
+| Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
+| Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |
+| Phase 2D continuation | `plans/2026-07-12-runtime-registry-v2-phase2d-market-data-ui.md` | Tasks 1-4 retained; Tasks 5-8 paused |
+| Phase 2E cutover | `plans/2026-07-12-runtime-registry-v2-phase2e-cutover.md` | Provisional and paused |
 
 ## Governing specifications
 
@@ -39,6 +72,10 @@ not an active backlog.
 
 Later amendments override only the sections they explicitly supersede. They do not
 silently replace global safety constraints or previously reviewed domain contracts.
+The 2026-07-30 baseline-first decision supersedes the current execution ordering and
+forming-candle signal semantics only: official strategy indicators/signals are
+closed-candle evidence, and Strategy Signals never prove execution. The long-term
+architecture and safety constraints remain target authority.
 
 ## Completed historical plans
 
@@ -70,15 +107,17 @@ publication and must not be used to infer current progress.
   `specs/2026-07-30-runtime-access-rebaseline-design.md` for Runtime Access route breadth,
   first-operation/audit contract, internal authentication, and dependency ordering. All
   other safety constraints in the 2026-07-12 design remain governing.
-- Phase 2D Tasks 5-10: the active Phase 2D plan now replaces the old 49-route/token-first
-  sequence with Tasks 5-8: base-only 8090 chart, Supervisor production-readiness and real
-  target closure, one Bot overlay operation, and acceptance.
-- Phase 2E: use the active rebaselined plan. Research, Spot, and Futures each use an
+- Phase 2D Tasks 5-10: the rebaselined Phase 2D plan replaces the old 49-route/token-first
+  sequence with retained Tasks 5-8, but those tasks are not an active backlog until an
+  exact-SHA baseline receipt and a separate one-journey resume decision exist.
+- Phase 2E: use the retained rebaselined plan only after explicit reauthorization.
+  Research, Spot, and Futures each use an
   independent service cycle: disposable read candidate, final authoritative sync, write
   migration, then listener removal. Operations are added only with their producers and
   consumers.
 - For the current multi-market target architecture, use the approved 2026-07-12 design;
-  the 2026-07-11 architecture document is retained as earlier design history.
+  the 2026-07-11 architecture document is retained as explicitly superseded design
+  history.
 
 ## Acceptance evidence
 

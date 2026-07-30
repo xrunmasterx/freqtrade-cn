@@ -3,8 +3,9 @@
 > **For agentic workers:** Execute one task at a time with RED -> GREEN tests, an
 > independent requirements/security review, and separate backend/frontend/Root commits.
 
-**Current status (2026-07-30):** Tasks 1-4 are complete on the local, unpublished
-`phase2d-runtime-access-rebaseline` branch. Task 5 is the next implementation task.
+**Current status (2026-07-30):** Paused by the Product Phase 1 Baseline Capability Gate.
+Tasks 1-4 are complete, reusable, unpublished backend assets. Tasks 5-8 are retained
+resume instructions, not an active backlog.
 
 **Governing amendment:**
 `../specs/2026-07-30-runtime-access-rebaseline-design.md`
@@ -23,6 +24,9 @@ browser-facing generic proxy API.
 ## Global constraints
 
 - Follow the master plan, chart data-source rules, and the 2026-07-30 amendment.
+- Do not start Task 5+, Experiment, dynamic Runtime, Paper Observation, Runtime Access,
+  or other new Phase 2D feature work before an exact-SHA baseline receipt and an explicit
+  decision selecting this Phase 2D journey.
 - Base candles remain available when every Bot is stopped or Runtime Access is broken.
 - Existing 8081/8082/8083 services remain explicit compatibility services in Phase 2D.
 - No Research route, Bot status/log route, application write, lifecycle HTTP, or live lane
@@ -56,14 +60,17 @@ commits are not merged or pushed and must not be described as published work.
 
 ```mermaid
 flowchart LR
-    D14[Tasks 1-4 complete] --> D5[Task 5: base-only 8090 chart]
+    D14[Tasks 1-4 complete] --> G[Current: 8081/8083 Baseline Capability Gate]
+    G --> R{Explicit Phase 2D resume decision}
+    R -. if selected .-> D5[Task 5: base-only 8090 chart]
     D5 --> D6[Task 6: production readiness and managed target]
     D6 --> D7[Task 7: one Bot overlay slice]
     D7 --> D8[Task 8: Phase 2D acceptance]
     D8 --> E[Phase 2E import and cutover]
 ```
 
-Do not start Task 7 token or gateway code while Task 6 still lacks a separately accepted
+The dotted edge is not execution authority. Do not start Task 7 token or gateway code
+while Task 6 still lacks a separately accepted
 real endpoint producer and exact target query. An offline assembly test or invented
 endpoint does not satisfy this dependency.
 
@@ -88,6 +95,10 @@ regression tests and a separate justification.
 ---
 
 ## Task 5: One authenticated base-only chart on 8090
+
+> **Paused precondition:** `/platform-chart` is a later platform slice. It neither
+> replaces nor supplies evidence for the current 8081 `/graph` plus 8083 standard
+> Freqtrade backtest/analysis baseline.
 
 ### Scope
 
@@ -388,6 +399,11 @@ Write failing tests covering at least:
   rejection of arbitrary metadata or an unapproved source/kind;
 - response contains no base/watch layer from the runtime;
 - overlay alignment and base-only degradation;
+- official Strategy Indicator/Signal output omits the Forming Candle; a closed continuous
+  value may align forward according to metadata but cannot create a new provisional
+  strategy decision;
+- Strategy Signal points and execution Trade/Order/Fill points remain separately sourced
+  and labelled, and mismatched strategy execution evidence is absent;
 - chart refresh does not evaluate a strategy or create an order;
 - policy contains exactly `bot.strategy_overlay.read.v1`.
 
@@ -431,5 +447,6 @@ Only after explicit authorization:
 - Existing 8081/8082/8083 compatibility behavior is unchanged.
 - Reviewed component commits and verification evidence are recorded.
 
-After this gate, begin Phase 2E Task 1. Do not infer permission to push, open or mutate a
-PR, start online services, remove fixed listeners, or enable live trading.
+After this gate, stop for an explicit next-journey decision. Do not automatically begin
+Phase 2E Task 1 or infer permission to push, open or mutate a PR, start online services,
+remove fixed listeners, or enable live trading.

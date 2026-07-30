@@ -1,3 +1,8 @@
+> **Historical design — superseded:** Retained for provenance only. This document was
+> superseded by
+> `2026-07-12-multi-market-research-trading-platform-design.md` and is not an
+> implementation or current-status authority. Use `../README.md` for current work.
+
 # 多市场研究平台总体架构设计
 
 ## 状态

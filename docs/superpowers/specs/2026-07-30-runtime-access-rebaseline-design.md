@@ -1,10 +1,18 @@
 # Runtime Access Minimal Vertical-Slice Rebaseline
 
-**Status:** Approved implementation amendment
+**Status:** Approved Runtime Access resume design; current execution paused by the
+Product Phase 1 Baseline Capability Gate
 
 **Date:** 2026-07-30
 
-**Active branch:** `phase2d-runtime-access-rebaseline`
+**Original implementation branch:** `phase2d-runtime-access-rebaseline`
+
+> **Execution-order supersession:** This document remains the reviewed technical design
+> if Runtime Access is selected later. It is not the current work queue. Use
+> [the Baseline Capability Gate](../plans/2026-07-30-phase1-baseline-capability-gate.md)
+> on `phase1-baseline-capability-gate`. The preconfigured 8081 service is compatibility
+> evidence only; it is not a dynamic RuntimeInstance, `paper_probe`, or formal Product
+> Phase 1 Paper acceptance.
 
 **Amends:**
 
@@ -29,6 +37,11 @@ unimplemented until a concrete cutover task proves that a current consumer needs
 The browser does not receive a general Runtime Access proxy. It calls typed
 `platform-control` APIs. The gateway is an internal application service that can perform
 only committed semantic operations.
+
+No route, token, gateway, Supervisor-enablement, Experiment, dynamic Runtime, Paper
+Observation, or 8090 chart work in this design is currently authorized. A passing
+compatibility baseline must be followed by an explicit decision selecting this exact
+Runtime Access journey before implementation resumes.
 
 This is the smallest design that proves the difficult boundary:
 
@@ -69,21 +82,24 @@ tests backed only by invented endpoints would prove a mock, not the system.
 
 ## 3. First-principles invariants
 
-1. **No producer, no gateway.** An endpoint is routable only after the Supervisor has
+1. **Baseline before expansion.** Existing 8081 watch/runtime and 8083 standard
+   Freqtrade backtest/analysis journeys must pass the exact-SHA Baseline Capability Gate;
+   a pass still requires an explicit Runtime Access resume decision.
+2. **No producer, no gateway.** An endpoint is routable only after the Supervisor has
    verified a healthy exact attempt and persisted its internal-only endpoint.
-2. **No consumer, no route.** A route enters policy only in the same slice that migrates
+3. **No consumer, no route.** A route enters policy only in the same slice that migrates
    and tests its concrete consumer.
-3. **Semantic operation, not mechanical path.** Policy identifies a stable operation such
+4. **Semantic operation, not mechanical path.** Policy identifies a stable operation such
    as `bot.strategy_overlay.read.v1`; it is not a copy of every existing HTTP path.
-4. **One route ID, one method, one fixed upstream template.** Method and path are policy
+5. **One route ID, one method, one fixed upstream template.** Method and path are policy
    facts. Broad route groups grant no authority.
-5. **The runtime cannot mint platform authority.** It receives only a verification public
+6. **The runtime cannot mint platform authority.** It receives only a verification public
    key and immutable attempt identity.
-6. **No fallback target and no read retry.** Missing, stopped, stale, duplicate, or
+7. **No fallback target and no read retry.** Missing, stopped, stale, duplicate, or
    identity-mismatched targets fail closed. The client can refresh later.
-7. **Base market data is independent.** Runtime Access failure is an overlay warning, not
+8. **Base market data is independent.** Runtime Access failure is an overlay warning, not
    a base-chart outage.
-8. **Compatibility stays explicit.** Existing 8081/8082/8083 services remain available
+9. **Compatibility stays explicit.** Existing 8081/8082/8083 services remain available
    until the corresponding Phase 2E journey passes parity and rollback gates.
 
 ## 4. Route disposition
@@ -174,8 +190,10 @@ Safety load these same packaged bytes.
 
 The runtime verifies that market, product, venue, instrument, and canonical timeframe are
 compatible with its immutable spec/configuration. It reads only already-recorded,
-fully-analyzed candle output inside the requested window; the final forming candle may
-therefore have no overlay. It never analyzes a new candle to satisfy the request.
+fully-analyzed closed-candle strategy output inside the requested window; official
+Strategy Indicator and Strategy Signal output must omit the Forming Candle. It never
+analyzes a new candle to satisfy the request. Strategy Signal points remain distinct from
+execution Trade/Order/Fill points and cannot be used as proof of execution.
 
 `StrategyOverlayResponseV1` is also frozen and extra-forbid. Every top-level field is
 required; `layers` and `warnings` may be empty:
@@ -292,10 +310,20 @@ These are inventory labels, not verified API truth. For example, the old
 slice must derive method/path from the matched backend route and the actual consumer; it
 must not copy this list into policy.
 
+"Deferred from Runtime Access" does not deprecate a current compatibility journey.
+8081 `/graph` and `/trade` remain baseline watch/runtime paths; standard Freqtrade
+`/backtest` and analysis remain on 8083. The simplified `/research` SMA calculation
+remains frozen compatibility behavior and is not promoted into Runtime Access or
+authoritative backtesting.
+
 ## 5. Dependency-correct delivery stages
+
+The table preserves the resume order after an explicit decision. Stage -1 is the only
+active stage; Stages 0-4 are paused.
 
 | Stage | Phase | Deliverable | Exit condition |
 |---|---|---|---|
+| -1 | Product Phase 1 | Compatibility Baseline Capability Gate | 8081 watch/runtime plus 8083 standard Freqtrade backtest/analysis pass at exact SHAs; stop for one resume decision |
 | 0 | 2D Tasks 1-5 | Canonical candles plus one authenticated, base-only 8090 FreqUI chart | With all Bot services stopped, the browser renders a controlled canonical snapshot and follows the server-published cadence; a real provider remains a separately authorized Task 8 smoke |
 | 1 | 2D Task 6 | Production-readiness closure plus real managed paper-probe target lifecycle | Existing Supervisor production blockers 1-6 close offline; separately authorized probe smoke produces exactly one immutable internal endpoint and invalidates it on stop |
 | 2 | 2D Tasks 7-8 | One Bot overlay operation end to end | 8090 chart keeps base candles on overlay failure and shows correctly aligned Bot-owned layers when the paper probe is healthy |
@@ -307,6 +335,14 @@ depends on dormant Research policies created before the worker exists. This remo
 old Phase 2D/2E cycle.
 
 ## 6. Browser and public API boundary
+
+The current route disposition precedes this later boundary:
+
+- 8081 `/graph`: compatibility live watch and strategy review;
+- 8081 `/trade`: compatibility dry-run Spot runtime observation/operations;
+- 8083 `/backtest` and analysis routes: standard Freqtrade offline validation;
+- 8083 `/research`: frozen simplified compatibility behavior, not backtest authority;
+- 8090 `/platform-chart`: resume-only and not current baseline evidence.
 
 The accepted default is same-origin:
 
@@ -463,6 +499,9 @@ Concurrency saturation adds `runtime_busy`; it is not retried automatically.
 Phase 2D does not add:
 
 - 49-route compatibility parity;
+- formalization of 8081 as a dynamic RuntimeInstance, Product Bot, `paper_probe`, or
+  Paper Observation;
+- expansion of the simplified Research SMA backtest;
 - Bot status, logs, configuration, balance, trade-history, backtest, or action proxying;
 - Research Runtime Access or a fake Registry endpoint for fixed port 8083;
 - generic route groups, generic proxy controllers, arbitrary path parameters, or a
@@ -478,6 +517,10 @@ compliance/multi-host boundary demands it.
 
 ## 11. Phase 2D acceptance and stop conditions
 
+This section is inapplicable until the exact-SHA Baseline Capability Gate passes and a
+recorded decision explicitly resumes Phase 2D. Baseline evidence from fixed 8081/8083
+services must never be relabelled as managed-runtime or Paper acceptance.
+
 Phase 2D is accepted only when all of the following are true:
 
 - Tasks 1-4 remain green and their canonical market-data contract is unchanged;
@@ -492,6 +535,8 @@ Phase 2D is accepted only when all of the following are true:
 - wrong instance, attempt, route, key, policy revision, network identity, endpoint, owner,
   or state fails before upstream access;
 - overlay failure preserves the base chart and produces a stable warning;
+- official Strategy Indicator/Signal output omits the Forming Candle, and Strategy Signals
+  remain distinct from execution Trade/Order/Fill evidence;
 - chart refresh never evaluates a strategy or creates an order;
 - no Research route, generic Runtime Access public API, application write, or fixed-port
   removal appears in the Phase 2D diff;

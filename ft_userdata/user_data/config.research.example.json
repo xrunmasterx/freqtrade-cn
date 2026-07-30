@@ -1,6 +1,7 @@
 {
     "$schema": "https://schema.freqtrade.io/schema.json",
     "bot_name": "freqtrade-cn-a-share-research",
+    "strategy_path": "/freqtrade/user_data/strategies",
     "research_input_root": "/freqtrade/user_data/research_data",
     "research_bots": [
         {

@@ -4,10 +4,11 @@
 > coding. Execute one bounded task at a time with RED -> GREEN verification and an
 > independent review.
 
-**Current status (2026-07-30):** Phases 2A-2C are merged into local Root `main`. Phase 2D
-Tasks 1-4 are complete only on the local, unpublished
-`phase2d-runtime-access-rebaseline` branch. Phase 2D Task 5 is next. Phase 2E remains
-blocked on the rebaselined Phase 2D Task 8 gate.
+**Current status (2026-07-30):** Phases 2A-2C are merged into local Root `main`.
+Phase 2D Tasks 1-4 are retained as complete, reusable, unpublished backend assets.
+The only active work is the Product Phase 1 Baseline Capability Gate on
+`phase1-baseline-capability-gate`. Phase 2D Tasks 5-8 and all Phase 2E work are paused;
+a baseline pass starts a resume decision, not the next task automatically.
 
 **Goal:** Deliver a governed Runtime Registry and Supervisor, Bot-independent market data,
 one proven minimal Runtime Access vertical slice, and then a controlled journey-by-journey
@@ -23,12 +24,14 @@ behavior is exposed only by exact semantic operations with real producers and co
 
 Read in this order:
 
-1. `../README.md` for current status and supersession rules.
-2. `../specs/2026-07-12-runtime-registry-v2-design.md` for the governing Phase 2 design.
-3. `../specs/2026-07-30-runtime-access-rebaseline-design.md` for the approved Runtime
+1. `../STRATEGY.md` for product purpose and delivery policy.
+2. `../README.md` for current status and supersession rules.
+3. `2026-07-30-phase1-baseline-capability-gate.md` for the only active plan.
+4. `../specs/2026-07-12-runtime-registry-v2-design.md` for the governing Phase 2 design.
+5. `../specs/2026-07-30-runtime-access-rebaseline-design.md` for the approved Runtime
    Access rollout amendment.
-4. The active phase plan below.
-5. `../../chart-data-source-rules.md` before any chart, overlay, tooltip, or decision-
+6. The paused phase plan below only after an explicit resume decision.
+7. `../../chart-data-source-rules.md` before any chart, overlay, tooltip, or decision-
    evidence change.
 
 The amendment changes only Runtime Access breadth, ordering, the first operation/audit
@@ -57,6 +60,14 @@ secret, and safety invariants remain.
 - Secret values never enter PostgreSQL, RuntimeSpec, API, audit, log, error, receipt, Git,
   or ordinary environment variables.
 - Base candles are independent of Bot health; overlay failure cannot erase them.
+- The compatibility baseline uses 8081 `/graph` and `/trade` for live watch/runtime
+  observation, and 8083 `/backtest` plus analysis routes for standard Freqtrade offline
+  validation. The simplified `/research` SMA calculation is not backtest authority.
+- `1m` is the minimum near-real-time watch timeframe and approximately ten seconds is
+  its fastest normal cadence; no raw-tick or sub-minute behavior is implied.
+- Official Strategy Indicators and Strategy Signals use closed source candles. A
+  Strategy Signal is not an Order, Fill, or Trade, and mismatched strategy execution
+  evidence is not overlaid.
 - Chart/AI refresh never evaluates a strategy, creates an OrderIntent, invokes risk
   approval, or submits an order.
 - Ambiguous lifecycle or application-write outcomes are reconciled and never blindly
@@ -71,15 +82,17 @@ secret, and safety invariants remain.
 1. [Phase 2A: Registry and Platform Control](2026-07-12-runtime-registry-v2-phase2a-control-plane.md) — completed and merged.
 2. [Phase 2B: Trusted Template and RuntimeSpec Compiler](2026-07-12-runtime-registry-v2-phase2b-compiler.md) — completed and merged.
 3. [Phase 2C: Supervisor and Safe Runtime Driver](2026-07-12-runtime-registry-v2-phase2c-supervisor.md) — completed at the accepted offline/fail-closed boundary.
-4. [Phase 2D: Market Data and Minimal Runtime Access](2026-07-12-runtime-registry-v2-phase2d-market-data-ui.md) — active; Task 5 next.
-5. [Phase 2E: Managed Migration and Controlled Cutover](2026-07-12-runtime-registry-v2-phase2e-cutover.md) — planned; blocked on Phase 2D Task 8.
+4. [Phase 2D: Market Data and Minimal Runtime Access](2026-07-12-runtime-registry-v2-phase2d-market-data-ui.md) — Tasks 1-4 complete locally; Tasks 5-8 paused.
+5. [Phase 2E: Managed Migration and Controlled Cutover](2026-07-12-runtime-registry-v2-phase2e-cutover.md) — provisional and paused.
 
 ```mermaid
 flowchart LR
     A[2A Registry] --> B[2B Compiler]
     B --> C[2C Safe Supervisor]
     C --> D14[2D Tasks 1-4 canonical market data]
-    D14 --> D5[2D Task 5 base-only 8090 chart]
+    D14 --> G[Current: compatibility Baseline Capability Gate]
+    G --> R{Explicit one-journey resume decision}
+    R -. if Phase 2D is selected .-> D5[2D Task 5 base-only 8090 chart]
     D5 --> D6[2D Task 6 production readiness and real endpoint]
     D6 --> D7[2D Task 7 one Bot overlay]
     D7 --> D8[2D Task 8 acceptance]
@@ -89,6 +102,10 @@ flowchart LR
     E3 --> E4[Spot service cycle and 8081 removal]
     E4 --> E5[Futures service cycle and 8082 removal]
 ```
+
+The solid path stops at the current Gate and decision. The dotted edge is not execution
+authority. Phase 2D Task 5 resumes only if that exact user journey is selected and its
+plan is reapproved against the baseline receipt.
 
 This ordering deliberately avoids three invalid shortcuts:
 
@@ -103,9 +120,9 @@ This ordering deliberately avoids three invalid shortcuts:
 
 | Repository | Branch/state | Current reviewed Phase 2D commit |
 |---|---|---|
-| Root | `phase2d-runtime-access-rebaseline` | `2128646` |
-| Backend `freqtrade/` | `phase2d-runtime-access-rebaseline` | `b9345c4a6` |
-| Frontend `frequi/` | detached, unchanged for Phase 2D | `09b235d8` |
+| Root | `phase1-baseline-capability-gate` | starting point `f69c69e`; last Phase 2D implementation `2128646` |
+| Backend `freqtrade/` | `phase1-baseline-capability-gate` | `b9345c4a6` |
+| Frontend `frequi/` | `phase1-baseline-capability-gate`, unchanged for Phase 2D | `09b235d8` |
 
 Phase 2D local commit chain:
 
@@ -122,6 +139,7 @@ These are local development commits, not merged or published Phase 2D evidence.
 
 | Requirement | Owning phase/task |
 |---|---|
+| Existing 8081 watch/runtime plus 8083 standard Freqtrade backtest/analysis, with closed-candle strategy evidence and separate execution markers | Product Phase 1 Baseline Capability Gate |
 | PostgreSQL control plane, closed runtime domain, authenticated 8090 read API | 2A |
 | Trusted templates, secret references, allocations, deterministic compiler | 2B |
 | Supervisor-only Docker, persisted launch authority, private access network, failure/recovery controls | 2C |
@@ -158,6 +176,24 @@ For each active task:
 If a prerequisite is fake or absent, stop at the prerequisite. Do not hide the gap behind
 a mock production target, fixed-port adapter, generic abstraction, or speculative policy.
 
+## Current Baseline Capability Gate
+
+The active Gate is defined only by
+[the 2026-07-30 plan](2026-07-30-phase1-baseline-capability-gate.md):
+
+- 8081 `/graph` proves 1m near-real-time watch, strategy indicators, and closed-candle
+  signal points;
+- 8081 `/trade` proves unchanged preconfigured dry-run Spot compatibility behavior;
+- 8083 `/backtest` proves the complete standard Freqtrade backtest/result journey;
+- 8083 Lookahead and Recursive routes prove supporting strategy analysis;
+- strategy Signals and execution Trades remain distinct and strategy-context matched;
+- no Experiment, dynamic Runtime, Paper Observation, Runtime Access, 8090 chart, or
+  listener-removal work enters the Gate diff.
+
+A failure permits only the smallest root-cause baseline fix and rerun. A pass records an
+exact-SHA receipt and stops for one next-journey decision. It does not automatically
+unlock Phase 2D, Phase 2E, or formal Paper work.
+
 ## Phase gates
 
 A phase is not complete until:
@@ -172,6 +208,7 @@ A phase is not complete until:
 Phase 2D completion does **not** mean fixed ports are removed. It proves base market data,
 real target lifecycle, and one Bot overlay operation while compatibility services stay
 unchanged. Phase 2E owns consumer parity, state cutover, and listener removal.
+Neither phase is active merely because the current Baseline Capability Gate passes.
 
 ## Final Phase 2 offline gate
 

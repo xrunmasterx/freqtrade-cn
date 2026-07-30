@@ -223,6 +223,9 @@ class TradingConfigSafetyTests(unittest.TestCase):
             )
         )
         config["user_data_dir"] = STATE_PATH
+        self.assertEqual(config.get("strategy_path"), STRATEGY_PATH)
+        strategy_source = volume_for(self.services["freqtrade-research"], STRATEGY_PATH)
+        self.assertTrue(strategy_source.get("read_only", False))
         self.assertEqual(config.get("research_input_root"), RESEARCH_DATA_PATH)
         research_source = volume_for(
             self.services["freqtrade-research"], RESEARCH_DATA_PATH

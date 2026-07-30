@@ -59,6 +59,7 @@ RESEARCH_PATH_MIGRATIONS = (
     ),
 )
 RESEARCH_INPUT_ROOT = "/freqtrade/user_data/research_data"
+RESEARCH_STRATEGY_PATH = "/freqtrade/user_data/strategies"
 RUNTIME_IDENTITY_KEYS = (
     "FREQTRADE_RUNTIME_UID",
     "FREQTRADE_RUNTIME_GID",
@@ -776,6 +777,10 @@ def migrate_research_paths(root: Path, manifest: dict[str, Any]) -> None:
     input_root = document.get("research_input_root")
     if input_root not in (None, RESEARCH_INPUT_ROOT):
         raise ValueError("research path migration rejected unknown input root")
+    has_strategy_path = "strategy_path" in document
+    strategy_path = document.get("strategy_path")
+    if has_strategy_path and strategy_path != RESEARCH_STRATEGY_PATH:
+        raise ValueError("research path migration rejected unknown strategy path")
 
     values: list[tuple[dict[str, Any], str, str]] = []
     for profile in profiles:
@@ -783,19 +788,24 @@ def migrate_research_paths(root: Path, manifest: dict[str, Any]) -> None:
             raise ValueError("research path migration requires research profiles")
         for section, key, legacy, interim, approved in RESEARCH_PATH_MIGRATIONS:
             container = profile.get(section)
-            value = container.get(key) if type(container) is dict else None
+            if container is None and section in {"market_data", "side_data"}:
+                continue
+            if type(container) is not dict:
+                raise ValueError("research path migration rejected unknown value")
+            value = container.get(key)
             allowed = (legacy, interim) if input_root is None else (approved,)
             if value not in allowed:
                 raise ValueError("research path migration rejected unknown value")
             values.append((container, key, approved))
 
-    changed = input_root is None
+    changed = input_root is None or not has_strategy_path
     for container, key, approved in values:
         if container[key] != approved:
             container[key] = approved
             changed = True
     if changed:
         document["research_input_root"] = RESEARCH_INPUT_ROOT
+        document["strategy_path"] = RESEARCH_STRATEGY_PATH
         _atomic_write_text(
             config_path,
             json.dumps(document, indent=4, ensure_ascii=False) + "\n",
@@ -879,6 +889,11 @@ def verify_runtime(
         state_roots.add(state_root)
 
         config_data = json.loads(config.read_text(encoding="utf-8"))
+        if (
+            service["role"] == "research"
+            and config_data.get("strategy_path") != RESEARCH_STRATEGY_PATH
+        ):
+            raise ValueError("research strategy path differs from runtime contract")
         api_server = config_data.get("api_server", {})
         for key in ("password", "jwt_secret_key", "ws_token"):
             if api_server.get(key) != SENTINEL:

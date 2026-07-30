@@ -44,19 +44,19 @@ class BootstrapRuntimeTests(unittest.TestCase):
         for service in self.manifest["services"]:
             template = self.root / service["config_template"]
             template.parent.mkdir(parents=True, exist_ok=True)
+            config = {
+                "dry_run": True,
+                "exchange": {"name": "okx", "key": "", "secret": ""},
+                "api_server": {
+                    "password": SENTINEL,
+                    "jwt_secret_key": SENTINEL,
+                    "ws_token": SENTINEL,
+                },
+            }
+            if service["role"] == "research":
+                config["strategy_path"] = "/freqtrade/user_data/strategies"
             template.write_text(
-                json.dumps(
-                    {
-                        "dry_run": True,
-                        "exchange": {"name": "okx", "key": "", "secret": ""},
-                        "api_server": {
-                            "password": SENTINEL,
-                            "jwt_secret_key": SENTINEL,
-                            "ws_token": SENTINEL,
-                        },
-                    }
-                )
-                + "\n",
+                json.dumps(config) + "\n",
                 encoding="utf-8",
             )
 
@@ -412,6 +412,10 @@ class BootstrapRuntimeTests(unittest.TestCase):
             migrated.get("research_input_root"),
             "/freqtrade/user_data/research_data",
         )
+        self.assertEqual(
+            migrated.get("strategy_path"),
+            "/freqtrade/user_data/strategies",
+        )
         profile = migrated["research_bots"][0]
         self.assertEqual(profile["data_source"]["root"], "a_share")
         self.assertEqual(profile["market_data"]["meta_root"], "a_share_meta")
@@ -445,6 +449,10 @@ class BootstrapRuntimeTests(unittest.TestCase):
             migrated.get("research_input_root"),
             "/freqtrade/user_data/research_data",
         )
+        self.assertEqual(
+            migrated.get("strategy_path"),
+            "/freqtrade/user_data/strategies",
+        )
         profile = migrated["research_bots"][0]
         self.assertEqual(profile["data_source"]["root"], "a_share")
         self.assertEqual(profile["market_data"]["meta_root"], "a_share_meta")
@@ -455,6 +463,7 @@ class BootstrapRuntimeTests(unittest.TestCase):
         config_path.parent.mkdir(parents=True, exist_ok=True)
         document = {
             "research_input_root": "/freqtrade/user_data/research_data",
+            "strategy_path": "/freqtrade/user_data/strategies",
             "research_bots": [
                 {
                     "data_source": {"root": "a_share"},
@@ -479,6 +488,63 @@ class BootstrapRuntimeTests(unittest.TestCase):
 
         atomic_write.assert_not_called()
         self.assertEqual(config_path.read_bytes(), before)
+
+    def test_migrate_research_paths_preserves_absent_optional_side_sections(self) -> None:
+        config_path = self.root / "configs/research.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        document = {
+            "research_bots": [
+                {
+                    "data_source": {"root": "research_data/a_share"},
+                }
+            ],
+        }
+        config_path.write_text(json.dumps(document), encoding="utf-8")
+        self.manifest["services"][2]["config_path"] = "configs/research.json"
+
+        bootstrap_runtime.migrate_research_paths(self.root, self.manifest)
+
+        migrated = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["strategy_path"], "/freqtrade/user_data/strategies")
+        self.assertEqual(
+            migrated["research_input_root"], "/freqtrade/user_data/research_data"
+        )
+        profile = migrated["research_bots"][0]
+        self.assertEqual(profile["data_source"]["root"], "a_share")
+        self.assertNotIn("market_data", profile)
+        self.assertNotIn("side_data", profile)
+
+    def test_migrate_research_paths_rejects_unknown_strategy_path_without_write(
+        self,
+    ) -> None:
+        for value in ("/custom/strategies", None, 7, []):
+            with self.subTest(value_type=type(value).__name__):
+                config_path = self.root / "configs/research.json"
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                document = {
+                    "strategy_path": value,
+                    "research_bots": [
+                        {
+                            "data_source": {"root": "research_data/a_share"},
+                            "market_data": {"meta_root": "research_data/a_share_meta"},
+                            "side_data": {"root": "research_data/a_share_meta"},
+                        }
+                    ],
+                }
+                config_path.write_text(json.dumps(document), encoding="utf-8")
+                before = config_path.read_bytes()
+                self.manifest["services"][2]["config_path"] = "configs/research.json"
+
+                with (
+                    mock.patch.object(
+                        bootstrap_runtime, "_atomic_write_text"
+                    ) as atomic_write,
+                    self.assertRaisesRegex(ValueError, "research path migration"),
+                ):
+                    bootstrap_runtime.migrate_research_paths(self.root, self.manifest)
+
+                atomic_write.assert_not_called()
+                self.assertEqual(config_path.read_bytes(), before)
 
     def test_migrate_research_paths_rejects_unknown_values_without_partial_write(
         self,
@@ -525,6 +591,27 @@ class BootstrapRuntimeTests(unittest.TestCase):
         self.assertIn(
             "migrate-research-paths", bootstrap_runtime.build_parser().format_help()
         )
+
+    def test_verify_requires_fixed_research_strategy_path(self) -> None:
+        bootstrap_runtime.init_runtime(self.root, self.manifest)
+        research_config = self.root / self.manifest["services"][2]["config_path"]
+        approved = json.loads(research_config.read_text(encoding="utf-8"))
+
+        for value in (mock.sentinel.missing, None, "/custom/strategies", 7):
+            with self.subTest(value_type=type(value).__name__):
+                document = copy.deepcopy(approved)
+                if value is mock.sentinel.missing:
+                    document.pop("strategy_path")
+                else:
+                    document["strategy_path"] = value
+                research_config.write_text(json.dumps(document), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    ValueError, "research strategy path differs from runtime contract"
+                ) as caught:
+                    bootstrap_runtime.verify_runtime(self.root, self.manifest)
+
+                self.assertNotIn("/custom/strategies", str(caught.exception))
 
     def test_verify_requires_data_and_backtest_directories_for_every_service(
         self,

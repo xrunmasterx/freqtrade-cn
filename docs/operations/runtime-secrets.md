@@ -61,6 +61,7 @@ From a recursive clone:
 ```powershell
 Copy-Item .env.example .env
 python tools/bootstrap_runtime.py init
+python tools/bootstrap_runtime.py migrate-research-paths
 python tools/bootstrap_runtime.py sanitize-api-configs
 python tools/bootstrap_runtime.py verify
 python tools/runtime_contract.py --check-configs-only
@@ -68,11 +69,14 @@ python tools/compose_runtime.py --profile trading --profile research config --qu
 ```
 
 `init` is idempotent and refuses to replace an existing operational config or
-secret. `sanitize-api-configs` leaves sentinel values in config instead of real
-credentials, and `verify` checks the per-service secret suite and runtime
-ownership/permissions. Do not print or open secret files during verification.
-The UI username may be supplied by a template, but there is no repository-default
-password. Never put login information in logs, issues, chat, or screenshots.
+secret. `migrate-research-paths` is the explicit, idempotent migration that adds
+Research's fixed read-only strategy path and normalizes only approved legacy
+Research input roots; it rejects customized values without writing the file.
+`sanitize-api-configs` leaves sentinel values in config instead of real credentials,
+and `verify` checks the per-service secret suite, Research strategy path, and runtime
+ownership/permissions. Do not print or open secret files during verification. The UI
+username may be supplied by a template, but there is no repository-default password.
+Never put login information in logs, issues, chat, or screenshots.
 
 QQE is outside the formal root runtime contract. It must not be added piecemeal;
 formalization requires its manifest entry, template, strategy, tests, and Compose

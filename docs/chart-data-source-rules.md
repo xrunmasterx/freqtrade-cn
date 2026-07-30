@@ -15,6 +15,23 @@ pair + candle_type + timeframe + candle_open_time
 Derived values are not just numbers. They must carry source, timeframe, alignment, coverage,
 and trust level through chart metadata.
 
+## Observation and Decision Time
+
+The minimum near-real-time watch timeframe is `1m`; its fastest normal polling cadence
+is approximately `10s`. This is minute-candle observation, not a raw-trade tick stream,
+an exact real-time guarantee, or an HFT path.
+
+The final market candle may be forming and may change between polls. Market OHLCV and
+Watch Indicators may describe that row, but a Watch Indicator on it is provisional.
+Official Strategy Indicators and Strategy Signals use closed strategy candles only:
+
+- an equal-timeframe strategy series omits an unclosed final source row;
+- a lower-chart-timeframe alignment may carry the latest closed continuous strategy value
+  forward, but this does not mean the forming chart candle was evaluated;
+- entry/exit signals align to an exact closed candle open and are never forward-filled;
+- `last_candle_complete`, alignment, and `provisional` metadata must preserve this
+  distinction through the UI.
+
 ## Source Domains
 
 ### Market
@@ -47,6 +64,29 @@ Rules:
 - Preserve and report alignment: `direct`, `forward_fill`, `hidden`, or `unavailable`.
 - If chart timeframe is higher than strategy timeframe, hide unsupported continuous overlays and
   return a warning instead of inventing aggregation.
+- A strategy entry/exit signal is decision evidence, not evidence that an Order, Fill, or
+  Trade occurred.
+
+### Execution
+
+Execution evidence comes from persisted Paper Trades/Orders/Fills or simulated backtest
+results at their recorded time and price.
+
+Rules:
+
+- Keep execution markers in a separate series/layer, legend entry, and tooltip from
+  Strategy Signals.
+- Never synthesize an execution marker from an entry/exit signal column.
+- Never overlay Runtime execution evidence when its strategy context does not match the
+  chart's exact strategy/revision/release context. A matching strategy name alone is not
+  sufficient when stronger identity is available.
+- Gate A compatibility payloads expose strategy name and usually strategy timeframe, but
+  no revision/release identity. Suppress explicitly mismatched names and, when both sides
+  provide it, mismatched strategy timeframes. Retain a Trade with missing strategy or
+  timeframe only for legacy compatibility, and treat those cases or a name/timeframe
+  match as weak compatibility evidence rather than formal exact-context proof.
+- Use the existing `execution` source metadata when execution evidence is represented in
+  the chart contract.
 
 ### Decision Snapshot
 
@@ -77,6 +117,10 @@ column, label, source, kind, panel, timeframe, visible, coverage, provisional
 Coverage is user-facing trust information. Calculate it after final trimming and preserve
 missing values as missing values.
 
+`provisional=true` means the displayed value can change because its own source candle
+is forming. It must not be used to label a closed-candle Strategy Indicator or Signal as
+provisional decision output.
+
 ## Window Semantics
 
 Keep these concepts separate:
@@ -95,6 +139,10 @@ FreqUI should render from metadata when available:
 - Legend labels come from `ChartSeriesMeta.label`.
 - Tooltip groups come from `ChartLayerMeta.source` and `label`.
 - Decision evidence appears above strategy output and watch indicators.
+- Strategy Signals and execution markers remain separately labelled and visually
+  distinguishable even when they share a candle timestamp.
+- A strategy-context mismatch suppresses execution markers and reports why; it never
+  displays a plausible but unrelated trade.
 - One visible crosshair selection must map to one candle timestamp and one data index.
 - Candle-time bars must be visually centered on their `candle_open_time`. When multiple bar
   series share a panel and x axis, render them as timestamp-overlaid evidence, not as
@@ -114,6 +162,10 @@ When adding or changing chart features, add tests that prove:
 - `meta.layers` identifies the correct source, status, alignment, labels, and coverage.
 - Watch and strategy data are never silently substituted for each other.
 - Decision snapshot evidence appears only for matching candle timestamps.
+- Live responses retain the Forming Candle for market/watch observation while official
+  Strategy Signals remain absent until their source candle closes.
+- Strategy Signals and execution markers cannot substitute for each other.
+- Mismatched strategy execution evidence is not rendered.
 - Frontend tooltip and legend behavior still work without metadata fallback.
 - Multiple candle-time bar series on the same axis remain centered on the selected candle
   timestamp.
@@ -132,7 +184,9 @@ pnpm typecheck
 For visible chart changes, rebuild and restart the owning local container, then verify the
 journey on its owning origin:
 
-- platform-owned base or Runtime Access overlay charts: `http://127.0.0.1:8090/platform-chart`;
-- explicitly retained legacy Bot-chart behavior: `http://127.0.0.1:8081/graph`.
+- current Baseline Capability Gate: `http://127.0.0.1:8081/graph`;
+- later platform-owned base or Runtime Access overlay charts, only after an explicit
+  Phase 2D resume: `http://127.0.0.1:8090/platform-chart`.
 
-Passing the legacy `8081/graph` journey does not prove a platform-chart change on 8090.
+Passing the compatibility `8081/graph` journey proves neither a platform-chart change
+on 8090 nor formal dynamic Paper acceptance.

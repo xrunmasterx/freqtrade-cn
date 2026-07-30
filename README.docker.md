@@ -30,7 +30,8 @@ the template, but the repository provides no UI password. Never write login
 information to logs or paste it into an issue, chat, or screenshot.
 
 `migrate-research-paths` is the explicit, idempotent migration for an existing
-ignored `config.research.json`. It changes only the known legacy A-share data,
+ignored `config.research.json`. It installs the fixed read-only strategy path
+`/freqtrade/user_data/strategies` and changes only the known legacy A-share data,
 metadata, and side-data roots (including the interim absolute form) to relative
 children of `research_input_root=/freqtrade/user_data/research_data`. Unknown or
 customized values are rejected without writing the file; neither `init` nor
@@ -99,7 +100,10 @@ image, and build, inspection, label, render, or launch-preflight failures do not
 fall back to a tag or an existing container. It is the formal runtime entrypoint.
 Every formal service uses `/freqtrade/state` as its writable userdata directory.
 Trading services load strategies from the read-only
-`/freqtrade/user_data/strategies` mount; Research has no strategy path.
+`/freqtrade/user_data/strategies` mount. Research does not preselect a strategy in
+its service command; standard Backtest, Lookahead, and Recursive Analysis resolve
+the user-selected trusted strategy through the same fixed read-only path declared
+in its operational config.
 
 ## Offline formal startup verification
 
