@@ -109,8 +109,10 @@ production assembly complete.
 
 ## Seven production blockers
 
-Production must remain disabled until all seven blockers are closed by reviewed
-code, tests and operational evidence:
+The current production path remains disabled. Blockers 1-6 must close through
+reviewed code, tests and operational evidence before a paper-probe-only assembly
+can be enabled. Blocker 7 then governs separately authorized online acceptance
+and later listener cutover:
 
 1. **Production dependency assembly.** Implement `_assemble_supervisor()` with
    the exact SQL repository, reconciler, preparation ports, compiler, network
@@ -135,14 +137,24 @@ code, tests and operational evidence:
    health and failure-latch telemetry; define alerts and retained evidence; and
    verify database-down status, inspect, logs and exact-identity emergency stop
    without enabling emergency start, rebuild or deletion.
-7. **Controlled cutover and authorized acceptance.** Rehearse backup, rollback
-   and identity-bound migration; pass exact-SHA Root Safety and a fresh recursive
-   checkout; then perform separately authorized online paper acceptance with no
-   real orders before retiring the 8081/8082/8083 compatibility services.
+7. **Controlled acceptance and cutover.** This blocker has two independent gates:
+   - **7a, narrow producer smoke:** after blockers 1-6 close, pass exact-SHA Root
+     Safety and a fresh recursive checkout, then separately authorize one exact
+     paper-probe start/health/endpoint/stop smoke with no real order. Keep
+     8081/8082/8083 unchanged.
+   - **7b, service cutover:** for Research, Spot and Futures independently,
+     rehearse identity-bound backup/final sync/rollback, migrate every active
+     consumer, prove one-writer authority, and only then retire that service's
+     compatibility listener.
 
 Closing an individual blocker does not authorize production enablement. The
-enable flag changes only in the reviewed change that closes and verifies all
-remaining blockers.
+reviewed Phase 2D Task 6 change may change `PRODUCTION_ASSEMBLY_ENABLED` only
+after blockers 1-6 are closed and Root Safety proves that the resulting assembly
+accepts the exact committed paper-probe path and rejects every other template,
+owner and environment. The deployment remains stopped by default; changing the
+flag does not create a lifecycle Job or authorize gate 7a. A failed 7a rolls the
+paper-probe deployment back to disabled. Gate 7b remains a Phase 2E requirement
+and cannot be inferred from 7a.
 
 ## Recommended production topology
 

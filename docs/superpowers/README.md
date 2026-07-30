@@ -8,24 +8,30 @@ not an active backlog.
 
 ## Current development state
 
-- Runtime Registry v2 Phases 2A, 2B, and 2C are merged into Root `main`.
+- Runtime Registry v2 Phases 2A, 2B, and 2C are merged into local Root `main`.
 - Phase 2C is accepted at its offline, fail-closed boundary. Production Supervisor
   assembly, online runtime acceptance, exchange writes, and live trading remain disabled.
-- Phase 2D is the next implementation phase.
-- Phase 2E remains planned and must not start before Phase 2D acceptance.
+- Phase 2D Tasks 1-4 are complete only on the local, unpublished
+  `phase2d-runtime-access-rebaseline` branch. Root is at `2128646`; backend is at
+  `b9345c4a6`; frontend is unchanged at `09b235d8`.
+- Phase 2D Task 5, one authenticated base-only chart on 8090, is the next implementation
+  task.
+- Phase 2E remains planned and must not start before the rebaselined Phase 2D Task 8 gate.
 
 ## Active implementation entrypoints
 
 | Role | Document | Status |
 |---|---|---|
 | Coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Governing Phase 2 sequence and constraints |
-| Next implementation | `plans/2026-07-12-runtime-registry-v2-phase2d-market-data-ui.md` | Active next phase |
-| Later implementation | `plans/2026-07-12-runtime-registry-v2-phase2e-cutover.md` | Planned; blocked on Phase 2D acceptance |
+| Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved amendment; read before remaining Phase 2D work |
+| Next implementation | `plans/2026-07-12-runtime-registry-v2-phase2d-market-data-ui.md` | Active; Tasks 1-4 complete locally, Task 5 next |
+| Later implementation | `plans/2026-07-12-runtime-registry-v2-phase2e-cutover.md` | Planned; blocked on Phase 2D Task 8 |
 
 ## Governing specifications
 
 - `specs/2026-07-12-multi-market-research-trading-platform-design.md`
 - `specs/2026-07-12-runtime-registry-v2-design.md`
+- `specs/2026-07-30-runtime-access-rebaseline-design.md`
 - `specs/2026-07-15-phase2c-runtime-driver-contract-design.md`
 - `specs/2026-07-17-phase2c-task7b-persisted-launch-authority-design.md`
 - `../chart-data-source-rules.md` for chart indicators, overlays, decision evidence,
@@ -60,6 +66,17 @@ publication and must not be used to infer current progress.
 - Phase 2C Task 3 and Task 4: use the dated 2026-07-16 repair/clarification plans and
   acceptance reports.
 - Phase 2C Task 7: use the 2026-07-17 Task 7A/7B plans, design, and acceptance reports.
+- Runtime Registry v2 design sections 13.4, 21.4, and 21.5: use
+  `specs/2026-07-30-runtime-access-rebaseline-design.md` for Runtime Access route breadth,
+  first-operation/audit contract, internal authentication, and dependency ordering. All
+  other safety constraints in the 2026-07-12 design remain governing.
+- Phase 2D Tasks 5-10: the active Phase 2D plan now replaces the old 49-route/token-first
+  sequence with Tasks 5-8: base-only 8090 chart, Supervisor production-readiness and real
+  target closure, one Bot overlay operation, and acceptance.
+- Phase 2E: use the active rebaselined plan. Research, Spot, and Futures each use an
+  independent service cycle: disposable read candidate, final authoritative sync, write
+  migration, then listener removal. Operations are added only with their producers and
+  consumers.
 - For the current multi-market target architecture, use the approved 2026-07-12 design;
   the 2026-07-11 architecture document is retained as earlier design history.
 

@@ -1,12 +1,20 @@
 # Runtime Registry v2 and Platform Control Cutover Design
 
-**Status:** Approved governing design; Phases 2A-2C implemented and merged, Phase 2D next
+**Status:** Approved governing design; Phases 2A-2C implemented and merged, Phase 2D in
+local development
 
 **Date:** 2026-07-12
 
 **Parent architecture:** `docs/superpowers/specs/2026-07-12-multi-market-research-trading-platform-design.md`
 
 **Foundation:** Phase 1 Market Catalog at root `ccd41474fc9f8bf4ca26809b92b3086fe505fcee` and backend `1eafd17500fe1e59a7bd7e10521583d43bb35fea`
+
+> **Runtime Access amendment (2026-07-30):**
+> `2026-07-30-runtime-access-rebaseline-design.md` supersedes sections 13.4, 21.4, and
+> 21.5 only for route breadth, the first operation/audit contract, internal authentication,
+> and Phase 2D/2E delivery order.
+> The remaining lifecycle, network, state, secret, and fail-closed constraints in this
+> design remain governing.
 
 ## 1. Decision summary
 

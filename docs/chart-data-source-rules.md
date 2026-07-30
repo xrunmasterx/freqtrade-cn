@@ -129,5 +129,10 @@ pnpm vitest run tests/unit/candleChartTooltip.spec.ts tests/unit/candleChartSeri
 pnpm typecheck
 ```
 
-For visible chart changes, rebuild and restart the local container, then verify
-`http://127.0.0.1:8081/graph`.
+For visible chart changes, rebuild and restart the owning local container, then verify the
+journey on its owning origin:
+
+- platform-owned base or Runtime Access overlay charts: `http://127.0.0.1:8090/platform-chart`;
+- explicitly retained legacy Bot-chart behavior: `http://127.0.0.1:8081/graph`.
+
+Passing the legacy `8081/graph` journey does not prove a platform-chart change on 8090.

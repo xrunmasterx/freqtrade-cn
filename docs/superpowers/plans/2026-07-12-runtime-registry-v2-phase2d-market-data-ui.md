@@ -1,788 +1,435 @@
+# Phase 2D Market Data and Minimal Runtime Access Implementation Plan
 
-# Phase 2D Market Data, Runtime Access Reads, and UI Implementation Plan
+> **For agentic workers:** Execute one task at a time with RED -> GREEN tests, an
+> independent requirements/security review, and separate backend/frontend/Root commits.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Current status (2026-07-30):** Tasks 1-4 are complete on the local, unpublished
+`phase2d-runtime-access-rebaseline` branch. Task 5 is the next implementation task.
 
-**Current status (2026-07-30):** Active next implementation phase. No Phase 2D
-implementation branch has been published yet.
+**Governing amendment:**
+`../specs/2026-07-30-runtime-access-rebaseline-design.md`
 
-**Goal:** Serve Bot-independent canonical candles and full refresh policy through 8090, add closed-policy read access to healthy Bot/Research runtimes, and migrate FreqUI watch/Research reads without losing strategy overlays or multi-timeframe behavior.
+**Goal:** Finish one Bot-independent base-chart journey on 8090, close the real managed
+target lifecycle, and then add exactly one Bot strategy-overlay Runtime Access operation.
+Research migration, broad Bot compatibility reads, application writes, and fixed-port
+removal belong to Phase 2E.
 
-**Architecture:** `MarketDataQueryService` owns public candle reads, canonical freshness metadata, TTL/coalescing, and provider adapters. `RuntimeAccessGateway` resolves exact Registry endpoints and signs short-lived instance-bound internal tokens; runtime API middleware verifies a platform public key, target instance, route group, and method. FreqUI authenticates once to platform-control and composes platform base candles with optional runtime-owned overlays.
+**Architecture:** `MarketDataQueryService` remains the sole owner of base candles. FreqUI
+is served by `platform-control` on the same 8090 origin. A typed live-chart service may
+optionally request one Bot-owned overlay through an internal, exact-route gateway. The
+gateway can resolve only a healthy Supervisor-produced Registry endpoint and never has a
+browser-facing generic proxy API.
 
-**Tech Stack:** FastAPI, Pydantic v2, httpx, ccxt public APIs, asyncio, cryptography/PyJWT, Vue 3, Pinia, Axios, Vitest, pytest, Ruff.
+## Global constraints
 
-## Global Constraints
+- Follow the master plan, chart data-source rules, and the 2026-07-30 amendment.
+- Base candles remain available when every Bot is stopped or Runtime Access is broken.
+- Existing 8081/8082/8083 services remain explicit compatibility services in Phase 2D.
+- No Research route, Bot status/log route, application write, lifecycle HTTP, or live lane
+  is added in this phase.
+- No caller-selected upstream URL, host, port, path, method, network, container, or
+  service is accepted anywhere.
+- Runtime Access has one semantic route ID, one fixed method/path, no route group, no
+  redirect, no retry, and no fallback target.
+- Runtime internal authentication is separate from user Basic/HS256 authentication.
+- A runtime can verify the platform's short-lived grant but cannot mint one.
+- Chart refresh reads recorded output only; it never evaluates a strategy or creates an
+  order.
+- Online exchange access and paper-runtime launch acceptance require separate explicit
+  authorization. Documentation approval is not online authorization.
 
-- Follow the master plan and completed Phase 2A-2C interfaces.
-- Public market-data adapters receive no API key, secret, password, or exchange-write capability.
-- Base candles remain available when a Bot is stopped.
-- Read Gateway accepts named closed routes only, follows no redirects, and never retries to another target.
-- Runtime tokens have exact audience `instance_id`, route group, HTTP method, short expiry, unique request ID, and platform signature.
-- A runtime can verify tokens but cannot mint tokens for itself or another runtime.
-- Refresh policy and forming/closed semantics match the approved specification exactly.
-- Strategy/AI/chart refresh is read-only and never triggers execution.
+## Verified progress
+
+| Task | Result | Root commit | Backend commit |
+|---|---|---|---|
+| 1. Versioned refresh policy and canonical candle contracts | Complete locally | `164b605` | `c6f774f7a` |
+| 2. Bounded cache and in-flight coalescing | Complete locally | `f402782` | `6e6f14b1d` |
+| 3. Closed OKX/Bitget public adapters and catalog correction | Complete locally | `ec47979` | `f82ad96b8` |
+| 4. `MarketDataQueryService` and authenticated API v2 | Complete locally | `2128646` | `b9345c4a6` |
+
+The frontend remains at `09b235d8`; no Phase 2D frontend change has been made. The Task 4
+implementation session reported 65 focused tests and a 425-test combined backend
+regression; no checked-in acceptance receipt independently reproduces those counts. These
+commits are not merged or pushed and must not be described as published work.
+
+## Dependency order
+
+```mermaid
+flowchart LR
+    D14[Tasks 1-4 complete] --> D5[Task 5: base-only 8090 chart]
+    D5 --> D6[Task 6: production readiness and managed target]
+    D6 --> D7[Task 7: one Bot overlay slice]
+    D7 --> D8[Task 8: Phase 2D acceptance]
+    D8 --> E[Phase 2E import and cutover]
+```
+
+Do not start Task 7 token or gateway code while Task 6 still lacks a separately accepted
+real endpoint producer and exact target query. An offline assembly test or invented
+endpoint does not satisfy this dependency.
 
 ---
 
-## File Structure
+## Completed Tasks 1-4
 
-### Backend submodule
+Tasks 1-4 delivered:
 
-- Create `freqtrade/platform/market_data_domain.py`: candle/freshness/policy DTOs and read protocol.
-- Create `freqtrade/platform/market_data_policy.py`: committed refresh-policy loader.
-- Create `freqtrade/platform/market_data_cache.py`: bounded TTL and in-flight coalescing.
-- Create `freqtrade/platform/market_data_adapters.py`: closed OKX/Bitget public adapters.
-- Create `freqtrade/platform/market_data_service.py`: validation, cache, provider selection.
-- Create `freqtrade/platform/runtime_access_domain.py`: named routes, grant claims, stable failures.
-- Create `freqtrade/platform/runtime_access_policy.py`: committed read route policy.
-- Create `freqtrade/platform/runtime_access_gateway.py`: Registry target resolution and bounded forwarding.
-- Create `freqtrade/platform_control/api_market_data.py`, `api_runtime_access.py`, and `chart_service.py`.
-- Create `freqtrade/platform_control/policies/market-data-refresh-v1.json`.
-- Create `freqtrade/platform_control/policies/runtime-access-read-v1.json`.
-- Modify Freqtrade API authentication/dependencies to accept valid platform internal read tokens only on approved routes.
-- Add backend tests.
+- immutable `market-data-refresh-v1` cadence with `60m -> 1h` and fail-closed unknown
+  timeframes;
+- canonical candle/freshness DTOs;
+- bounded TTL cache and exact-key in-flight coalescing;
+- credential-free, closed OKX/Bitget public candle adapters;
+- catalog-backed capability checks and Bitget catalog correction;
+- authenticated `GET /api/v2/market-data/candles` on `platform-control`.
 
-### Frontend submodule
-
-- Create `src/composables/platformLoginInfo.ts` and `platformApi.ts`.
-- Create `src/types/platform.ts` and `marketData.ts`.
-- Create `src/stores/platform.ts`, `marketData.ts`, and `runtimeAccess.ts`.
-- Modify `useLiveChartDataset.ts`, `useResearchChartAutoRefresh.ts`, `research.ts`, and relevant views/types.
-- Add unit/component/E2E fixtures and tests.
-
-### Root
-
-- Add platform signing private key/public key bootstrap and exact mounts.
-- Extend runtime templates and snapshot policy to mount public key plus instance identity read-only.
-- Add CI/Root Safety market-data and read-Gateway gates.
+Their earlier step-by-step instructions are preserved by Git history, not repeated as an
+active backlog in this plan. Any modification to these contracts requires focused
+regression tests and a separate justification.
 
 ---
 
-### Task 1: Versioned refresh policy and canonical candle contracts
+## Task 5: One authenticated base-only chart on 8090
 
-**Files:**
-- Create: `freqtrade/freqtrade/platform_control/policies/market-data-refresh-v1.json`
-- Create: `freqtrade/freqtrade/platform/market_data_domain.py`
-- Create: `freqtrade/freqtrade/platform/market_data_policy.py`
-- Modify: `freqtrade/freqtrade/platform/__init__.py`
-- Test: `freqtrade/tests/platform/test_market_data_policy.py`
-- Test: `freqtrade/tests/platform/test_market_data_domain.py`
+### Scope
 
-**Interfaces:**
-- Produces `MarketDataRefreshPolicy`, `RefreshPolicyEntry`, `CanonicalCandle`, `CandleSnapshot`, `MarketDataKey`, `DataFreshness`.
-- `60m` canonicalizes to `1h`; unknown timeframes raise `unknown_timeframe`.
-- Response carries policy revision and recommended/effective interval.
+Prove the user-visible value of Tasks 1-4 before building Runtime Access:
 
-- [ ] **Step 1: Write RED policy tests**
+- reuse the existing packaged FreqUI static router from `platform-control`, registered
+  after all `/api/v2` routes;
+- add one platform session/client using same-origin relative `/api/v2` URLs and a storage
+  key distinct from Bot login state;
+- add `/platform-login` and one isolated `/platform-chart` route/view that renders
+  canonical candles without an active Bot; keep the existing Bot-coupled `ChartsView.vue`
+  and TradingView unchanged;
+- use the one committed acceptance key
+  `digital_asset/spot/bitget/BTC-USDT/1m`; do not add a new instrument-catalog API or
+  general selector in this proof slice;
+- adapt canonical OHLCV to the existing chart frame without inventing strategy/watch
+  layers;
+- schedule refresh from the response policy and expose freshness/stale/error state;
+- leave TradingView Bot controls and all Research behavior on their current compatibility
+  paths.
 
-```python
-EXPECTED = {
-    "1m": 10_000,
-    "3m": 30_000,
-    "5m": 60_000,
-    "15m": 60_000,
-    "30m": 60_000,
-    "1h": 180_000,
-    "2h": 300_000,
-    "4h": 300_000,
-    "6h": 600_000,
-    "8h": 600_000,
-    "12h": 600_000,
-    "1d": 900_000,
-    "3d": 900_000,
-    "1w": 900_000,
-    "2w": 900_000,
-    "1M": 900_000,
-    "1y": 900_000,
-}
+Do not add CORS, a runtime instance selector, an overlay request, a generic Runtime Access
+store, or `/charts/live` in this task.
 
-def test_refresh_policy_matches_existing_ui_contract() -> None:
-    policy = load_refresh_policy()
-    assert {key: policy.interval_ms(key) for key in EXPECTED} == EXPECTED
-    assert policy.interval_ms("60m") == 180_000
-    with pytest.raises(UnknownTimeframe, match="unknown_timeframe"):
-        policy.interval_ms("unknown")
-```
+### Expected files
 
-Add DTO tests proving timezone-aware event/ingestion/availability timestamps, exact integer OHLCV timestamps, finite numeric prices, and `forming` mutually exclusive with `closed`.
+Backend:
 
-- [ ] **Step 2: Run RED**
+- Modify `freqtrade/freqtrade/platform_control/app.py`.
+- Reuse `freqtrade/freqtrade/rpc/api_server/web_ui.py`; do not fork its static-file logic.
+- Modify `freqtrade/tests/platform_control/test_app.py`.
 
-```powershell
-cd freqtrade
-python -m pytest tests/platform/test_market_data_policy.py tests/platform/test_market_data_domain.py -q -p no:cacheprovider
-```
+Frontend:
 
-Expected: missing policy/domain.
+- Create `frequi/src/composables/platformLoginInfo.ts`.
+- Create `frequi/src/composables/platformApi.ts`.
+- Create `frequi/src/types/marketData.ts`.
+- Create `frequi/src/stores/marketData.ts`.
+- Create a minimal `frequi/src/components/PlatformLogin.vue` with fixed same-origin
+  username/password login; do not expose an arbitrary API URL field.
+- Create `frequi/src/views/PlatformChartView.vue`, reusing the lowest-level existing
+  candle renderer instead of forking ECharts logic.
+- Modify `frequi/src/router/index.ts` with an explicit `authDomain: "platform"` route-meta
+  branch. `/platform-login` is the only anonymous platform route; `/platform-chart`
+  validates or refreshes the platform session and redirects only to `/platform-login`.
+  This branch must not initialize or require the Bot store, while the existing guard for
+  every Bot-dependent route remains semantically unchanged.
+- Add focused unit/component tests next to those modules.
 
-- [ ] **Step 3: Add committed policy**
+### Test-first acceptance
 
-```json
-{
-  "schema_version": 1,
-  "revision_id": "market-data-refresh-v1",
-  "aliases": {"60m": "1h"},
-  "entries": {
-    "1m": 10000,
-    "3m": 30000,
-    "5m": 60000,
-    "15m": 60000,
-    "30m": 60000,
-    "1h": 180000,
-    "2h": 300000,
-    "4h": 300000,
-    "6h": 600000,
-    "8h": 600000,
-    "12h": 600000,
-    "1d": 900000,
-    "3d": 900000,
-    "1w": 900000,
-    "2w": 900000,
-    "1M": 900000,
-    "1y": 900000
-  }
-}
-```
+Write failing tests proving:
 
-Loader uses package resources, canonical JSON, `extra="forbid"`, unique aliases, positive intervals, and no user override.
+1. platform API routes win over the static catch-all and `/api/...` misses do not return
+   `index.html`;
+2. the platform client uses relative `/api/v2`, never a Bot URL;
+3. zero-Bot navigation reaches `/platform-login` and then `/platform-chart`, while an
+   existing Bot route still redirects to `/login` when the Bot store is empty;
+4. the fixed accepted Bitget Spot BTC-USDT 1m base chart renders from a controlled
+   canonical snapshot with all Bot stores offline or absent;
+5. `recommended_refresh_ms`, freshness, forming/closed state, and canonical source data
+   drive the view;
+6. no strategy layer, Research call, order call, or exchange credential appears.
 
-- [ ] **Step 4: Implement canonical DTOs and run GREEN**
+Run at minimum:
 
 ```powershell
-python -m pytest tests/platform/test_market_data_policy.py tests/platform/test_market_data_domain.py -q -p no:cacheprovider
-ruff check freqtrade/platform/market_data_domain.py freqtrade/platform/market_data_policy.py tests/platform/test_market_data_policy.py tests/platform/test_market_data_domain.py
-git add freqtrade/platform_control/policies/market-data-refresh-v1.json freqtrade/platform/market_data_domain.py freqtrade/platform/market_data_policy.py freqtrade/platform/__init__.py tests/platform/test_market_data_policy.py tests/platform/test_market_data_domain.py
-git commit -m "feat(platform): define canonical market data policy"
-```
-
-Expected: complete cadence matrix and contract tests pass.
-
----
-
-### Task 2: Bounded cache and in-flight request coalescing
-
-**Files:**
-- Create: `freqtrade/freqtrade/platform/market_data_cache.py`
-- Test: `freqtrade/tests/platform/test_market_data_cache.py`
-
-**Interfaces:**
-- Produces async `MarketDataCache.get_or_load(key, max_age_ms, loader)`.
-- One loader per exact `MarketDataKey`; waiters share result/exception.
-- Bounded entry count, monotonic clock, no stale-as-fresh behavior.
-
-- [ ] **Step 1: Write RED concurrency tests**
-
-```python
-@pytest.mark.asyncio
-async def test_identical_concurrent_requests_use_one_loader() -> None:
-    calls = 0
-    release = asyncio.Event()
-
-    async def loader():
-        nonlocal calls
-        calls += 1
-        await release.wait()
-        return snapshot()
-
-    first = asyncio.create_task(cache.get_or_load(key(), 10_000, loader))
-    second = asyncio.create_task(cache.get_or_load(key(), 10_000, loader))
-    release.set()
-    assert await first == await second
-    assert calls == 1
-
-@pytest.mark.asyncio
-async def test_expired_value_is_not_returned_as_fresh() -> None:
-    clock.advance(10.001)
-    result = await cache.get_or_load(key(), 10_000, new_loader)
-    assert result.snapshot_id == "new"
-```
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-python -m pytest tests/platform/test_market_data_cache.py -q -p no:cacheprovider
-```
-
-Expected: missing cache.
-
-- [ ] **Step 3: Implement cache**
-
-Use one `asyncio.Lock`, dictionaries for completed entries and in-flight tasks, `time.monotonic()`, exact key equality, LRU eviction only for completed entries, and `asyncio.shield()` so one cancelled waiter does not cancel the shared upstream call. Exceptions remove the in-flight entry and do not overwrite the last successful entry as fresh.
-
-- [ ] **Step 4: Run GREEN and commit**
-
-```powershell
-python -m pytest tests/platform/test_market_data_cache.py -q -p no:cacheprovider
-ruff check freqtrade/platform/market_data_cache.py tests/platform/test_market_data_cache.py
-git add freqtrade/platform/market_data_cache.py tests/platform/test_market_data_cache.py
-git commit -m "feat(platform): coalesce market data reads"
-```
-
----
-
-### Task 3: Closed OKX/Bitget public candle adapters and catalog correction
-
-**Files:**
-- Create: `freqtrade/freqtrade/platform/market_data_adapters.py`
-- Create: `freqtrade/freqtrade/platform_control/policies/digital-asset-instruments-v1.json`
-- Modify: `freqtrade/freqtrade/markets/default_catalog.py`
-- Test: `freqtrade/tests/platform/test_market_data_adapters.py`
-- Test: `freqtrade/tests/markets/test_catalog.py`
-
-**Interfaces:**
-- Supports approved public OHLCV only for registered venue/product/instrument/provider-symbol mappings.
-- Initial required mappings include OKX perpetual and Bitget spot acceptance instruments.
-- Catalog revision advances to `builtin-market-catalog-v2` and includes venue `bitget`.
-
-- [ ] **Step 1: Write RED adapter/security tests**
-
-```python
-def test_bitget_is_catalogued_for_spot() -> None:
-    snapshot = default_catalog_snapshot()
-    bitget = next(v for v in snapshot.catalog.venues if v.venue_id == "bitget")
-    assert ProductType.SPOT in bitget.product_ids
-
-@pytest.mark.asyncio
-async def test_public_adapter_constructs_exchange_without_credentials(mocker) -> None:
-    factory = mocker.patch("ccxt.async_support.bitget")
-    await adapter.fetch_candles(bitget_spot_key(), limit=100)
-    config = factory.call_args.args[0]
-    assert "apiKey" not in config
-    assert "secret" not in config
-    assert "password" not in config
-```
-
-Add tests rejecting unknown venue/product/instrument/timeframe, limit outside `1..1000`, provider redirects, and any config containing credential/write fields.
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-python -m pytest tests/platform/test_market_data_adapters.py tests/markets/test_catalog.py -q -p no:cacheprovider
-```
-
-Expected: adapter missing and Bitget catalog assertion fails.
-
-- [ ] **Step 3: Implement closed mappings and adapter**
-
-The committed instrument file maps exact domain IDs to provider symbols; callers never send provider symbols. Adapter factory supports only `okx` and `bitget`, sets `enableRateLimit=True`, disables credential loading, calls `fetch_ohlcv()` only, closes clients in `finally`, rejects non-list/malformed/non-monotonic responses, and converts milliseconds to canonical UTC timestamps.
-
-- [ ] **Step 4: Run GREEN and commit**
-
-```powershell
-python -m pytest tests/platform/test_market_data_adapters.py tests/markets/test_catalog.py -q -p no:cacheprovider
-ruff check freqtrade/platform/market_data_adapters.py freqtrade/markets/default_catalog.py tests/platform/test_market_data_adapters.py tests/markets/test_catalog.py
-git add freqtrade/platform/market_data_adapters.py freqtrade/platform_control/policies/digital-asset-instruments-v1.json freqtrade/markets/default_catalog.py tests/platform/test_market_data_adapters.py tests/markets/test_catalog.py
-git commit -m "feat(platform): add public digital asset candles"
-```
-
----
-
-### Task 4: MarketDataQueryService and API v2
-
-**Files:**
-- Create: `freqtrade/freqtrade/platform/market_data_service.py`
-- Create: `freqtrade/freqtrade/platform_control/api_market_data.py`
-- Modify: `freqtrade/freqtrade/platform_control/app.py`
-- Test: `freqtrade/tests/platform/test_market_data_service.py`
-- Test: `freqtrade/tests/platform_control/test_api_market_data.py`
-
-**Interfaces:**
-- GET `/api/v2/market-data/candles` with closed catalog IDs, canonical timeframe, bounded limit.
-- Returns `CandleSnapshot` including policy/freshness/degradation.
-- No exchange write or control DB high-frequency storage.
-
-- [ ] **Step 1: Write RED API/service tests**
-
-```python
-def test_candle_api_returns_policy_and_forming_state(client, auth_headers) -> None:
-    response = client.get(
-        "/api/v2/market-data/candles",
-        params={
-            "market_id": "digital_asset",
-            "product_id": "perpetual",
-            "venue_id": "okx",
-            "instrument_id": "BTC-USDT-SWAP",
-            "timeframe": "1m",
-            "limit": 100,
-        },
-        headers=auth_headers,
-    )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["refresh_policy_revision"] == "market-data-refresh-v1"
-    assert payload["recommended_refresh_ms"] == 10_000
-    assert payload["candles"][-1]["state"] in {"forming", "closed"}
-
-def test_unknown_timeframe_fails_closed(client, auth_headers) -> None:
-    response = client.get(
-        "/api/v2/market-data/candles",
-        params={**valid_params(), "timeframe": "7m"},
-        headers=auth_headers,
-    )
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "unknown_timeframe"
-```
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-python -m pytest tests/platform/test_market_data_service.py tests/platform_control/test_api_market_data.py -q -p no:cacheprovider
-```
-
-Expected: missing service/router.
-
-- [ ] **Step 3: Implement query service and stable failures**
-
-Validation order: catalog capability -> registered venue/product/instrument -> timeframe policy -> bounded limit -> cache -> adapter -> canonical validation -> freshness. Provider/rate-limit/timeout errors return stable codes and retain last successful data only with explicit `stale=true`; never label it fresh.
-
-- [ ] **Step 4: Run GREEN and commit**
-
-```powershell
-python -m pytest tests/platform/test_market_data_service.py tests/platform_control/test_api_market_data.py -q -p no:cacheprovider
-ruff check freqtrade/platform/market_data_service.py freqtrade/platform_control/api_market_data.py tests/platform/test_market_data_service.py tests/platform_control/test_api_market_data.py
-git add freqtrade/platform/market_data_service.py freqtrade/platform_control/api_market_data.py freqtrade/platform_control/app.py tests/platform/test_market_data_service.py tests/platform_control/test_api_market_data.py
-git commit -m "feat(platform): expose canonical candle queries"
-```
-
----
-
-### Task 5: Closed Runtime Access read policy and instance-bound tokens
-
-**Files:**
-- Create: `freqtrade/freqtrade/platform_control/policies/runtime-access-read-v1.json`
-- Create: `freqtrade/freqtrade/platform/runtime_access_domain.py`
-- Create: `freqtrade/freqtrade/platform/runtime_access_policy.py`
-- Create: `freqtrade/freqtrade/platform/runtime_access_tokens.py`
-- Modify: `freqtrade/freqtrade/rpc/api_server/api_auth.py`
-- Modify: `freqtrade/freqtrade/rpc/api_server/deps.py`
-- Test: `freqtrade/tests/platform/test_runtime_access_policy.py`
-- Test: `freqtrade/tests/platform/test_runtime_access_tokens.py`
-- Test: `freqtrade/tests/rpc/test_runtime_access_auth.py`
-
-**Interfaces:**
-- Named read groups: `bot_status_read`, `bot_logs_read`, `bot_chart_read`, `research_catalog_read`, `research_chart_read`.
-- Internal token claims: issuer, audience instance ID, attempt ID, route group, method, request ID, issued/expiry.
-- Runtime validates platform Ed25519 public key and its immutable instance/attempt identity.
-
-- [ ] **Step 1: Write RED token confusion tests**
-
-```python
-def test_token_for_one_instance_cannot_target_another(keypair) -> None:
-    token = issue_runtime_token(
-        private_key=keypair.private,
-        instance_id="runtime-a",
-        attempt_id="attempt-a-1",
-        route_group="bot_status_read",
-        method="GET",
-        request_id="request-1",
-    )
-    with pytest.raises(RuntimeAccessDenied, match="runtime_access_audience_mismatch"):
-        verify_runtime_token(
-            token,
-            public_key=keypair.public,
-            expected_instance_id="runtime-b",
-            expected_attempt_id="attempt-b-1",
-            route_group="bot_status_read",
-            method="GET",
-        )
-
-def test_research_identity_cannot_receive_bot_route(policy) -> None:
-    assert policy.authorize(
-        owner_kind="workspace_worker",
-        environment="paper",
-        route_group="bot_status_read",
-        method="GET",
-    ).code == "runtime_route_owner_denied"
-```
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-python -m pytest tests/platform/test_runtime_access_policy.py tests/platform/test_runtime_access_tokens.py tests/rpc/test_runtime_access_auth.py -q -p no:cacheprovider
-```
-
-Expected: missing policy/token middleware.
-
-- [ ] **Step 3: Add exact read policy**
-
-Each policy entry contains route ID, owner kinds, environments, methods, fixed upstream path, request/response size limit, timeout, and retry mode. The compatibility read inventory is explicit:
-
-```text
-GET  /ping
-GET  /trades
-GET  /status
-GET  /locks
-GET  /pair_candles
-POST /pair_candles
-POST /chart_candles
-GET  /pair_history
-POST /pair_history
-GET  /plot_config
-GET  /strategies
-GET  /strategy/{strategy_name}
-GET  /freqaimodels
-GET  /hyperopt-loss
-GET  /exchanges
-GET  /available_pairs
-GET  /markets
-GET  /performance
-GET  /entries
-GET  /exits
-GET  /mix_tags
-GET  /profit_all
-GET  /profit
-GET  /whitelist
-GET  /blacklist
-GET  /daily
-GET  /weekly
-GET  /monthly
-GET  /balance
-GET  /historic_balance
-GET  /show_config
-GET  /logs
-GET  /pairlists/available
-GET  /pairlists/evaluate/{job_id}
-GET  /background/{job_id}
-GET  /background
-GET  /recursive_analysis/{job_id}
-GET  /lookahead_analysis/{job_id}
-GET  /trades/{trade_id}/custom-data
-GET  /sysinfo
-GET  /backtest
-GET  /backtest/history
-GET  /backtest/history/result
-GET  /backtest/history/{filename}/market_change
-GET  /backtest/history/{filename}/{strategy_name}/wallet
-GET  /research/bots
-GET  /research/instruments
-GET  /research/datasets
-POST /research/chart_candles
-```
-
-Read retry is at most once and only before any response bytes; no redirect following. POST routes in this list are schema-validated reads and must be proven side-effect-free. `GET /backtest/abort` is intentionally excluded because its behavior is a write and belongs to Phase 2E's never-retry policy. A contract test compares this list with read calls in `frequi/src/stores/ftbot.ts` and `frequi/src/stores/research.ts`. The policy contains no arbitrary host/port.
-
-Use EdDSA JWT with maximum 30-second lifetime. Private key exists only in platform-control exact secret mount; runtimes mount public key read-only. Tokens are never returned to the browser or logged.
-
-- [ ] **Step 4: Add runtime verification dependency**
-
-Gateway-authenticated internal requests carry the token in a dedicated Authorization bearer flow. Middleware validates signature/issuer/audience/attempt/route/method/expiry before calling the route. Existing user Basic/JWT behavior remains unchanged on pre-cutover endpoints.
-
-- [ ] **Step 5: Run GREEN and commit**
-
-```powershell
-python -m pytest tests/platform/test_runtime_access_policy.py tests/platform/test_runtime_access_tokens.py tests/rpc/test_runtime_access_auth.py -q -p no:cacheprovider
-ruff check freqtrade/platform/runtime_access_domain.py freqtrade/platform/runtime_access_policy.py freqtrade/platform/runtime_access_tokens.py freqtrade/rpc/api_server/api_auth.py freqtrade/rpc/api_server/deps.py tests/platform/test_runtime_access_policy.py tests/platform/test_runtime_access_tokens.py tests/rpc/test_runtime_access_auth.py
-git add freqtrade/platform_control/policies/runtime-access-read-v1.json freqtrade/platform/runtime_access_domain.py freqtrade/platform/runtime_access_policy.py freqtrade/platform/runtime_access_tokens.py freqtrade/rpc/api_server/api_auth.py freqtrade/rpc/api_server/deps.py tests/platform/test_runtime_access_policy.py tests/platform/test_runtime_access_tokens.py tests/rpc/test_runtime_access_auth.py
-git commit -m "feat(platform): authenticate instance-bound runtime reads"
-```
-
----
-
-### Task 6: Runtime Access Gateway read forwarding
-
-**Files:**
-- Create: `freqtrade/freqtrade/platform/runtime_access_gateway.py`
-- Create: `freqtrade/freqtrade/platform_control/api_runtime_access.py`
-- Modify: `freqtrade/freqtrade/platform_control/app.py`
-- Test: `freqtrade/tests/platform/test_runtime_access_gateway.py`
-- Test: `freqtrade/tests/platform_control/test_api_runtime_access.py`
-
-**Interfaces:**
-- Routes contain instance ID plus named route ID and typed payload only.
-- Resolves healthy active attempt and exact internal endpoint from Registry.
-- Records request/result metadata without bodies/tokens/secrets.
-- Stable failures: `runtime_unavailable`, `runtime_identity_mismatch`, `runtime_route_denied`, `runtime_upstream_timeout`.
-
-- [ ] **Step 1: Write RED forwarding/security tests**
-
-```python
-@pytest.mark.asyncio
-async def test_gateway_uses_registry_endpoint_not_request_target(gateway, httpx_mock) -> None:
-    result = await gateway.read(
-        instance_id="runtime-a",
-        route_id="bot_status",
-        caller_target="http://evil.invalid",
-    )
-    assert result.code == "request_field_forbidden"
-    assert httpx_mock.get_requests() == []
-
-@pytest.mark.asyncio
-async def test_stopped_runtime_has_no_fallback(gateway, httpx_mock) -> None:
-    gateway.repository.return_value = stopped_instance()
-    result = await gateway.read("runtime-a", "bot_status")
-    assert result.code == "runtime_unavailable"
-    assert httpx_mock.get_requests() == []
-```
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-python -m pytest tests/platform/test_runtime_access_gateway.py tests/platform_control/test_api_runtime_access.py -q -p no:cacheprovider
-```
-
-Expected: missing gateway/router.
-
-- [ ] **Step 3: Implement exact resolution and forwarding**
-
-Load instance/attempt/endpoint in one consistent read transaction. Require healthy, non-latched, exact endpoint attempt/spec/network identity. Construct target from repository-owned alias + fixed internal port + policy-owned path. Use `httpx.AsyncClient(follow_redirects=False)`, bounded connect/read/write/pool timeouts, response-size cap, and header allowlist. Strip hop-by-hop, Cookie, upstream Authorization, Host, and forwarding headers. Mint one internal token per request.
-
-- [ ] **Step 4: Run GREEN and commit**
-
-```powershell
-python -m pytest tests/platform/test_runtime_access_gateway.py tests/platform_control/test_api_runtime_access.py -q -p no:cacheprovider
-ruff check freqtrade/platform/runtime_access_gateway.py freqtrade/platform_control/api_runtime_access.py tests/platform/test_runtime_access_gateway.py tests/platform_control/test_api_runtime_access.py
-git add freqtrade/platform/runtime_access_gateway.py freqtrade/platform_control/api_runtime_access.py freqtrade/platform_control/app.py tests/platform/test_runtime_access_gateway.py tests/platform_control/test_api_runtime_access.py
-git commit -m "feat(platform): proxy governed runtime reads"
-```
-
----
-
-### Task 7: Platform chart composition with optional strategy overlay
-
-**Files:**
-- Create: `freqtrade/freqtrade/platform_control/chart_service.py`
-- Create: `freqtrade/freqtrade/platform_control/api_chart.py`
-- Test: `freqtrade/tests/platform_control/test_chart_service.py`
-- Test: `freqtrade/tests/platform_control/test_api_chart.py`
-
-**Interfaces:**
-- POST `/api/v2/charts/live` accepts market/product/venue/instrument/timeframe/limit and optional runtime instance ID.
-- Always loads platform base candles.
-- Optional healthy Bot read adds strategy layers/signals; failure adds warning without clearing base.
-- Refresh never triggers strategy evaluation.
-
-- [ ] **Step 1: Write RED overlay degradation tests**
-
-```python
-@pytest.mark.asyncio
-async def test_stopped_bot_keeps_base_chart(chart_service) -> None:
-    chart_service.market_data.return_value = base_snapshot()
-    chart_service.runtime_access.return_value = RuntimeAccessFailure("runtime_unavailable")
-
-    result = await chart_service.live_chart(request(runtime_id="runtime-a"))
-
-    assert len(result.data) == len(base_snapshot().candles)
-    assert result.meta.layers[0].source == "market"
-    assert "Strategy overlay unavailable" in result.warnings
-
-def test_chart_route_has_no_order_or_strategy_evaluation_dependency(app) -> None:
-    dependencies = route_dependencies(app, "/api/v2/charts/live")
-    assert "OrderIntent" not in dependencies
-    assert "StrategyEvaluator" not in dependencies
-```
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-python -m pytest tests/platform_control/test_chart_service.py tests/platform_control/test_api_chart.py -q -p no:cacheprovider
-```
-
-Expected: missing chart service/router.
-
-- [ ] **Step 3: Implement composition**
-
-Convert canonical candles into existing chart-compatible base columns. Read existing Bot `chart_candles` only through named `bot_chart_read`; extract only strategy/decision/execution layers and align by instrument/timeframe/open/data-as-of. Mark forming/provisional versus closed/confirmed. Never present recomputed data as decision snapshot.
-
-- [ ] **Step 4: Run GREEN and commit**
-
-```powershell
-python -m pytest tests/platform_control/test_chart_service.py tests/platform_control/test_api_chart.py tests/rpc/test_chart_data.py tests/rpc/test_chart_composition.py -q -p no:cacheprovider
-ruff check freqtrade/platform_control/chart_service.py freqtrade/platform_control/api_chart.py tests/platform_control/test_chart_service.py tests/platform_control/test_api_chart.py
-git add freqtrade/platform_control/chart_service.py freqtrade/platform_control/api_chart.py tests/platform_control/test_chart_service.py tests/platform_control/test_api_chart.py
-git commit -m "feat(platform): compose live charts independently of bots"
-```
-
----
-
-### Task 8: FreqUI platform session and market-data stores
-
-**Files:**
-- Create: `frequi/src/composables/platformLoginInfo.ts`
-- Create: `frequi/src/composables/platformApi.ts`
-- Create: `frequi/src/types/platform.ts`
-- Create: `frequi/src/types/marketData.ts`
-- Create: `frequi/src/stores/platform.ts`
-- Create: `frequi/src/stores/marketData.ts`
-- Create: `frequi/src/stores/runtimeAccess.ts`
-- Test: `frequi/tests/unit/platformApi.spec.ts`
-- Test: `frequi/tests/unit/marketDataStore.spec.ts`
-- Test: `frequi/tests/unit/runtimeAccessStore.spec.ts`
-
-**Interfaces:**
-- Platform API defaults to same-origin `/api/v2`; development override is one validated loopback URL.
-- `marketDataStore.loadLiveChart()` coalesces exact keys and stores applied refresh interval/policy/freshness.
-- Runtime access store accepts instance ID + named route; no URL/port field.
-
-- [ ] **Step 1: Write RED frontend tests**
-
-```ts
-it('uses one platform api and never a bot url for base candles', async () => {
-  await store.loadLiveChart(request);
-  expect(platformApi.post).toHaveBeenCalledWith('/charts/live', request);
-  expect(botApi.post).not.toHaveBeenCalled();
-});
-
-it('stores the server applied refresh interval', async () => {
-  platformApi.post.mockResolvedValue({ data: fixture({ recommended_refresh_ms: 10_000 }) });
-  await store.loadLiveChart(request);
-  expect(store.refreshIntervalMs).toBe(10_000);
-});
-```
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-cd frequi
-pnpm exec vitest run tests/unit/platformApi.spec.ts tests/unit/marketDataStore.spec.ts tests/unit/runtimeAccessStore.spec.ts
-```
-
-Expected: missing modules/stores.
-
-- [ ] **Step 3: Implement platform client/stores**
-
-Reuse the current access/refresh token behavior with `/api/v2/token/login` and `/api/v2/token/refresh`; do not mark a Bot offline on platform network errors. The request type has only catalog IDs, timeframe, limit, and optional `runtime_instance_id`. Key serialization is deterministic and in-flight requests coalesce.
-
-- [ ] **Step 4: Run GREEN, typecheck, lint, and commit frontend task**
-
-```powershell
-pnpm exec vitest run tests/unit/platformApi.spec.ts tests/unit/marketDataStore.spec.ts tests/unit/runtimeAccessStore.spec.ts
-pnpm typecheck
-pnpm exec eslint --quiet src/composables/platformLoginInfo.ts src/composables/platformApi.ts src/types/platform.ts src/types/marketData.ts src/stores/platform.ts src/stores/marketData.ts src/stores/runtimeAccess.ts tests/unit/platformApi.spec.ts tests/unit/marketDataStore.spec.ts tests/unit/runtimeAccessStore.spec.ts
-git add src/composables/platformLoginInfo.ts src/composables/platformApi.ts src/types/platform.ts src/types/marketData.ts src/stores/platform.ts src/stores/marketData.ts src/stores/runtimeAccess.ts tests/unit/platformApi.spec.ts tests/unit/marketDataStore.spec.ts tests/unit/runtimeAccessStore.spec.ts
-git commit -m "feat(ui): add platform market data client"
-```
-
----
-
-### Task 9: Migrate live charts and Research reads to 8090
-
-**Files:**
-- Modify: `frequi/src/composables/useLiveChartDataset.ts`
-- Modify: `frequi/src/composables/useResearchChartAutoRefresh.ts`
-- Modify: `frequi/src/stores/research.ts`
-- Modify: `frequi/src/views/TradingView.vue`
-- Modify: `frequi/src/views/ChartsView.vue`
-- Modify: `frequi/src/views/ResearchView.vue`
-- Modify: `frequi/src/utils/tradeChartRefresh.ts`
-- Test: existing and new frontend unit/component/E2E tests.
-
-**Interfaces:**
-- Visible chart schedules with server policy; current local map is bootstrap fallback only.
-- Hidden page pauses; visibility resume refreshes immediately.
-- Research reads use named Runtime Access routes, not `activeBot.api`.
-- Bot stop preserves base chart and marks overlay unavailable.
-
-- [ ] **Step 1: Add RED compatibility tests**
-
-```ts
-it.each([
-  ['1m', 10_000], ['3m', 30_000], ['5m', 60_000], ['15m', 60_000],
-  ['30m', 60_000], ['1h', 180_000], ['60m', 180_000], ['2h', 300_000],
-  ['4h', 300_000], ['6h', 600_000], ['8h', 600_000], ['12h', 600_000],
-  ['1d', 900_000], ['3d', 900_000], ['1w', 900_000], ['2w', 900_000],
-  ['1M', 900_000], ['1y', 900_000],
-])('preserves %s cadence through platform policy', async (timeframe, expected) => {
-  platformApi.post.mockResolvedValue({ data: chartFixture(timeframe, expected) });
-  await store.loadLiveChart(chartRequest(timeframe));
-  expect(store.refreshIntervalMs).toBe(expected);
-});
-
-it('keeps base candles when runtime overlay is unavailable', async () => {
-  platformApi.post.mockResolvedValue({ data: baseOnlyFixture('runtime_unavailable') });
-  await wrapper.vm.refreshAll();
-  expect(wrapper.find('[data-test="candle-chart"]').exists()).toBe(true);
-  expect(wrapper.text()).toContain('Strategy overlay unavailable');
-});
-```
-
-Add Research test proving no active Bot API client is required.
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-pnpm exec vitest run tests/unit/tradeChartRefresh.spec.ts tests/unit/useLiveChartDataset.spec.ts tests/unit/useResearchChartAutoRefresh.spec.ts tests/unit/researchStore.spec.ts tests/component/TradingViewLiveChart.spec.ts tests/component/ChartsViewLiveChart.spec.ts tests/component/ResearchView.spec.ts
-```
-
-Expected: tests fail because current stores use active Bot APIs/local-only cadence.
-
-- [ ] **Step 3: Implement migration**
-
-`useLiveChartDataset` requests `/charts/live` through market-data store and schedules from response policy, falling back to the exact current map only before first successful response. `research.ts` uses platform Runtime Access named routes and selected Workspace Worker instance ID. Preserve manual refresh, loading de-duplication, hidden-tab pause, zoom state, existing chart response shape, and backtest manual-only behavior.
-
-- [ ] **Step 4: Run GREEN, build, and commit frontend task**
-
-```powershell
-pnpm exec vitest run tests/unit/tradeChartRefresh.spec.ts tests/unit/useLiveChartDataset.spec.ts tests/unit/useResearchChartAutoRefresh.spec.ts tests/unit/researchStore.spec.ts tests/component/TradingViewLiveChart.spec.ts tests/component/ChartsViewLiveChart.spec.ts tests/component/ResearchView.spec.ts
-pnpm typecheck
-pnpm lint-ci
-pnpm build
-git add src/composables/useLiveChartDataset.ts src/composables/useResearchChartAutoRefresh.ts src/stores/research.ts src/views/TradingView.vue src/views/ChartsView.vue src/views/ResearchView.vue src/utils/tradeChartRefresh.ts tests
-git commit -m "feat(ui): route live research charts through platform control"
-```
-
----
-
-### Task 10: Signing material, Root Safety, and Phase 2D integration
-
-**Files:**
-- Modify: `tools/bootstrap_runtime.py`
-- Modify: `ops/runtime-policies/mount-policies.json`
-- Modify: `tools/runtime_snapshot.py`
-- Modify: `.github/workflows/root-safety.yml`
-- Modify: `tests/test_root_safety_workflow.py`
-- Create: `tests/test_runtime_access_signing.py`
-- Create: `docs/operations/runtime-access-gateway.md`
-- Update backend/frontend gitlinks.
-
-**Interfaces:**
-- Platform-control mounts exact Ed25519 private key; runtimes mount public key only.
-- Root Safety runs full cadence, adapter no-credential, Gateway confusion, runtime-token, frontend base-without-Bot, and no-write-trigger selectors.
-
-- [ ] **Step 1: Write RED root signing/mount tests**
-
-```python
-def test_runtime_mount_contains_public_key_not_private_key(self) -> None:
-    snapshot = compile_snapshot(application_runtime())
-    rendered = json.dumps(snapshot, sort_keys=True)
-    self.assertIn("runtime_access_public_key", rendered)
-    self.assertNotIn("runtime_access_private_key", rendered)
-
-def test_platform_control_has_private_key_but_no_bot_secret_root(self) -> None:
-    service = render_compose()["services"]["platform-control"]
-    rendered = json.dumps(service, sort_keys=True)
-    self.assertIn("runtime_access_private_key", rendered)
-    self.assertNotIn("ft_userdata/secrets/freqtrade/", rendered)
-```
-
-- [ ] **Step 2: Run RED**
-
-```powershell
-python -S -m unittest tests.test_runtime_access_signing tests.test_root_safety_workflow -v
-```
-
-Expected: missing signing contract/gates.
-
-- [ ] **Step 3: Implement bootstrap/mount/CI**
-
-Generate Ed25519 pair only during explicit bootstrap; harden private key, publish fixed public key, never rotate silently, and record non-secret key ID. Add executable CI selectors and mutation tests. Document routes, token claims, target resolution, timeouts, stable errors, logs/audit redaction, and emergency disable.
-
-- [ ] **Step 4: Verify Phase 2D and commit root integration**
-
-```powershell
-python -S -m unittest tests.test_runtime_access_signing tests.test_runtime_access_network tests.test_root_safety_workflow -v
 Push-Location freqtrade
-python -m pytest tests/platform/test_market_data_policy.py tests/platform/test_market_data_cache.py tests/platform/test_market_data_adapters.py tests/platform/test_market_data_service.py tests/platform/test_runtime_access_policy.py tests/platform/test_runtime_access_tokens.py tests/platform/test_runtime_access_gateway.py tests/platform_control/test_api_market_data.py tests/platform_control/test_api_runtime_access.py tests/platform_control/test_chart_service.py tests/rpc/test_runtime_access_auth.py -q -p no:cacheprovider
-ruff check freqtrade/platform freqtrade/platform_control tests/platform tests/platform_control tests/rpc/test_runtime_access_auth.py
+python -m pytest tests/platform_control/test_app.py tests/platform_control/test_api_market_data.py -q -p no:cacheprovider
+ruff check freqtrade/platform_control/app.py tests/platform_control/test_app.py
 Pop-Location
+
 Push-Location frequi
-pnpm exec vitest run tests/unit/platformApi.spec.ts tests/unit/marketDataStore.spec.ts tests/unit/runtimeAccessStore.spec.ts tests/unit/useLiveChartDataset.spec.ts tests/unit/useResearchChartAutoRefresh.spec.ts tests/unit/researchStore.spec.ts tests/component/TradingViewLiveChart.spec.ts tests/component/ResearchView.spec.ts
+pnpm vitest run tests/unit/platformApi.spec.ts tests/unit/marketDataStore.spec.ts tests/component/PlatformLogin.spec.ts tests/component/PlatformChartView.spec.ts
 pnpm typecheck
-pnpm lint-ci
 pnpm build
 Pop-Location
-git add tools/bootstrap_runtime.py ops/runtime-policies/mount-policies.json tools/runtime_snapshot.py .github/workflows/root-safety.yml tests/test_root_safety_workflow.py tests/test_runtime_access_signing.py docs/operations/runtime-access-gateway.md freqtrade frequi
-git commit -m "ci: gate phase2d market data and runtime reads"
 ```
 
-Expected: all offline backend/frontend/root gates pass and worktree is clean.
+### Required offline exit gate
+
+Task 5 is complete when, using a controlled credential-free provider adapter, an
+authenticated user can open `http://127.0.0.1:8090/platform-chart` and see canonical
+candles while 8081/8082/8083 Bot/Research services are stopped. Static/API precedence,
+platform-session refresh, zero-Bot routing, rendering, and cadence must all pass without
+public network access. If same-origin asset delivery cannot be achieved by reusing the
+existing router, stop and review the packaging boundary; do not solve it with wildcard
+CORS or a second web gateway.
+
+### Separately authorized public-market-data smoke
+
+A real Bitget public response is not required to complete Task 5 and is not authorized by
+this document. It is required later by the Phase 2D Task 8 paper-online gate. Run it only
+after explicit authorization; record the exact key, provider, snapshot identity, and
+non-secret result. A fixture-backed pass must never be reported as that online evidence.
+
+Commit backend, frontend, and Root gitlink changes separately after review.
+
+---
+
+## Task 6: Close production readiness and the real managed target lifecycle
+
+### Current authority boundary
+
+The current production entrypoint is intentionally disabled. The internal persisted-
+authority assembly seam is test evidence only, and the host mutation bridge is unavailable.
+Task 6 must close—not bypass—the production blockers in
+`docs/operations/runtime-supervisor.md`. This task adds no token, forwarding, chart overlay,
+Research route, or browser route.
+
+### Task 6A: Offline production-readiness closure
+
+Close all of the runbook's blockers 1-6 with reviewed code, tests, and operational
+evidence:
+
+1. assemble the exact SQL repository, Reconciler, preparation ports, compiler, access-
+   network gate, and Safe Compose Driver in `_assemble_supervisor()`;
+2. wire the Supervisor-only PostgreSQL role/secret, exact schema gate, transaction and
+   outage behavior without granting the Operator or platform-control that authority;
+3. reload and revalidate persisted launch authority; never accept a deserialized or
+   caller-built `LaunchSnapshot`;
+4. deploy exactly one protected single writer through the reviewed narrow host mutation
+   bridge and prove lock loss, guard revocation, restart, and competing replicas fail
+   closed;
+5. complete production state/secret preparation, ownership, rotation, backup, and
+   non-destructive recovery without leaking values;
+6. add bounded job/lease/attempt/health/failure-latch telemetry plus database-down
+   inspection, log access, and exact-identity emergency stop.
+
+The change that enables production assembly remains closed to the committed
+`freqtrade-paper-probe-v1` registration, template, command, health, state, secret, image,
+and paper environment. It starts no job by itself and grants no Research, migration Bot,
+Live, exchange-write, or listener-removal authority. Root Safety must replace the old
+always-disabled assertion with positive paper-probe-only assembly checks plus negative
+tests for every other template, owner, environment, and mutation path.
+
+### Task 6B: Attested endpoint producer and query
+
+Backend responsibilities:
+
+- migrate `runtime_endpoints` to add non-null `network_name`, `runtime_alias`, and
+  `connection_identity_revision`; these are exact compiled binding facts, not a URL;
+- because no trusted producer exists today, the migration must refuse any pre-existing
+  endpoint row rather than fabricate/backfill an unattested alias or network; only then
+  make the new fields non-null;
+- add an immutable endpoint/target DTO containing exact instance, attempt, RuntimeSpec,
+  endpoint kind, protocol, internal port, exposure, and those attested connection fields;
+- extend the Supervisor repository contract so the verified healthy transition creates
+  exactly one `application_http` endpoint for that exact attempt in the same transaction;
+- accept connection identity only from the exact compiled access-network binding after
+  the two-member private-network gate passes;
+- add a consistent-read target query that accepts only the exact healthy, non-latched
+  active attempt with one `internal_only` endpoint whose persisted connection identity
+  still matches active launch authority;
+- keep stopped/failed/old endpoint rows as evidence but make them unselectable;
+- fail missing, duplicate, stale, wrong-attempt, wrong-exposure, wrong-spec, wrong-network,
+  wrong-alias, wrong-identity-revision, and ambiguous state before network access.
+
+The producer and query consume one shared typed `RuntimeConnectionIdentity`; do not
+duplicate Root's current private string formulas in platform-control or let
+platform-control inspect Docker.
+
+### Expected files
+
+Backend changes should stay within:
+
+- `freqtrade/freqtrade/platform/runtime_domain.py`;
+- `freqtrade/freqtrade/platform/runtime_models.py`;
+- `freqtrade/freqtrade/platform/runtime_repository.py`;
+- one Alembic migration under `freqtrade/platform_migrations/versions/`;
+- focused domain, migration, and repository tests.
+
+Root changes should stay within existing surfaces:
+
+- `tools/runtime_supervisor/__main__.py` and current assembly/dependency adapters;
+- the current runtime snapshot, access-network, repository, state, secret, and safe-driver
+  modules only where a blocker requires them;
+- `tests/test_runtime_supervisor_*.py`, affected component tests, and Root Safety selectors;
+- `docs/operations/runtime-supervisor.md` plus any directly affected operations runbook.
+
+Do not add a second repository, direct SQL path, Docker SDK path, new owner kind, generic
+endpoint discovery service, fixed-port adapter, general host socket mount, or parallel
+Supervisor implementation.
+
+### Required offline gate
+
+Write failing tests for every blocker, endpoint transition/query state, and producer/query
+connection-identity equality. Then run focused backend and Root Supervisor suites followed
+by all affected Phase 2C and Root Safety regressions. Offline acceptance must instantiate
+the real production dependency graph without starting Docker, contacting an exchange, or
+creating a lifecycle job. The runbook must describe the new paper-probe-only boundary and
+retain an exact fail-closed operator path.
+
+Passing this gate permits the reviewed binary/deployment to exist; it does not authorize
+starting it.
+
+### Separately authorized gate 7a: paper-probe producer smoke
+
+Only after explicit authorization for the exact paper-probe instance:
+
+1. start it through the single real Supervisor;
+2. prove exact image/spec/state/secret/network/attempt identity and no real order;
+3. prove the healthy transaction emits one attested `application_http` endpoint;
+4. query that exact target through the production repository path;
+5. stop it and prove the old row remains evidence but is immediately unselectable;
+6. retain a non-secret receipt and leave 8081/8082/8083 unchanged.
+
+Task 7 begins only after this gate passes. If online authorization is unavailable, pause
+after the offline gate; do not substitute a mock producer. Listener retirement is gate 7b
+and remains entirely in Phase 2E.
+
+### Stop conditions
+
+Stop and repair the prerequisite if any runbook blocker remains open, endpoint creation
+cannot be atomic with the verified healthy transition, connection identity would come from
+the caller or a duplicated formula, the host bridge is broad/unreviewed, or enabling
+assembly bypasses any Phase 2C safety guard.
+
+---
+
+## Task 7: One Bot strategy-overlay Runtime Access vertical slice
+
+### Scope
+
+Implement only `bot.strategy_overlay.read.v1` end to end:
+
+1. `POST /api/v1/internal/runtime-access/strategy-overlay`, matched as
+   `runtime_strategy_overlay_v1`, returns only the exact frozen overlay DTO defined by the
+   governing amendment;
+2. committed `runtime-access-policy-v1` contains exactly that semantic route ID, method,
+   path, schemas, paper-probe capability, byte/time/concurrency bounds, and no second entry;
+3. `platform-control` obtains Task 6's exact target, issues one short-lived Ed25519 grant,
+   and forwards with no redirect or retry;
+4. a typed `POST /api/v2/charts/live` composes canonical base candles with the optional
+   overlay and turns overlay failure into a warning;
+5. the platform chart may select the known authorized paper-probe Registry instance as a
+   product identity, but receives and supplies no attempt, host, network, path, port, or
+   token detail.
+
+There is no public generic Runtime Access router. The typed chart service calls the
+internal gateway service directly.
+
+### Expected backend work
+
+- Add the exact runtime route, exact request/response union, and a route-local internal-
+  auth dependency. Keep it out of ordinary Basic/Bearer auth and public OpenAPI.
+- Add minimal Runtime Access domain, the one-entry canonical policy, Ed25519 issue/verify,
+  exact target forwarding, and chart composition modules. Issuer and verifier must load
+  the same immutable policy bytes; neither duplicates method/path or limits in code.
+- Commit that policy once as
+  `freqtrade/freqtrade/platform_control/policies/runtime-access-v1.json`, package it in
+  wheel/sdist, and load it through `importlib.resources`; there is no path/env override.
+- Migrate `runtime_access_requests` with non-null `requested_instance_id` and `route_id`,
+  nullable resolved instance/attempt foreign keys, and exact checks described by the
+  amendment. Refuse a non-empty legacy table rather than invent route/request identity.
+  Unknown-instance, no-active-attempt, policy-denial, resolved-target, and audit-write-
+  failure tests are mandatory.
+- Use `X-Freqtrade-Runtime-Access`; do not accept the internal grant through ordinary
+  Basic/Bearer authentication.
+- Claims, literal JOSE values, 15-second lifetime, two-second future-`iat` skew, duplicate/
+  extra rejection, and validation precedence must match the governing amendment exactly.
+- Enforce the amendment's fixed 16 KiB/2 MiB caps, exact timeouts, identity encoding,
+  two-request per-instance concurrency bound, and 250 ms acquisition limit.
+- Do not add route groups, signed caller methods, read retry, replay infrastructure,
+  automatic rotation, a key ring, or any other route entry.
+
+### Expected Root work
+
+- Bootstrap one explicit Ed25519 keypair only on an operator command.
+- Mount the private key only into `platform-control` and the public key plus immutable
+  instance/attempt identity read-only into the managed runtime.
+- Extend Root Safety to reject private-key runtime mounts, token/body logging, generic
+  routes, caller targets, redirects, retries, and multiple policy entries.
+- Keep keys, tokens, and values out of Git, PostgreSQL, logs, receipts, and ordinary
+  environment variables.
+
+### Expected frontend work
+
+- Extend the platform chart request with an optional Registry `runtime_instance_id`.
+- Consume the typed composition response; do not create a generic runtime proxy client.
+- Preserve base data when the overlay is unavailable and show a stable, non-secret
+  warning.
+- Align layers by instrument, timeframe, candle open, and data-as-of according to
+  `docs/chart-data-source-rules.md`.
+
+### Test-first acceptance
+
+Write failing tests covering at least:
+
+- wrong signature, algorithm/type, issuer, audience, attempt, route ID, policy revision,
+  claim/header shape, lifetime/skew, key ID, and matched route/method;
+- stopped, stale, duplicate, missing, or identity-mismatched target with zero HTTP calls;
+- unknown instance, known instance without attempt, pre-resolution policy denial, resolved
+  failure, and audit persistence failure with the exact nullable/non-null audit shape;
+- caller target fields, redirects, oversized request/response, header stripping, timeout,
+  content encoding, concurrency saturation, and no retry;
+- request/response schema bounds, ordered/aligned points, exact data-as-of window, and
+  rejection of arbitrary metadata or an unapproved source/kind;
+- response contains no base/watch layer from the runtime;
+- overlay alignment and base-only degradation;
+- chart refresh does not evaluate a strategy or create an order;
+- policy contains exactly `bot.strategy_overlay.read.v1`.
+
+Run the focused runtime-auth, gateway, chart-composition, market-data, frontend chart, key
+mount, and Root Safety suites, then the full affected backend/frontend regressions.
+
+Commit each owning repository separately. Do not combine backend, frontend, and Root
+implementation in one commit.
+
+---
+
+## Task 8: Phase 2D integration and acceptance
+
+### Offline gate
+
+- Run all backend `tests/platform`, `tests/platform_control`, and directly affected RPC
+  tests plus Ruff.
+- Run focused FreqUI platform/chart tests, `pnpm typecheck`, lint, and build.
+- Run the complete Root standard-library suite and Root Safety workflow selectors.
+- Verify submodule pointers, documentation links, policy count, secret exclusions, and a
+  clean recursive checkout at the exact Root SHA.
+- Perform an independent architecture/security review against the amendment.
+
+### Separately authorized paper-online gate
+
+Only after explicit authorization:
+
+- start the exact paper probe through the real Supervisor;
+- prove one healthy attempt and one `application_http` endpoint;
+- render base plus overlay through 8090 without any real order or exchange write;
+- stop the probe and prove the endpoint is no longer selectable while base candles remain;
+- retain a non-secret receipt with exact component/spec/attempt/policy identities.
+
+### Phase 2D definition of done
+
+- Tasks 1-4 remain green.
+- One same-origin 8090 base chart works with every Bot stopped.
+- One exact managed paper Bot overlay works and fails closed independently.
+- Policy contains one semantic operation, not the old 49-route inventory.
+- No Research route, application write, fixed-service proxy, or listener removal exists.
+- Existing 8081/8082/8083 compatibility behavior is unchanged.
+- Reviewed component commits and verification evidence are recorded.
+
+After this gate, begin Phase 2E Task 1. Do not infer permission to push, open or mutate a
+PR, start online services, remove fixed listeners, or enable live trading.
