@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 DataSnapshot Binding](plans/2026-07-31-phase1-data-snapshot-binding.md)
-
-**Active execution plan:**
 [Backtest Artifact Secret Redaction](plans/2026-07-31-backtest-artifact-secret-redaction.md)
+
+**Active execution plan:** none; the bounded strategy-evidence slice must be specified
+before implementation starts.
 
 ## Product purpose
 
@@ -122,9 +122,9 @@ acceptance.
   review finding.
 - Gate A.2 DataSnapshot binding is accepted at Root `a933df5b`, backend `05f3d5845`,
   frontend `a71cf5b1`, and strategies `dbd5b0b`, with no unresolved P0/P1 finding.
-- Close the active forward-write Backtest artifact credential-redaction gap before a
-  continuous AI research loop creates additional unsafe ZIPs. Historical artifact
-  remediation and credential rotation remain separately authorized operations.
+- The forward-write Backtest artifact credential-redaction gap is accepted at Root
+  `014c0f677` and backend `c8fb9af73`. Historical artifact remediation and credential
+  rotation remain separately authorized operations.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.

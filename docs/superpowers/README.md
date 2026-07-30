@@ -33,9 +33,11 @@ not an active backlog.
   Runtime, Paper, or Live scope.
 - The bounded
   [Backtest Artifact Secret Redaction](plans/2026-07-31-backtest-artifact-secret-redaction.md)
-  is completing acceptance on branch `xrunmasterx/phase1-complete-development`. It closes newly written
-  Backtest ZIP credential leakage before further automated strategy iteration. Existing
-  local artifacts remain a separately authorized operational-remediation boundary.
+  is accepted on branch `xrunmasterx/phase1-complete-development` at implementation Root
+  `014c0f677` and backend `c8fb9af73`. It closes newly written Backtest ZIP credential
+  leakage before further automated strategy iteration. Its
+  [acceptance report](reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md)
+  records the separately authorized historical-artifact remediation boundary.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -74,9 +76,11 @@ not an active backlog.
 | Previous baseline evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
 | Previous completed implementation | `plans/2026-07-31-phase1-experiment-revision-backtest.md` | Completed; exact-SHA accepted |
 | Previous acceptance evidence | `reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md` | Accepted contract-slice receipt |
-| Latest completed implementation | `plans/2026-07-31-phase1-data-snapshot-binding.md` | Completed; exact-SHA accepted |
-| Latest acceptance evidence | `reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md` | Accepted contract-slice receipt |
-| Active implementation | `plans/2026-07-31-backtest-artifact-secret-redaction.md` | Implementation complete; exact-SHA acceptance pending |
+| Preceding completed implementation | `plans/2026-07-31-phase1-data-snapshot-binding.md` | Completed; exact-SHA accepted |
+| Preceding acceptance evidence | `reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md` | Accepted contract-slice receipt |
+| Latest completed implementation | `plans/2026-07-31-backtest-artifact-secret-redaction.md` | Completed; exact-SHA accepted |
+| Latest acceptance evidence | `reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md` | Accepted forward-write security receipt |
+| Active implementation | None | Select the bounded strategy-evidence slice before coding |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |

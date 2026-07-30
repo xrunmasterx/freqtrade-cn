@@ -1,11 +1,14 @@
 # Backtest Artifact Secret Redaction Plan
 
-**Status:** implementation complete; exact-SHA acceptance report pending
+**Status:** completed; accepted at exact implementation SHAs
 
 **Branch:** `xrunmasterx/phase1-complete-development`
 
 **Base acceptance:**
 [Phase 1 DataSnapshot Binding](../reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md)
+
+**Acceptance evidence:**
+[Backtest Artifact Secret Redaction Acceptance](../reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md)
 
 ## 1. User outcome
 
@@ -110,5 +113,5 @@ inventory.
 - [x] Cover all confirmed credential paths without broad heuristic deletion.
 - [x] Run relevant pytest and Ruff regression gates.
 - [x] Complete independent Gate Review.
-- [x] Commit backend first; Root submodule pointer and synchronized docs are staged next.
-- [ ] Publish an exact-SHA acceptance report.
+- [x] Commit backend first, then the Root submodule pointer and synchronized docs.
+- [x] Publish an exact-SHA acceptance report.
