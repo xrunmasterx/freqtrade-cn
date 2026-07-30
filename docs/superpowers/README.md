@@ -1,6 +1,6 @@
 # Superpowers Documentation Index
 
-**Current status date:** 2026-07-30
+**Current status date:** 2026-07-31
 
 Read this file before selecting an implementation plan. Dated plans and specifications
 are retained as design and acceptance history; unchecked boxes in a completed plan are
@@ -13,10 +13,11 @@ not an active backlog.
   assembly, online runtime acceptance, exchange writes, and live trading remain disabled.
 - Product Phase 1 now means the strategy-validation program in
   [STRATEGY.md](STRATEGY.md), not the completed historical "Phase 1 Market Catalog."
-- The only active implementation entrypoint is the
-  [Phase 1 Baseline Capability Gate](plans/2026-07-30-phase1-baseline-capability-gate.md)
-  on branch `phase1-baseline-capability-gate`, starting from Root `f69c69e`, backend
-  `b9345c4a6`, frontend `09b235d8`, and strategies `dbd5b0b`.
+- The [Phase 1 Baseline Capability Gate](plans/2026-07-30-phase1-baseline-capability-gate.md)
+  passed on branch `phase1-baseline-capability-gate` at accepted implementation Root
+  `ec1026a`, backend `455455980`, frontend `ce0df358`, and strategies `dbd5b0b`. Its
+  [exact-SHA acceptance report](reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md)
+  is the evidence authority. No next implementation plan is active.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -32,28 +33,27 @@ not an active backlog.
   observation-only, keeps Strategy Signals separate from runtime Trades, and suppresses
   and reports Trades whose available strategy name or timeframe mismatches the chart.
   These compatibility fields are not formal revision/release identity.
-- Docker 29.6.2, Compose 5.3.1, and the `desktop-linux` daemon are reachable through the
-  installed Docker executable, although the coordinator PowerShell `PATH` does not
-  resolve `docker` directly. The real 8081 and 8083 compatibility journeys passed on the
-  reviewed working tree: 1m watch refreshed at the expected cadence, strategy overlays
-  and signals rendered with forming-candle trust state, the standard Freqtrade backtest
-  completed and rendered, and Lookahead/Recursive Analysis completed. Exact committed
-  image provenance and its final receipt remain open; working-tree acceptance is not an
-  exact-SHA Gate pass.
-- Phase 2D Tasks 1-4 remain complete locally as reusable, unpublished backend assets. The
-  last implementation Root commit is `2128646`; the later Root documentation commit is
-  `f69c69e`.
+- Docker 29.6.2, Compose 5.3.1, and the `desktop-linux` daemon were used for exact-SHA
+  acceptance. The committed-image 8081 and 8083 journeys passed: 1m watch refreshed at
+  approximately ten-second cadence, strategy overlays and signals rendered with
+  forming-candle trust state, the standard Freqtrade backtest completed and rendered,
+  and Lookahead/Recursive Analysis completed. Both services were stopped after the
+  receipt; Docker is installed but is not on the coordinator PowerShell `PATH`.
+- Phase 2D Tasks 1-4 remain complete locally as reusable, unpublished backend assets. Its
+  last implementation Root commit is `2128646`; the accepted Phase 1 Gate implementation
+  Root is `ec1026a`.
 - Phase 2D Tasks 5-8, Phase 2E, new Experiment UI, dynamic Runtime, Paper Observation,
   Runtime Access, and 8090 chart work are paused. Passing the baseline does not
   automatically resume any of them.
 
-## Active implementation entrypoints
+## Current authority and resume entrypoints
 
 | Role | Document | Status |
 |---|---|---|
 | Product purpose and sequencing | `STRATEGY.md` | Governing |
 | Shared domain language | `../../CONTEXT.md` | Governing glossary |
-| Current implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Active; exact-SHA finalization only |
+| Latest completed implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Completed; exact-SHA accepted |
+| Latest acceptance evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |

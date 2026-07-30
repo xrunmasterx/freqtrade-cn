@@ -4,7 +4,7 @@
 
 **Current status authority:** [README.md](README.md)
 
-**Active execution plan:**
+**Latest completed execution plan:**
 [Phase 1 Baseline Capability Gate](plans/2026-07-30-phase1-baseline-capability-gate.md)
 
 ## Product purpose
@@ -45,7 +45,7 @@ Live trading, exchange writes, and real-money acceptance are outside the current
 Product Phase 1 is deliberately split into two gates. It is distinct from the dated
 architecture's "Phase 1 Market Catalog" taxonomy.
 
-### Gate A: Baseline Capability Gate — acceptance finalization
+### Gate A: Baseline Capability Gate — accepted
 
 Accept the existing core workflow before adding new platform features:
 
@@ -90,20 +90,20 @@ acceptance.
 
 ### Now
 
-- Finalize the exact-SHA receipt for the Baseline Capability Gate. The real 8081 and
-  8083 compatibility journeys have passed on the reviewed working tree; that evidence
-  is not promoted to an exact-version acceptance until the committed image is rebuilt
-  and rechecked.
-- Fix only P0 defects that block its user journeys or evidence semantics.
+- Gate A is accepted at exact Root/backend/frontend SHAs with no unresolved P0 defect.
+- Keep implementation paused until one bounded next user journey and measurable Gate are
+  explicitly selected. Passing Gate A is permission to decide, not permission to resume
+  every paused track.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-After a passing exact-SHA receipt, choose exactly one bounded user journey. The default
-recommendation is the smallest Experiment revision and authoritative backtest slice,
-because it improves repeatability without first requiring dynamic runtime infrastructure.
+Choose exactly one bounded user journey. The default recommendation is the smallest
+Experiment revision and authoritative backtest slice, because it improves repeatability
+without first requiring dynamic runtime infrastructure. This recommendation is not an
+active implementation plan until explicitly confirmed.
 
 ### Later
 

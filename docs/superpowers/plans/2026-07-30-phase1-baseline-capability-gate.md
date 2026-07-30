@@ -1,6 +1,6 @@
 # Phase 1 Baseline Capability Gate
 
-**Status:** Active; working-tree compatibility journeys passed, exact-SHA receipt pending
+**Status:** Completed; exact-SHA compatibility Gate accepted
 
 **Decision date:** 2026-07-30
 
@@ -14,6 +14,18 @@
 | Backend `freqtrade/` | `b9345c4a65e57c9bcb62635d13be2c2190e0876f` |
 | Frontend `frequi/` | `09b235d863471871d54558e1d31cd7091ae2b79e` |
 | Strategies | `dbd5b0b21cfbf5ee80588d37458ace2467b7f8a4` |
+
+**Accepted implementation identities:**
+
+| Repository | Accepted commit |
+|---|---|
+| Root | `ec1026a10dea6bff58fc1f4ff011f7ba397cc5f0` |
+| Backend `freqtrade/` | `455455980902113002df3d391eb38c2b954881f5` |
+| Frontend `frequi/` | `ce0df358f915d7cbfb69ff35aaf9d6e72ab37201` |
+| Strategies | `dbd5b0b21cfbf5ee80588d37458ace2467b7f8a4` |
+
+**Acceptance report:**
+[2026-07-30 Phase 1 Baseline Capability Gate](../reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md)
 
 **Product authority:** [../STRATEGY.md](../STRATEGY.md)
 
@@ -75,9 +87,9 @@ may prove the execution-marker presentation.
 7. A mismatched strategy/revision/release context suppresses execution evidence rather
    than displaying a plausible but false comparison.
 
-## Current evidence and gaps
+## Accepted evidence and compatibility limits
 
-### Verified automatically on 2026-07-30
+### Verified automatically on 2026-07-30–31
 
 - Backend chart composition/indicator suites: 62 passed.
 - Forming Market and Watch series are marked `provisional=true`; closed observation and
@@ -86,8 +98,7 @@ may prove the execution-marker presentation.
   Starlette TestClient deprecation warning.
 - Backend Ruff check for `freqtrade/rpc` and `tests/rpc`: passed.
 - Frontend focused chart and locale suites: 13 files, 98 tests passed. Happy DOM emitted
-  teardown `AbortError`/`EPROTO` noise after an earlier successful run; the final run
-  completed without that teardown output.
+  non-failing teardown `AbortError`/`EPROTO` noise on some successful runs.
 - Frontend `pnpm typecheck`: passed.
 - Changed-file frontend ESLint with `--quiet`: passed.
 - Frontend production build: passed; third-party pure-annotation warnings did not fail
@@ -96,28 +107,34 @@ may prove the execution-marker presentation.
   backtest result becoming visible plus Lookahead and Recursive Analysis. The existing
   background-job mock emitted non-failing `data is not iterable` console noise.
 
-These checks prove the scoped code paths and local mocked browser contracts. Real
-compatibility-service evidence is recorded below, but it still requires a committed
-image rerun before it becomes the exact-SHA runtime receipt.
+These checks prove the scoped code paths and local mocked browser contracts. The real
+compatibility-service checks below were repeated against the committed implementation
+and are bound by the acceptance report.
 
-### Verified on real compatibility services on 2026-07-30
+### Verified on real compatibility services on 2026-07-30–31
+
+The first working-tree browser pass ran on 2026-07-30. The committed-image build,
+service repeat, final screenshots, and stop/cleanup completed on 2026-07-31 in the
+project's Asia/Shanghai timezone.
 
 - Only `freqtrade` on 8081 and `freqtrade-research` on 8083 were built and started; both
   became healthy and authenticated. 8081 reported `dry_run=true`, Spot, OKX,
   `SampleStrategy`, and 1m. 8083 reported the Research webserver identity with no
   preselected strategy.
 - 8081 `/graph` issued three live 1m chart requests at approximately ten-second
-  intervals. Consecutive API observations advanced the Forming Candle; its Market and
-  Watch series were provisional, while official strategy output remained closed-candle
-  evidence. The chart rendered strategy indicators and entry/exit points with the
-  observation-only status visible.
+  intervals. The earlier working-tree observation crossed a minute boundary; the exact
+  committed run confirmed three requests at 9.991s and 10.026s intervals within one
+  Forming Candle. Its Market and Watch series were provisional, while official strategy
+  output remained closed-candle evidence. The chart rendered strategy indicators and
+  entry/exit points with the observation-only status visible.
 - 8081 `/trade` retained the preconfigured Spot compatibility-service journey. Runtime
   Trade markers remained a separate source from Strategy Signals; deterministic tests
   cover mismatch suppression because no live Paper trade was required or manufactured.
 - 8083 loaded `SampleStrategy` through the fixed read-only strategy mount and completed a
   standard Freqtrade 5m backtest over local fixture data for
-  `20251124-20251204`. The UI rendered the summary, one simulated trade, result chart,
-  trade navigation, and retained history/load entry.
+  `20251124-20251204`. The exact committed run produced one simulated trade and
+  5.7346868 USDT profit. The UI rendered the summary, signals, simulated trade marker,
+  result chart, trade navigation, and two retained history/load entries.
 - Lookahead Analysis completed with no reported bias after explicitly allowing the
   strategy's configured limit orders. Recursive Analysis completed for startup candle
   counts 50, 100, and 200 and returned 15 indicators.
@@ -125,21 +142,19 @@ image rerun before it becomes the exact-SHA runtime receipt.
   acceptance directory. No Live service, real order, exchange write, listener change,
   state migration, or second backtest engine entered the acceptance.
 
-### Remaining Gate gaps and compatibility limits
+### Compatibility limits
 
-1. The compatibility-service browser journeys passed from the reviewed working tree, but
-   its image was built before the final commits. Rebuild and recheck the committed image,
-   then record the exact Root/backend/frontend/strategy SHAs and image ID. Exact
-   provenance—not Docker availability or journey behavior—is the remaining Gate blocker.
+1. Exact provenance is complete at the accepted implementation SHAs above. The report
+   commit is documentation-only and follows the accepted implementation Root; it is not
+   retroactively represented as part of the runtime image.
 2. Gate A trade filtering uses the strongest compatibility fields currently exposed by
    both sides: strategy name and, when available, timeframe. It suppresses explicit
    mismatches and retains Trades missing either field for backward compatibility. A
    match or legacy fallback does not prove an exact revision/release match or formal
    Paper acceptance.
-3. The real 8083 journey proved the full result summary, trade navigation, chart
-   visualization, and retained history/load entry. Only one result was needed, so
-   multi-result comparison was intentionally not manufactured; its existing automated
-   compatibility coverage remains the scoped evidence.
+3. The exact rerun naturally produced a second retained result. Both history rows were
+   visible and selectable; no additional run was manufactured solely for comparison and
+   no stronger P0 comparison claim is made.
 4. Happy DOM, third-party annotation, line-ending, and incomplete background-job mock
    warnings are retained as test-harness noise; none failed a command. They are not
    silently promoted to product defects or fixed outside this Gate.
@@ -235,17 +250,18 @@ Then:
    result summary, trades, and chart; confirm the retained history/load entrypoint, and
    inspect comparison only if two results already exist;
 7. [x] run Lookahead and Recursive Analysis against the same strategy/data context;
-8. [ ] stop the two services using the existing non-destructive runbook and retain a
+8. [x] stop the two services using the existing non-destructive runbook and retain a
    non-secret receipt.
 
 Do not require a live Paper trade, use `/research` as backtest evidence, call a real
 order path, remove a listener, or migrate state.
 
-Steps 1-7 passed on the reviewed working tree. Repeat the bounded smoke checks against
-the committed image before completing step 8; do not substitute the earlier dirty-image
-run for exact-SHA evidence.
+Steps 1-7 passed first on the reviewed working tree and then in a bounded exact-SHA
+repeat. Both services were stopped after the exact receipt. The temporary copied market
+fixture was hash-verified and removed; source test data and ignored result evidence were
+retained.
 
-### Task 4: Record the Gate receipt and choose one next journey
+### Task 4: Record the Gate receipt and post-Gate roadmap state
 
 The receipt records:
 
@@ -256,8 +272,10 @@ The receipt records:
 - screenshots for strategy indicators, signals, execution markers, and backtest results;
 - all warnings, skipped online steps, and unresolved defects.
 
-After a pass, stop. Update the current-status index and make one explicit roadmap
-decision. Do not automatically resume an old plan.
+Task 4 is complete. The explicit roadmap decision is to keep every paused track paused
+until the user selects one bounded next journey and its measurable Gate. The default
+recommendation remains the smallest Experiment revision plus authoritative backtest
+slice; it is not active merely because Gate A passed.
 
 ## Stop conditions
 
@@ -282,4 +300,4 @@ Research expansion, listener removal, or a second backtest engine.
 - 8083 standard Freqtrade backtest evidence is not confused with the simplified Research
   SMA calculation;
 - no new platform feature or Live authority entered the diff;
-- one explicit next-journey decision is recorded.
+- the post-Gate roadmap state is explicit and no next journey is activated implicitly.
