@@ -128,8 +128,9 @@ _Avoid:_ release, immutable experiment.
 
 An immutable snapshot of a StrategyExperiment's strategy identity, parameters, data
 selection, and validation configuration. Backtest, analysis, release, and later Paper
-evidence bind to the exact revision; this is a planned product contract, not yet an
-implemented current model.
+evidence bind to the exact revision. Formal comparison additionally requires the exact
+content-addressed DataSnapshot and environment identity; a timerange or mutable data
+directory is not enough.
 
 _Avoid:_ mutable experiment, run result, StrategyRelease.
 
@@ -140,6 +141,25 @@ Recursive Analysis. Paper Observation records what was observed over time and is
 misrepresented as exact DataSnapshot replay.
 
 _Avoid:_ mutable data directory, latest data.
+
+### Freqtrade Run ID
+
+Freqtrade's deterministic backtest cache fingerprint over effective strategy config,
+loaded parameter-file values, and strategy source bytes. Repeated equivalent inputs can
+share it. It is neither a unique execution-attempt identity nor proof of the historical
+candle contents.
+
+_Avoid:_ ExperimentRevision ID, BacktestRun ID, DataSnapshot ID.
+
+### Backtest Revision Receipt
+
+A deterministic manifest attached to the standard Freqtrade backtest result and history
+to correlate an Experiment ID, validated Backtest request, Freqtrade Run ID, and engine
+version. When its `data_snapshot_id` is absent, it is pre-formal provenance only: it must
+not be presented as exact replay proof, a platform-owned immutable Experiment ledger, or
+Paper acceptance evidence.
+
+_Avoid:_ formal ExperimentRevision when exact data content is unbound, StrategyRelease.
 
 ### StrategyRelease
 

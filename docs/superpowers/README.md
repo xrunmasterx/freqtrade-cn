@@ -17,7 +17,14 @@ not an active backlog.
   passed on branch `phase1-baseline-capability-gate` at accepted implementation Root
   `ec1026a`, backend `455455980`, frontend `ce0df358`, and strategies `dbd5b0b`. Its
   [exact-SHA acceptance report](reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md)
-  is the evidence authority. No next implementation plan is active.
+  is the evidence authority.
+- The bounded
+  [Phase 1 Experiment Revision Backtest](plans/2026-07-31-phase1-experiment-revision-backtest.md)
+  implementation is complete and independently reviewed on branch
+  `xrunmasterx/phase1-experiment-revision-backtest`; its exact-SHA acceptance receipt is
+  pending the Root integration commit. It adds a visible revision receipt to the existing
+  authoritative 8083 Backtest journey while keeping DataSnapshot, formal reproducibility,
+  Runtime, and Paper work out of scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -54,6 +61,7 @@ not an active backlog.
 | Shared domain language | `../../CONTEXT.md` | Governing glossary |
 | Latest completed implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
+| Latest implementation | `plans/2026-07-31-phase1-experiment-revision-backtest.md` | Completed and independently reviewed; exact-SHA receipt pending |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |

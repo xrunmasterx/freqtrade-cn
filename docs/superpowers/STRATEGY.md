@@ -5,7 +5,7 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Baseline Capability Gate](plans/2026-07-30-phase1-baseline-capability-gate.md)
+[Phase 1 Experiment Revision Backtest](plans/2026-07-31-phase1-experiment-revision-backtest.md)
 
 ## Product purpose
 
@@ -64,6 +64,17 @@ The two origins are intentional for the baseline: 8081 runs Freqtrade in `trade`
 while the standard backtest and analysis APIs require the existing 8083
 `webserver` mode. Unifying them is not a Gate A requirement.
 
+### Gate A.1: Revision-bound authoritative Backtest — implementation complete
+
+The first post-baseline slice stays entirely inside the existing authoritative 8083
+Backtest journey. A user supplies a stable Experiment ID, the standard engine creates a
+deterministic revision receipt, and the result/history views retain that provenance.
+
+This receipt binds the request, native strategy/cache fingerprint, and engine version. It
+does not yet bind exact candle content: `data_snapshot_id` remains null, result caching is
+bypassed, and the UI must state that the result is not formally reproducible or eligible
+for Paper acceptance. This is a provenance step toward Gate B, not Gate B execution.
+
 ### Gate B: Governed Experiment-to-Paper — not active
 
 After Gate A passes and one explicit next-journey decision is recorded, the smallest
@@ -91,19 +102,18 @@ acceptance.
 ### Now
 
 - Gate A is accepted at exact Root/backend/frontend SHAs with no unresolved P0 defect.
-- Keep implementation paused until one bounded next user journey and measurable Gate are
-  explicitly selected. Passing Gate A is permission to decide, not permission to resume
-  every paused track.
+- The revision-bound standard Backtest implementation is complete, verified, and
+  independently reviewed. Its exact-SHA acceptance receipt follows the Root integration
+  commit.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Choose exactly one bounded user journey. The default recommendation is the smallest
-Experiment revision and authoritative backtest slice, because it improves repeatability
-without first requiring dynamic runtime infrastructure. This recommendation is not an
-active implementation plan until explicitly confirmed.
+After the exact-SHA receipt is recorded, make one explicit decision on the next
+correctness slice. The default recommendation is exact content-addressed DataSnapshot
+binding; dynamic runtime infrastructure is still not implied or active.
 
 ### Later
 
