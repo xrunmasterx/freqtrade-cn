@@ -20,11 +20,10 @@ not an active backlog.
   is the evidence authority.
 - The bounded
   [Phase 1 Experiment Revision Backtest](plans/2026-07-31-phase1-experiment-revision-backtest.md)
-  implementation is complete and independently reviewed on branch
-  `xrunmasterx/phase1-experiment-revision-backtest`; its exact-SHA acceptance receipt is
-  pending the Root integration commit. It adds a visible revision receipt to the existing
-  authoritative 8083 Backtest journey while keeping DataSnapshot, formal reproducibility,
-  Runtime, and Paper work out of scope.
+  is accepted on branch `xrunmasterx/phase1-experiment-revision-backtest` at implementation
+  Root `f7f294c`, backend `73a7431f2`, frontend `3c0f0dbc`, and strategies `dbd5b0b`.
+  Its [exact-SHA acceptance report](reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md)
+  is the evidence authority. No next implementation plan is active.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -59,9 +58,10 @@ not an active backlog.
 |---|---|---|
 | Product purpose and sequencing | `STRATEGY.md` | Governing |
 | Shared domain language | `../../CONTEXT.md` | Governing glossary |
-| Latest completed implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Completed; exact-SHA accepted |
-| Latest acceptance evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
-| Latest implementation | `plans/2026-07-31-phase1-experiment-revision-backtest.md` | Completed and independently reviewed; exact-SHA receipt pending |
+| Previous baseline implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Completed; exact-SHA accepted |
+| Previous baseline evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
+| Latest completed implementation | `plans/2026-07-31-phase1-experiment-revision-backtest.md` | Completed; exact-SHA accepted |
+| Latest acceptance evidence | `reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md` | Accepted contract-slice receipt |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |

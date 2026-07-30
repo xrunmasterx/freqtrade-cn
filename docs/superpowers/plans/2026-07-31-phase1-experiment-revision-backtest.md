@@ -1,17 +1,18 @@
 # Phase 1 Experiment Revision Backtest
 
-**Status:** Implementation complete; automated verification and independent Gate Review
-passed; exact-SHA acceptance receipt pending
+**Status:** Completed; exact-SHA contract slice accepted
 
 **Date:** 2026-07-31
 
 **Branch:** `xrunmasterx/phase1-experiment-revision-backtest`
 
-**Committed components:** backend `73a7431f2e51abd472d30aad0a36d234aec8fd0b`,
-frontend `3c0f0dbc6675ef5cf90c20b13641d69ca3a97a5f`, strategies
-`dbd5b0b21cfbf5ee80588d37458ace2467b7f8a4`. The Root implementation identity is
-recorded by the documentation-only acceptance receipt that follows the integration
-commit.
+**Accepted implementation:** Root `f7f294c33681ab701a0f0effaef0c9015018f4dd`,
+backend `73a7431f2e51abd472d30aad0a36d234aec8fd0b`, frontend
+`3c0f0dbc6675ef5cf90c20b13641d69ca3a97a5f`, strategies
+`dbd5b0b21cfbf5ee80588d37458ace2467b7f8a4`.
+
+**Acceptance report:**
+[2026-07-31 Phase 1 Backtest Revision Receipt](../reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md)
 
 **Depends on:** the accepted
 [Phase 1 Baseline Capability Gate](2026-07-30-phase1-baseline-capability-gate.md)

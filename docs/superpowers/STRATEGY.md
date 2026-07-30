@@ -64,7 +64,7 @@ The two origins are intentional for the baseline: 8081 runs Freqtrade in `trade`
 while the standard backtest and analysis APIs require the existing 8083
 `webserver` mode. Unifying them is not a Gate A requirement.
 
-### Gate A.1: Revision-bound authoritative Backtest — implementation complete
+### Gate A.1: Revision-bound authoritative Backtest — accepted
 
 The first post-baseline slice stays entirely inside the existing authoritative 8083
 Backtest journey. A user supplies a stable Experiment ID, the standard engine creates a
@@ -102,18 +102,17 @@ acceptance.
 ### Now
 
 - Gate A is accepted at exact Root/backend/frontend SHAs with no unresolved P0 defect.
-- The revision-bound standard Backtest implementation is complete, verified, and
-  independently reviewed. Its exact-SHA acceptance receipt follows the Root integration
-  commit.
+- Gate A.1 is accepted at exact Root/backend/frontend/strategy SHAs with no unresolved
+  review finding. No next implementation plan is active.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-After the exact-SHA receipt is recorded, make one explicit decision on the next
-correctness slice. The default recommendation is exact content-addressed DataSnapshot
-binding; dynamic runtime infrastructure is still not implied or active.
+Make one explicit decision on the next correctness slice. The default recommendation is
+exact content-addressed DataSnapshot binding; dynamic runtime infrastructure is still not
+implied or active.
 
 ### Later
 
