@@ -31,6 +31,11 @@ not an active backlog.
   is the evidence authority. It binds API-2.52 standard Backtests to exact logical
   market-data identity without adding data archival, a snapshot picker, Experiment CRUD,
   Runtime, Paper, or Live scope.
+- The bounded
+  [Backtest Artifact Secret Redaction](plans/2026-07-31-backtest-artifact-secret-redaction.md)
+  is completing acceptance on branch `xrunmasterx/phase1-complete-development`. It closes newly written
+  Backtest ZIP credential leakage before further automated strategy iteration. Existing
+  local artifacts remain a separately authorized operational-remediation boundary.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -71,7 +76,7 @@ not an active backlog.
 | Previous acceptance evidence | `reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md` | Accepted contract-slice receipt |
 | Latest completed implementation | `plans/2026-07-31-phase1-data-snapshot-binding.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md` | Accepted contract-slice receipt |
-| Active implementation | None | Select one bounded next slice from accepted evidence before coding |
+| Active implementation | `plans/2026-07-31-backtest-artifact-secret-redaction.md` | Implementation complete; exact-SHA acceptance pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |

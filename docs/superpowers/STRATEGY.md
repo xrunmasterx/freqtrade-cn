@@ -7,8 +7,8 @@
 **Latest completed execution plan:**
 [Phase 1 DataSnapshot Binding](plans/2026-07-31-phase1-data-snapshot-binding.md)
 
-**Active execution plan:** none; the next bounded slice must be selected from accepted
-evidence before implementation starts.
+**Active execution plan:**
+[Backtest Artifact Secret Redaction](plans/2026-07-31-backtest-artifact-secret-redaction.md)
 
 ## Product purpose
 
@@ -122,16 +122,20 @@ acceptance.
   review finding.
 - Gate A.2 DataSnapshot binding is accepted at Root `a933df5b`, backend `05f3d5845`,
   frontend `a71cf5b1`, and strategies `dbd5b0b`, with no unresolved P0/P1 finding.
+- Close the active forward-write Backtest artifact credential-redaction gap before a
+  continuous AI research loop creates additional unsafe ZIPs. Historical artifact
+  remediation and credential rotation remain separately authorized operations.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Select one smallest correctness gap from accepted evidence before starting another
-implementation slice. Strategy artifact identity, environment identity, and retained
-snapshot payload/replay are separate candidates; none is active merely because exact
-data identity passed. Dynamic runtime infrastructure is still not implied or active.
+After the active security correction passes its exact-SHA Gate, prioritize the smallest
+strategy-evidence binding that proves the loaded primary strategy source and resolved
+parameters used by a Backtest. Environment identity and retained snapshot payload/replay
+remain separate later candidates. Dynamic runtime infrastructure is still not implied
+or active.
 
 ### Later
 

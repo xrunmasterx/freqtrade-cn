@@ -82,6 +82,33 @@ QQE is outside the formal root runtime contract. It must not be added piecemeal;
 formalization requires its manifest entry, template, strategy, tests, and Compose
 service in one reviewed change.
 
+## Respond to credentials copied into Backtest artifacts
+
+Current Freqtrade code sanitizes the configuration member of every newly written
+Backtest ZIP. That protection is forward-only: deploying a fix does not rewrite an
+existing ZIP, revoke a token, remove a copy, or clean a backup.
+
+If a read-only inventory finds an unredacted credential in a historical Backtest
+artifact:
+
+1. Restrict access to the artifact directory and backups. Never print, hash, partially
+   reveal, or paste the value into a log, issue, chat, or scanner allowlist.
+2. Identify affected services and credential classes only. Do not compare values or use
+   their length as an identifier.
+3. Create a sanitized replacement in a separate staging location and verify all ZIP
+   members and the parsed result before considering removal of the original. Redaction
+   preserves evidence but does not revoke the exposed value.
+4. Obtain explicit operator authorization for each affected service. Then use the
+   existing one-service-at-a-time rotation procedure below, verify the service, and
+   authenticate clients again.
+5. Delete or quarantine originals and old backups only under the separately authorized
+   retention decision. Do not rewrite Git history unless a Git exposure was independently
+   confirmed and coordinated with every clone owner.
+
+Backtest result directories are operational state and must remain ignored by Git. A
+clean current index is not proof that an artifact never existed in an external copy, so
+issuer-side rotation is the authority for invalidating exposed credentials.
+
 ## Rotate one service at a time
 
 Before each subsection, obtain explicit operator authorization to invalidate and
