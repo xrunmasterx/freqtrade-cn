@@ -136,9 +136,10 @@ _Avoid:_ mutable experiment, run result, StrategyRelease.
 
 ### DataSnapshot
 
-An immutable content-addressed offline dataset identity used by Backtest, Lookahead, and
-Recursive Analysis. Paper Observation records what was observed over time and is not
-misrepresented as exact DataSnapshot replay.
+An immutable, content-addressed manifest of the exact normalized offline market-data
+series made available to Backtest, Lookahead, and Recursive Analysis. It identifies
+logical input content independently of storage paths and formats; payload retention,
+strategy artifacts, environment identity, and Paper Observation remain separate.
 
 _Avoid:_ mutable data directory, latest data.
 
@@ -155,9 +156,9 @@ _Avoid:_ ExperimentRevision ID, BacktestRun ID, DataSnapshot ID.
 
 A deterministic manifest attached to the standard Freqtrade backtest result and history
 to correlate an Experiment ID, validated Backtest request, Freqtrade Run ID, and engine
-version. When its `data_snapshot_id` is absent, it is pre-formal provenance only: it must
-not be presented as exact replay proof, a platform-owned immutable Experiment ledger, or
-Paper acceptance evidence.
+version. An absent `data_snapshot_id` is pre-formal provenance; a bound DataSnapshot adds
+exact standard market-data identity but is still not payload-retention proof, a complete
+environment/replay proof, an immutable Experiment ledger, or Paper acceptance evidence.
 
 _Avoid:_ formal ExperimentRevision when exact data content is unbound, StrategyRelease.
 

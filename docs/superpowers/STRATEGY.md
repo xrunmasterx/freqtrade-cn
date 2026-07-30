@@ -7,6 +7,9 @@
 **Latest completed execution plan:**
 [Phase 1 Experiment Revision Backtest](plans/2026-07-31-phase1-experiment-revision-backtest.md)
 
+**Active execution plan:**
+[Phase 1 DataSnapshot Binding](plans/2026-07-31-phase1-data-snapshot-binding.md)
+
 ## Product purpose
 
 The near-term product helps a local strategy researcher answer three questions with
@@ -75,6 +78,19 @@ does not yet bind exact candle content: `data_snapshot_id` remains null, result 
 bypassed, and the UI must state that the result is not formally reproducible or eligible
 for Paper acceptance. This is a provenance step toward Gate B, not Gate B execution.
 
+### Gate A.2: Exact standard data identity — active
+
+The next bounded slice stays on the same Backtest form and engine. API 2.52 adds an
+automatic, capability-gated capture of the normalized primary/startup, detail,
+informative, and Futures auxiliary market-data series actually admitted to a standard
+Backtest. A content-addressed manifest is bound into receipt schema 2; no snapshot picker,
+data-management dashboard, or second engine is added.
+
+This gate answers whether two results used the same standard offline market-data content.
+It does not archive the source rows, bind arbitrary strategy I/O or the complete software
+environment, make the result artifact tamper-resistant, qualify Paper execution, or
+predict future profit.
+
 ### Gate B: Governed Experiment-to-Paper — not active
 
 After Gate A passes and one explicit next-journey decision is recorded, the smallest
@@ -103,16 +119,19 @@ acceptance.
 
 - Gate A is accepted at exact Root/backend/frontend SHAs with no unresolved P0 defect.
 - Gate A.1 is accepted at exact Root/backend/frontend/strategy SHAs with no unresolved
-  review finding. No next implementation plan is active.
+  review finding.
+- Gate A.2 DataSnapshot binding is active on
+  `xrunmasterx/phase1-data-snapshot-binding`; its exact implementation SHAs are not yet
+  accepted.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Make one explicit decision on the next correctness slice. The default recommendation is
-exact content-addressed DataSnapshot binding; dynamic runtime infrastructure is still not
-implied or active.
+Complete and independently accept the bounded DataSnapshot binding plan. The next
+decision after acceptance should be selected from observed evidence; dynamic runtime
+infrastructure is still not implied or active.
 
 ### Later
 

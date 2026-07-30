@@ -23,7 +23,13 @@ not an active backlog.
   is accepted on branch `xrunmasterx/phase1-experiment-revision-backtest` at implementation
   Root `f7f294c`, backend `73a7431f2`, frontend `3c0f0dbc`, and strategies `dbd5b0b`.
   Its [exact-SHA acceptance report](reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md)
-  is the evidence authority. No next implementation plan is active.
+  is the evidence authority.
+- The bounded [Phase 1 DataSnapshot Binding](plans/2026-07-31-phase1-data-snapshot-binding.md)
+  is now active on branch `xrunmasterx/phase1-data-snapshot-binding`. It adds automatic
+  API-2.52 logical market-data identity to the existing Backtest receipt without adding
+  data archival, a snapshot picker, Experiment CRUD, Runtime, Paper, or Live scope. The
+  [logical-data identity ADR](decisions/2026-07-31-logical-data-snapshot-identity.md) is
+  the canonical hashing decision; no implementation SHA is accepted yet.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -62,6 +68,8 @@ not an active backlog.
 | Previous baseline evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
 | Latest completed implementation | `plans/2026-07-31-phase1-experiment-revision-backtest.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md` | Accepted contract-slice receipt |
+| Active implementation | `plans/2026-07-31-phase1-data-snapshot-binding.md` | Active; not yet accepted |
+| Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted for active slice |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |
