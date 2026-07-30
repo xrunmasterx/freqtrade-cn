@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Experiment Revision Backtest](plans/2026-07-31-phase1-experiment-revision-backtest.md)
-
-**Active execution plan:**
 [Phase 1 DataSnapshot Binding](plans/2026-07-31-phase1-data-snapshot-binding.md)
+
+**Active execution plan:** none; the next bounded slice must be selected from accepted
+evidence before implementation starts.
 
 ## Product purpose
 
@@ -78,7 +78,7 @@ does not yet bind exact candle content: `data_snapshot_id` remains null, result 
 bypassed, and the UI must state that the result is not formally reproducible or eligible
 for Paper acceptance. This is a provenance step toward Gate B, not Gate B execution.
 
-### Gate A.2: Exact standard data identity — active
+### Gate A.2: Exact standard data identity — accepted
 
 The next bounded slice stays on the same Backtest form and engine. API 2.52 adds an
 automatic, capability-gated capture of the normalized primary/startup, detail,
@@ -120,18 +120,18 @@ acceptance.
 - Gate A is accepted at exact Root/backend/frontend SHAs with no unresolved P0 defect.
 - Gate A.1 is accepted at exact Root/backend/frontend/strategy SHAs with no unresolved
   review finding.
-- Gate A.2 DataSnapshot binding is active on
-  `xrunmasterx/phase1-data-snapshot-binding`; its exact implementation SHAs are not yet
-  accepted.
+- Gate A.2 DataSnapshot binding is accepted at Root `a933df5b`, backend `05f3d5845`,
+  frontend `a71cf5b1`, and strategies `dbd5b0b`, with no unresolved P0/P1 finding.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Complete and independently accept the bounded DataSnapshot binding plan. The next
-decision after acceptance should be selected from observed evidence; dynamic runtime
-infrastructure is still not implied or active.
+Select one smallest correctness gap from accepted evidence before starting another
+implementation slice. Strategy artifact identity, environment identity, and retained
+snapshot payload/replay are separate candidates; none is active merely because exact
+data identity passed. Dynamic runtime infrastructure is still not implied or active.
 
 ### Later
 

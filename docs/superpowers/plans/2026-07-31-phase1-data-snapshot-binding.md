@@ -1,6 +1,6 @@
 # Phase 1 DataSnapshot Binding Plan
 
-**Status:** active
+**Status:** completed; accepted at exact implementation SHAs
 
 **Branch:** `xrunmasterx/phase1-data-snapshot-binding`
 
@@ -9,6 +9,9 @@
 
 **Identity decision:**
 [Content-address normalized logical market data](../decisions/2026-07-31-logical-data-snapshot-identity.md)
+
+**Acceptance evidence:**
+[Phase 1 DataSnapshot Binding Acceptance Report](../reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md)
 
 ## 1. User outcome
 
@@ -188,7 +191,7 @@ Experiment, Runtime, Paper, or Live scope.
 - [x] Add schema-2 receipt binding and API 2.52 compatibility.
 - [x] Add the three-state result/history/selector/comparison UI.
 - [x] Run focused and broader regressions plus performance evidence.
-- [ ] Complete independent Gate Review and exact-SHA acceptance report.
+- [x] Complete independent Gate Review and exact-SHA acceptance report.
 
 ## 8. Explicit non-goals
 

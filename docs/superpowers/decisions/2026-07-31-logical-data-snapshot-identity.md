@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-31
 
-**Status:** accepted for the active Phase 1 DataSnapshot binding slice
+**Status:** accepted
 
 ## Context
 
