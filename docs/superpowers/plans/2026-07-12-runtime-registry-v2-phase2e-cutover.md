@@ -3,6 +3,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current status (2026-07-30):** Planned. Do not start until Phase 2D has passed its
+required acceptance gates.
+
 **Goal:** Preserve approved existing Bot/Research application actions through governed Gateway routes, import and cut over Spot/Futures/Research into managed RuntimeInstances with copied state, remove active 8081/8082/8083 listeners, and prove rollback/emergency/backup safety.
 
 **Architecture:** Treat the current exact-three manifest and Compose definitions as immutable migration input, not permanent services. Cut over one instance at a time through backup -> exact stop -> absence proof -> new allocation -> verified copy -> managed launch -> 8090 acceptance; retain original state read-only for rollback. Compatibility writes use a closed route policy, instance-bound internal tokens, capability checks, durable request/audit identity, and no ambiguous retry.

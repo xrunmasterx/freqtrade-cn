@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository packages a local Freqtrade stack. The root contains Docker orchestration and runtime data wiring. Backend source and tests live in the `freqtrade/` submodule (`freqtrade/freqtrade/`, `freqtrade/tests/`). Frontend source and tests live in the `frequi/` submodule (`frequi/src/`, `frequi/tests/`, `frequi/e2e/`). Strategy examples and user configuration are under `freqtrade-strategies/` and `ft_userdata/user_data/`. Project design notes and implementation plans are stored in `docs/superpowers/`.
+This repository packages a local Freqtrade stack. The root contains Docker orchestration and runtime data wiring. Backend source and tests live in the `freqtrade/` submodule (`freqtrade/freqtrade/`, `freqtrade/tests/`). Frontend source and tests live in the `frequi/` submodule (`frequi/src/`, `frequi/tests/`, `frequi/e2e/`). Strategy examples and user configuration are under `freqtrade-strategies/` and `ft_userdata/user_data/`. Project design notes and implementation plans are stored in `docs/superpowers/`; read `docs/superpowers/README.md` first and treat only documents marked active there as implementation entrypoints.
 
 For chart indicators, strategy overlays, decision evidence, or crosshair/tooltip work, read `docs/chart-data-source-rules.md` before designing or coding. These rules are the standing source-boundary contract for future indicators and strategies.
 

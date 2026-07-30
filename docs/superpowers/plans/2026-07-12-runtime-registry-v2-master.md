@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current status (2026-07-30):** Phases 2A-2C are merged. Phase 2D is the next
+implementation phase; Phase 2E remains blocked on Phase 2D acceptance. Unchecked boxes
+inside completed phase plans are historical instructions, not an active backlog.
+
 **Goal:** Deliver the approved Phase 2 Runtime Registry, platform-control, trusted compiler, Supervisor, market-data compatibility, Runtime Access Gateway, and controlled removal of fixed 8081/8082/8083 services without losing existing product behavior.
 
 **Architecture:** Build one modular-monolith control plane backed by PostgreSQL and a host-local Supervisor that is the only dynamic Docker actor. Run Bots and Workers as isolated RuntimeInstances compiled from committed closed templates; expose one loopback `platform-control:8090`, independent base market data, and exact instance-scoped Runtime Access routes.

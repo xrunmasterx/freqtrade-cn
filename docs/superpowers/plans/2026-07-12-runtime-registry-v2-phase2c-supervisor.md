@@ -3,6 +3,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current status (2026-07-30):** Completed through the merged Task 7B offline,
+fail-closed boundary. Production Supervisor assembly and online runtime acceptance remain
+disabled. Retained as implementation history; its unchecked boxes are not active tasks.
+
 **Goal:** Execute Registry lifecycle jobs through one host-local Supervisor, reuse the verified P0 Compose launch kernel, create append-only attempts, reconcile ambiguous outcomes, manage per-instance access networks, and launch the isolated Bitget Spot paper probe.
 
 **Architecture:** Keep orchestration/state transitions independent of Docker behind a `RuntimeDriver` protocol. Adapt the existing `tools.compose_runtime` validated-snapshot path instead of introducing Docker SDK control. The Supervisor supplies typed RuntimeSpec/state/secret references to the Task 4 compiler; only that compiler resolves launch material and emits the internal snapshot before the Supervisor calls the driver. Failures latch and never auto-restart.

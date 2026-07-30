@@ -3,6 +3,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current status (2026-07-30):** Completed and merged. Retained as implementation
+history and reviewed interface evidence; its unchecked boxes are not active tasks.
+
 **Goal:** Establish the PostgreSQL/Alembic control plane, immutable Runtime Registry state, job/audit persistence, trusted local application service, and authenticated `platform-control:8090` query surface without Docker mutation.
 
 **Architecture:** Move `PlatformBase` into a shared platform database module, replace production `create_all()` with Alembic, and keep repositories behind protocols. `platform-control` is a separate FastAPI process with a least-privilege database role: Registry/Catalog SELECT plus gateway-request/audit ownership only; lifecycle writes remain local CLI application-service calls.

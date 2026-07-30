@@ -3,6 +3,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current status (2026-07-30):** Active next implementation phase. No Phase 2D
+implementation branch has been published yet.
+
 **Goal:** Serve Bot-independent canonical candles and full refresh policy through 8090, add closed-policy read access to healthy Bot/Research runtimes, and migrate FreqUI watch/Research reads without losing strategy overlays or multi-timeframe behavior.
 
 **Architecture:** `MarketDataQueryService` owns public candle reads, canonical freshness metadata, TTL/coalescing, and provider adapters. `RuntimeAccessGateway` resolves exact Registry endpoints and signs short-lived instance-bound internal tokens; runtime API middleware verifies a platform public key, target instance, route group, and method. FreqUI authenticates once to platform-control and composes platform base candles with optional runtime-owned overlays.

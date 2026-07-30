@@ -2,7 +2,7 @@
 
 > Generated from `docs/superpowers/specs/2026-07-11-p0-draft-pr-safety-closure-design.md` and the detailed implementation plan beside this file.
 
-**Status:** Approved — Task 1 in progress
+**Status:** Completed historical task list; implementation is merged into Root `main`
 
 **Execution:** Subagent-Driven Development; one fresh implementer and independent task review per task.
 

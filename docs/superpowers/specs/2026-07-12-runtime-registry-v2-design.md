@@ -1,6 +1,6 @@
 # Runtime Registry v2 and Platform Control Cutover Design
 
-**Status:** Approved design; pending written-spec review and implementation plans
+**Status:** Approved governing design; Phases 2A-2C implemented and merged, Phase 2D next
 
 **Date:** 2026-07-12
 

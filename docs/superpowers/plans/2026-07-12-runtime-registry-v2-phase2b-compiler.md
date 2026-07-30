@@ -3,6 +3,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Current status (2026-07-30):** Completed and merged, including the Task 7 contract
+completion plan. Retained as implementation history; its unchecked boxes are not active
+tasks.
+
 **Goal:** Publish committed closed AdapterTemplate revisions and compile typed owner/catalog/artifact references into deterministic immutable RuntimeSpecs with managed state and secret identities, without Docker mutation.
 
 **Architecture:** Keep template/spec validation pure in the backend platform module and keep Git/filesystem materialization in root trusted tools. Database rows reference committed closed policy IDs; they can never introduce arbitrary images, commands, mounts, paths, ports, networks, privileges, secrets, or Compose fragments.
