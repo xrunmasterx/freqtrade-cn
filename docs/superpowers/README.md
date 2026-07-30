@@ -80,8 +80,9 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md` | Accepted contract-slice receipt |
 | Latest completed implementation | `plans/2026-07-31-backtest-artifact-secret-redaction.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md` | Accepted forward-write security receipt |
-| Active implementation | None | Select the bounded strategy-evidence slice before coding |
+| Active implementation | `plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md` | Bind captured primary source and resolved parameters without StrategyRelease |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
+| Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted for implementation |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |

@@ -152,6 +152,15 @@ candle contents.
 
 _Avoid:_ ExperimentRevision ID, BacktestRun ID, DataSnapshot ID.
 
+### Backtest Strategy Evidence
+
+A versioned, run-scoped record identifying the primary strategy source captured for
+execution and the supported Freqtrade-resolved parameters used by an Authoritative
+Backtest. It is not a StrategyRelease, transitive dependency closure, Environment
+Identity, or authenticity proof.
+
+_Avoid:_ Freqtrade Run ID, strategy version, StrategyRelease.
+
 ### Backtest Revision Receipt
 
 A deterministic manifest attached to the standard Freqtrade backtest result and history

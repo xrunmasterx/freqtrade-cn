@@ -7,8 +7,8 @@
 **Latest completed execution plan:**
 [Backtest Artifact Secret Redaction](plans/2026-07-31-backtest-artifact-secret-redaction.md)
 
-**Active execution plan:** none; the bounded strategy-evidence slice must be specified
-before implementation starts.
+**Active execution plan:**
+[Phase 1 Backtest Strategy Evidence Binding](plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md)
 
 ## Product purpose
 
@@ -131,11 +131,12 @@ acceptance.
 
 ### Next
 
-After the active security correction passes its exact-SHA Gate, prioritize the smallest
-strategy-evidence binding that proves the loaded primary strategy source and resolved
-parameters used by a Backtest. Environment identity and retained snapshot payload/replay
-remain separate later candidates. Dynamic runtime infrastructure is still not implied
-or active.
+Implement the active bounded Backtest Strategy Evidence plan: bind the primary source
+captured for execution and final supported Freqtrade parameters into the existing
+Backtest receipt/artifact, then expose same/different/unknown independently of
+DataSnapshot. This is not StrategyRelease. Environment identity and retained snapshot
+payload/replay remain separate later candidates, and dynamic runtime infrastructure is
+still not implied or active.
 
 ### Later
 
