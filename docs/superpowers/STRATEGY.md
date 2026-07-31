@@ -7,8 +7,8 @@
 **Latest completed execution plan:**
 [Phase 1 Backtest Strategy Evidence Binding](plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md)
 
-**Active execution plan:** none; choose the next bounded offline evidence gap before
-coding.
+**Active execution plan:**
+[Phase 1 Retained DataSnapshot Replay](plans/2026-07-31-phase1-retained-data-snapshot-replay.md)
 
 ## Product purpose
 
@@ -146,10 +146,16 @@ acceptance.
 
 ### Next
 
-No implementation slice is active automatically. Choose one bounded offline evidence
-gap before coding: retained DataSnapshot payload/replay or Environment Identity. Keep
-dynamic RuntimeInstance, formal Paper Observation, Experiment UI, and platform cutover
-paused until the user explicitly selects that journey.
+Implement the bounded result-local Retained DataSnapshot Replay slice. It closes the
+existing authoritative Backtest evidence loop without a CAS, database, generic snapshot
+product, second engine, or environment restoration. Replay promises the same retained
+standard market data under the current execution context, not the same result.
+
+After exact-SHA acceptance, reassess a small Backtest Environment Evidence slice and then
+revision-bound robustness/holdout evidence. Keep optimization/ranking, continuous AI
+insight capture, dynamic RuntimeInstance, formal Paper Observation, Experiment UI, and
+platform cutover paused until their prerequisites and user journey are separately
+selected.
 
 ### Later
 

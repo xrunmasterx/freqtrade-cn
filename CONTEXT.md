@@ -138,10 +138,21 @@ _Avoid:_ mutable experiment, run result, StrategyRelease.
 
 An immutable, content-addressed manifest of the exact normalized offline market-data
 series made available to Backtest, Lookahead, and Recursive Analysis. It identifies
-logical input content independently of storage paths and formats; payload retention,
-strategy artifacts, environment identity, and Paper Observation remain separate.
+logical input content independently of storage paths and formats. It does not by itself
+prove that row payload is retained or replayable; strategy artifacts, environment
+identity, and Paper Observation remain separate.
 
 _Avoid:_ mutable data directory, latest data.
+
+### DataSnapshot Replay Bundle
+
+A result-local, versioned Backtest ZIP payload containing the canonical DataSnapshot
+rows plus their admission-role routes. It allows the existing Backtest engine to consume
+the same retained standard market data without falling back to mutable OHLCV files. It
+does not restore archived strategy code, exchange simulation inputs, or the complete
+software environment, and it does not promise the same result.
+
+_Avoid:_ DataSnapshot ID, dataset catalog, Environment Identity, reproducible result.
 
 ### Freqtrade Run ID
 
@@ -166,8 +177,9 @@ _Avoid:_ Freqtrade Run ID, strategy version, StrategyRelease.
 A deterministic manifest attached to the standard Freqtrade backtest result and history
 to correlate an Experiment ID, validated Backtest request, Freqtrade Run ID, and engine
 version. An absent `data_snapshot_id` is pre-formal provenance; a bound DataSnapshot adds
-exact standard market-data identity but is still not payload-retention proof, a complete
-environment/replay proof, an immutable Experiment ledger, or Paper acceptance evidence.
+exact standard market-data identity. Optional replay evidence can bind a result-local
+DataSnapshot Replay Bundle, but the receipt is still not complete environment/effective-
+config proof, an immutable Experiment ledger, or Paper acceptance evidence.
 
 _Avoid:_ formal ExperimentRevision when exact data content is unbound, StrategyRelease.
 

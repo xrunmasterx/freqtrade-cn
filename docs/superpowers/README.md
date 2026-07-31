@@ -46,6 +46,12 @@ not an active backlog.
   [exact-SHA acceptance report](reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md)
   binds the executed primary-module source and supported resolved Freqtrade parameters
   without adding StrategyRelease, Environment Identity, Runtime, Paper, or Live scope.
+- The bounded
+  [Phase 1 Retained DataSnapshot Replay](plans/2026-07-31-phase1-retained-data-snapshot-replay.md)
+  is the active implementation on branch `xrunmasterx/phase1-complete-development`.
+  Its accepted boundary stores canonical rows and admission routes inside each new
+  Backtest ZIP, adds one verified history-row replay action, and explicitly leaves the
+  current exchange/software context unbound. No implementation SHA is accepted yet.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -90,8 +96,9 @@ not an active backlog.
 | Security prerequisite evidence | `reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md` | Accepted forward-write security receipt |
 | Latest completed implementation | `plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md` | Accepted strategy-evidence receipt |
-| Active implementation | None | Select one bounded offline evidence gap before coding |
+| Active implementation | `plans/2026-07-31-phase1-retained-data-snapshot-replay.md` | Active; not yet accepted |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
+| Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted for implementation |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
