@@ -10,8 +10,13 @@
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
 
-**Active strategy-research plan:**
+**Latest completed strategy research:**
 [VolatilitySystem Static-Stop Calibration](plans/2026-07-31-volatility-static-stop-calibration.md)
+
+**Latest strategy-research evidence:**
+[VolatilitySystem Static-Stop Calibration Rejection](reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
+
+**Active strategy-research plan:** none; the next candidate has not been preregistered
 
 ## Product purpose
 
@@ -250,20 +255,24 @@ acceptance.
 
 ### Next
 
-Execute the preregistered fixed-risk study with the existing authoritative engine before
-adding platform features:
+The fixed static-stop study is complete and rejected. Preserve the accepted
+`VolatilitySystem`, do not tune the stop, and keep the untouched
+`2025-07-02` to `2026-07-02` holdout sealed.
 
-1. preserve the accepted `VolatilitySystem` as baseline and change only the effective
-   stop risk from `-1` to `-0.10` in an isolated candidate overlay;
-2. use the frozen 2024-07-01 to 2025-07-01 calibration window, common 499-candle warmup,
-   one pair, and otherwise identical settings;
-3. reject or stop as insufficient unless the predeclared trade-count, direction,
-   profitability, drawdown, tail-loss, Lookahead, and Recursive Gates all pass;
-4. only for that unchanged survivor, spend the strictly disjoint 2025-07-02 to
-   2026-07-02 holdout which this study asserts it has not inspected, and require both
-   same-window and cross-window evidence reviews;
-5. change tracked strategy code only after every Gate passes; otherwise record rejection
-   and keep the accepted baseline unchanged.
+The next smallest user-facing task is research design, not platform expansion:
+
+1. treat the viewed `2024-07-01` to `2025-07-01` interval as development evidence, not
+   fresh validation;
+2. explain the interaction between persistent entry eligibility, one-position
+   occupancy, stop-triggered re-entry, and the after-fill static-stop rule before
+   proposing another semantic edit;
+3. preregister at most one mechanism-derived candidate and its failure thresholds before
+   any new performance run; do not infer a tighter or wider stop from this rejection;
+4. spend the still-sealed holdout only for an unchanged development survivor, then stop
+   regardless of its result;
+5. add product code only if this repeated workflow exposes a concrete evidence or
+   usability defect which the existing Freqtrade Backtest and analysis surfaces cannot
+   answer.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate

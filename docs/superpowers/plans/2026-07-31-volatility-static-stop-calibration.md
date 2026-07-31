@@ -1,6 +1,7 @@
 # VolatilitySystem Static-Stop Calibration
 
-**Status:** active, preregistered strategy-research protocol; calibration not yet run
+**Status:** completed; candidate rejected at calibration, safety analysis skipped, and
+holdout unopened
 
 **Decision owner:** local strategy researcher
 
@@ -8,6 +9,23 @@
 
 **Preceding evidence:**
 [Phase 1 Futures Validation Dogfood](../reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
+
+**Outcome evidence:**
+[VolatilitySystem Static-Stop Calibration Rejection](../reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
+
+## Outcome
+
+The isolated `stoploss: -1 -> -0.10` candidate passed sample sufficiency but failed all
+six preregistered performance and risk Gates. It changed total profit from `+2.7856%`
+to `-0.6799%`, increased account drawdown from `3.7498%` to `6.2781%`, and produced a
+worst exported trade of `-10.6359%`. The study stopped immediately: it did not run
+Lookahead Analysis, Recursive Analysis, the sealed holdout, an alternate stop value, or
+any tracked strategy edit. It completed only the preregistered same-window API/FreqUI
+identity comparison required to validate interpretation of the calibration metrics.
+
+This file retains the frozen protocol and pre-run reasoning. The linked rejection
+report is the authority for executed identities, artifact hashes, exact metrics, Gate
+evaluation, and post-run mechanism findings.
 
 ## Goal
 
@@ -78,13 +96,15 @@ sweep:
   wallet, before fees, funding, gaps, and slippage;
 - 100 USDT opened at the same stop anchor would risk approximately 10 USDT, or 1%.
 
-This is not a guaranteed 1% account-risk cap. Freqtrade keeps the static stop anchored at
-the initial entry when `adjust_trade_position` adds a later tranche. Because this
-strategy normally adds only after price moves in its favor, that later tranche may be
-farther from the original stop and total position loss can exceed 10 USDT. The
-predeclared worst-trade Gate below must catch that failure. Re-anchoring after a fill,
-disabling pyramiding, or changing stake sizing would be a second semantic change and is
-outside this study.
+This is not a guaranteed 1% account-risk cap. The preregistration simplified the
+adjusted-position behavior as a stop anchored at the initial entry. Post-run inspection
+showed the precise engine rule: after another fill, Freqtrade recalculates the average
+open rate and may move the static stop only in the favorable, tighter direction; it does
+not loosen it. A later stop hit can then be labelled `trailing_stop_loss` even though
+strategy-level trailing is disabled. Fees, funding, candle execution, and the combined
+position can still exceed the nominal risk. The predeclared worst-trade Gate caught
+that failure. Changing after-fill stop behavior, disabling pyramiding, or changing stake
+sizing would be a second semantic change and was outside this study.
 
 No other stop value may be run in this study. If `-0.10` fails, this candidate is
 rejected; it is not retuned.
@@ -97,8 +117,8 @@ selected.
 
 | Role | Freqtrade request timerange | Intended scored interval | State |
 |---|---|---|---|
-| Calibration | `20240701-20250701` | 2024-07-01 00:00 UTC through the engine's 2025-07-01 boundary | May be opened |
-| Holdout | `20250702-20260702` | 2025-07-02 00:00 UTC through the engine's 2026-07-02 boundary | Sealed until calibration PASS |
+| Calibration | `20240701-20250701` | 2024-07-01 00:00 UTC through the engine's 2025-07-01 boundary | Opened; candidate rejected |
+| Holdout | `20250702-20260702` | 2025-07-02 00:00 UTC through the engine's 2026-07-02 boundary | Never opened; study closed |
 
 The one-day gap makes the effective result endpoints strictly disjoint under the current
 FreqUI comparator; equal endpoints are not a cross-window review. Funding history starts

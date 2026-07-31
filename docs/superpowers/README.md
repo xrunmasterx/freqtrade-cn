@@ -84,11 +84,12 @@ not an active backlog.
   accepted but the candidate is not eligible for Paper promotion.
 - The preregistered
   [VolatilitySystem Static-Stop Calibration](plans/2026-07-31-volatility-static-stop-calibration.md)
-  is the active strategy-research entrypoint. It freezes one static-stop candidate
-  (`stoploss: -1 -> -0.10`), a one-year calibration window, a strictly disjoint sealed
-  one-year holdout which this study asserts it has not inspected, and fail-closed
-  sufficiency/performance/safety Gates before any candidate run. It adds no product
-  surface and does not authorize Paper or Live use.
+  is completed and rejected at calibration. The candidate changed total profit from
+  `+2.7856%` to `-0.6799%`, increased drawdown from `3.7498%` to `6.2781%`, and failed
+  six preregistered performance/risk Gates. Its
+  [rejection report](reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
+  is the evidence authority. Safety analysis, the sealed holdout, strategy edits,
+  Paper, and Live were not opened; no new strategy-research plan is active.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -144,7 +145,9 @@ not an active backlog.
 | Latest completed implementation | `plans/2026-07-31-phase1-evidence-guided-backtest-pair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-evidence-guided-backtest-pair-acceptance.md` | Accepted pair-interpretation receipt |
 | Latest Futures dogfood evidence | `reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md` | Accepted workflow receipt; candidate rejected |
-| Active strategy research | `plans/2026-07-31-volatility-static-stop-calibration.md` | Preregistered; calibration not yet run |
+| Latest strategy research | `plans/2026-07-31-volatility-static-stop-calibration.md` | Completed; candidate rejected at calibration |
+| Latest strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened |
+| Active strategy research | None | Next candidate not yet preregistered |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
