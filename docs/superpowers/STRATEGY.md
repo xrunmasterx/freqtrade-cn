@@ -7,7 +7,10 @@
 **Latest completed execution plan:**
 [Phase 1 Evidence-Guided Backtest Pair](plans/2026-07-31-phase1-evidence-guided-backtest-pair.md)
 
-**Active execution plan:** none; the next step is bounded Futures-oriented dogfood
+**Latest accepted dogfood:**
+[Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
+
+**Active execution plan:** none; the next step is protocol-bound strategy research
 
 ## Product purpose
 
@@ -20,8 +23,10 @@ evidence:
 3. Does the same strategy pass comparable, evidence-bound Freqtrade backtesting and
    safety analysis before any governed Paper observation?
 
-The first supported execution scope is digital-asset Spot in Paper/dry-run conditions.
-Live trading, exchange writes, and real-money acceptance are outside the current program.
+The accepted compatibility runtime remains digital-asset Spot in dry-run conditions.
+The authoritative offline-validation surface also supports bounded Futures strategy
+research. Neither compatibility service is a formal Gate B Paper runtime. Live trading,
+exchange writes, and real-money acceptance are outside the current program.
 
 ## First-principles delivery rules
 
@@ -156,6 +161,25 @@ Recursive Analysis receipts, score or promote a result, establish broader validi
 qualify Paper, or predict future performance. It adds no backend, API, database,
 persisted split, optimizer, scheduler, or second engine.
 
+### Gate A dogfood closure: Futures validation loop — accepted
+
+The bounded OKX `BTC/USDT:USDT` dogfood exercised the existing standard Backtest,
+Lookahead Analysis, Recursive Analysis, retained-data, and evidence-guided comparison
+journeys without adding a product surface. It found one strategy-owned warmup defect and
+repaired `VolatilitySystem` to declare 499 startup candles.
+
+The first native-warmup comparison correctly failed closed because the strategies
+admitted different causal prefixes. Applying the maximum required warmup to both runs
+through the existing Freqtrade configuration produced the same full DataSnapshot,
+captured execution context, and scored window while retaining different Strategy
+Evidence. FreqUI then classified the pair as a same-window strategy-change review.
+
+The candidate lost 2.021% over nine trades; the baseline lost 1.751% over five trades.
+Lookahead Analysis found no bias among only five signals, and Recursive Analysis showed
+negligible reported variance at 499 candles. These observations accept the workflow and
+the startup repair only. They reject candidate promotion and do not prove robustness,
+Paper eligibility, or future profit.
+
 ### Gate B: Governed Experiment-to-Paper — not active
 
 After Gate A passes and one explicit next-journey decision is recorded, the smallest
@@ -214,17 +238,32 @@ acceptance.
   interpretation. The
   [acceptance report](reports/2026-07-31-phase1-evidence-guided-backtest-pair-acceptance.md)
   is the exact-SHA evidence authority.
+- The Futures validation dogfood is accepted at Root `e1553633d`, unchanged backend
+  `3209d4374`, unchanged frontend `515b00ccc`, and strategies `dec5adb77`. Its
+  [acceptance report](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
+  records the exact image, controlled common-warmup pair, Lookahead and Recursive
+  results, evidence limits, and the decision not to promote the losing candidate.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Dogfood the existing authoritative Backtest and analysis routes with an explicit
-Futures-oriented baseline/candidate protocol before deciding whether any persisted
-split/reveal contract is justified. Keep optimization/ranking, continuous AI insight
-capture, dynamic RuntimeInstance, formal Paper Observation, Experiment UI, and platform
-cutover paused until their prerequisites and user journey are separately selected.
+Use the existing authoritative engine for protocol-bound strategy research before adding
+platform features:
+
+1. state one falsifiable strategy hypothesis and its intended market behavior;
+2. compare it with a named baseline on one calibration window, using the maximum startup
+   requirement across both strategies and otherwise identical settings;
+3. reject candidates that do not show a credible in-window result instead of optimizing
+   around noise;
+4. only for a surviving candidate, spend a strictly disjoint historical window on a
+   same-strategy cross-window review and record the limits of that evidence.
+
+Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
+until repeated use of this loop exposes a concrete missing capability and a candidate
+has evidence worth observing. Continuous AI insight capture, RuntimeInstance, formal
+Paper Observation, Experiment UI, and platform cutover remain paused.
 
 ### Later
 

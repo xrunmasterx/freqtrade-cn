@@ -73,6 +73,15 @@ not an active backlog.
   is the evidence authority. It adds a fail-closed interpretation for exactly two loaded
   results without adding a backend, split ledger, roles, score, ranking, optimizer,
   Paper, or Runtime scope.
+- The bounded
+  [Phase 1 Futures validation dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
+  is accepted at implementation Root `e1553633d`, unchanged backend `3209d4374`,
+  unchanged frontend `515b00ccc`, and strategies `dec5adb77`. It repaired
+  `VolatilitySystem` startup warmup at 499 candles, verified the existing Backtest,
+  Lookahead, Recursive, retained-data, and fail-closed pair-interpretation journeys on
+  OKX `BTC/USDT:USDT`, and required no new API or platform surface. The controlled
+  candidate lost 2.021% versus the baseline's 1.751%, so the validation workflow is
+  accepted but the candidate is not eligible for Paper promotion.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -94,6 +103,12 @@ not an active backlog.
   forming-candle trust state, the standard Freqtrade backtest completed and rendered,
   and Lookahead/Recursive Analysis completed. Both services were stopped after the
   receipt; Docker is installed but is not on the coordinator PowerShell `PATH`.
+- The Futures dogfood additionally used immutable image
+  `sha256:749e372bfee2bc5d263608f37d7e7ceb2ae4f9ff93dc271d6637e6e6311bc30a`
+  on isolated host port 18084. A native-warmup pair correctly failed closed because its
+  admitted DataSnapshots differed; a common 499-candle warmup then produced the same
+  exact DataSnapshot and captured execution context, different strategy evidence, and a
+  UI-classified same-window strategy-change review.
 - Phase 2D Tasks 1-4 remain complete locally as reusable, unpublished backend assets. Its
   last implementation Root commit is `2128646`; the accepted Phase 1 Gate implementation
   Root is `ec1026a`.
@@ -121,7 +136,8 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-07-31-phase1-retained-data-snapshot-replay-acceptance.md` | Accepted retained-data replay receipt |
 | Latest completed implementation | `plans/2026-07-31-phase1-evidence-guided-backtest-pair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-evidence-guided-backtest-pair-acceptance.md` | Accepted pair-interpretation receipt |
-| Active implementation | None | Next step is bounded Futures-oriented dogfood |
+| Latest Futures dogfood evidence | `reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md` | Accepted workflow receipt; candidate rejected |
+| Active implementation | None | Next step is protocol-bound strategy research, not a new platform feature |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
