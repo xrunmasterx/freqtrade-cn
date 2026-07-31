@@ -199,6 +199,26 @@ config proof, an immutable Experiment ledger, or Paper acceptance evidence.
 
 _Avoid:_ formal ExperimentRevision when exact data content is unbound, StrategyRelease.
 
+### Same-Window Strategy-Change Review
+
+A neutral retrospective comparison of exactly two Authoritative Backtest results whose
+exact DataSnapshot, bounded Backtest Execution Context Evidence, and effective scored
+window match while valid Backtest Strategy Evidence differs. It identifies a controlled
+comparison shape; it does not prove that the strategies share revision lineage, that one
+is a baseline or candidate, or that an observed metric difference is an improvement.
+
+_Avoid:_ StrategyRevision comparison, controlled experiment, candidate win.
+
+### Cross-Window Review
+
+A neutral retrospective comparison of exactly two Authoritative Backtest results whose
+valid Backtest Strategy Evidence and bounded Backtest Execution Context Evidence match,
+while exact DataSnapshots differ and effective scored windows are strictly disjoint. It
+describes historical window sensitivity only. It does not prove that either window was
+untouched, out of sample, representative, or predictive of future performance.
+
+_Avoid:_ passed holdout, out-of-sample proof, robustness proof.
+
 ### StrategyRelease
 
 An immutable content-addressed strategy artifact accepted for governed execution, with

@@ -5,9 +5,9 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Backtest Execution Context Evidence](plans/2026-07-31-phase1-backtest-execution-context-evidence.md)
+[Phase 1 Evidence-Guided Backtest Pair](plans/2026-07-31-phase1-evidence-guided-backtest-pair.md)
 
-**Active execution plan:** none; a new slice requires explicit first-principles selection
+**Active execution plan:** none; the next step is bounded Futures-oriented dogfood
 
 ## Product purpose
 
@@ -134,6 +134,28 @@ exchange responses, enumerate the host, restore an environment, create an SBOM/c
 identity, bind imported helpers or arbitrary strategy I/O, guarantee the same result,
 establish artifact authenticity, qualify Paper, or predict profit.
 
+### Gate A.5: Evidence-guided Backtest pair interpretation — accepted
+
+The accepted slice remains entirely inside the existing 8083 Backtest comparison
+page. For exactly two loaded results, FreqUI combines the already accepted DataSnapshot,
+Strategy Evidence, and Execution Context comparison states with the actual effective
+scored windows. It recognizes only two neutral retrospective review shapes:
+
+- the same exact data, captured context, and scored window with different captured
+  strategy evidence is a same-window strategy-change review;
+- different exact data on strictly disjoint scored windows with the same captured
+  strategy evidence and context is a cross-window review.
+
+Unknown required evidence or invalid scored windows fail closed to unknown. Every other
+fully known combination is not comparable for those two reviews. The UI keeps the three
+identity axes and full metric table independent and unchanged.
+
+This gate does not prove strategy revision lineage, assign baseline/candidate or
+calibration/holdout roles, prove prior non-use of a historical window, bind Lookahead or
+Recursive Analysis receipts, score or promote a result, establish broader validity,
+qualify Paper, or predict future performance. It adds no backend, API, database,
+persisted split, optimizer, scheduler, or second engine.
+
 ### Gate B: Governed Experiment-to-Paper — not active
 
 After Gate A passes and one explicit next-journey decision is recorded, the smallest
@@ -183,17 +205,21 @@ acceptance.
   formula-consumed liquidation-rate binding, allowlisted and resource-bounded Strategy
   Evidence v2, and an existing Backtest UI extension. It is not Environment Identity or
   an environment-restoration platform.
+- Gate A.5 Evidence-Guided Backtest Pair is implemented and independently accepted at
+  frontend `515b00cccb882c3f304bab18d0eb5520f934901e`. Its boundary is frontend-only,
+  exactly two loaded results, two neutral review shapes, and fail-closed identity/window
+  interpretation.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-No implementation plan is active. Reassess whether a small revision-bound
-robustness/holdout evidence slice is the next real user need before activating it. Keep
-optimization/ranking, continuous AI insight capture, dynamic RuntimeInstance, formal
-Paper Observation, Experiment UI, and platform cutover paused until their prerequisites
-and user journey are separately selected.
+Dogfood the existing authoritative Backtest and analysis routes with an explicit
+Futures-oriented baseline/candidate protocol before deciding whether any persisted
+split/reveal contract is justified. Keep optimization/ranking, continuous AI insight
+capture, dynamic RuntimeInstance, formal Paper Observation, Experiment UI, and platform
+cutover paused until their prerequisites and user journey are separately selected.
 
 ### Later
 

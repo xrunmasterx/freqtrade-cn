@@ -65,6 +65,12 @@ not an active backlog.
   configuration, and admitted-pair exchange simulation facts. It is correlation evidence
   for detecting confounded comparisons, not Environment Identity, complete
   reproducibility, or environment restoration.
+- The frontend-only
+  [Phase 1 Evidence-Guided Backtest Pair](plans/2026-07-31-phase1-evidence-guided-backtest-pair.md)
+  is implemented and independently accepted at frontend
+  `515b00cccb882c3f304bab18d0eb5520f934901e`. It adds a fail-closed interpretation for
+  exactly two loaded results without adding a backend, split ledger, roles, score,
+  ranking, optimizer, Paper, or Runtime scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -111,13 +117,14 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md` | Accepted strategy-evidence receipt |
 | Preceding completed implementation | `plans/2026-07-31-phase1-retained-data-snapshot-replay.md` | Completed; exact-SHA accepted |
 | Preceding acceptance evidence | `reports/2026-07-31-phase1-retained-data-snapshot-replay-acceptance.md` | Accepted retained-data replay receipt |
-| Latest completed implementation | `plans/2026-07-31-phase1-backtest-execution-context-evidence.md` | Completed; exact-SHA accepted |
+| Latest completed implementation | `plans/2026-07-31-phase1-evidence-guided-backtest-pair.md` | Completed; exact-SHA acceptance pending report commit |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-backtest-execution-context-evidence-acceptance.md` | Accepted execution-context receipt |
-| Active implementation | None | Next slice requires explicit first-principles selection |
+| Active implementation | None | Next step is bounded Futures-oriented dogfood |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
 | Execution-context evidence decision | `decisions/2026-07-31-backtest-execution-context-evidence-boundary.md` | Accepted and implemented |
+| Backtest pair interpretation decision | `decisions/2026-07-31-backtest-pair-interpretation-boundary.md` | Accepted and implemented |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |
