@@ -168,6 +168,16 @@ not an active backlog.
   Its
   [acceptance report](reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
   is the exact-SHA, static route/documentation evidence authority.
+- The active bounded implementation is
+  [Phase 1 Pair-History Context Truth](plans/2026-08-01-phase1-pair-history-context-truth.md).
+  Static review proved that `/pair_history` responses share a `pair + timeframe` display
+  slot even when strategy, timerange, exchange/modes, FreqAI model, live mode, or columns
+  differ, and that an older request can overwrite a later request. Frontend
+  `69fa10ca` now binds displayed history to the complete request context, applies
+  latest-started-wins per slot, isolates status per panel, and preserves explicit Plot
+  Config column refresh without rendering mismatched data. Implementation and re-Gates
+  are complete; exact-SHA acceptance is pending. It does not change the backend or claim
+  that current recomputation reproduces a historical Backtest.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -239,7 +249,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md` | Accepted frontend lifecycle receipt |
 | Latest completed implementation | `plans/2026-08-01-phase1-operator-entrypoint-truth.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md` | Accepted operator-navigation receipt |
-| Active implementation | None | No bounded implementation is active |
+| Active implementation | `plans/2026-08-01-phase1-pair-history-context-truth.md` | Implemented; acceptance Gate pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

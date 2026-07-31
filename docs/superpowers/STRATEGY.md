@@ -25,9 +25,12 @@ is accepted at Root `783a412d`; all submodule SHAs are unchanged. Its
 [acceptance report](reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
 is the static route/documentation evidence authority.
 
-**Active bounded implementation:** None. The accepted entrypoint repair changes no
-product, backend, frontend, strategy, market-data, Runtime, Paper, Live, or AI-worker
-scope.
+**Active bounded implementation:**
+[Phase 1 Pair-History Context Truth](plans/2026-08-01-phase1-pair-history-context-truth.md).
+Frontend `69fa10ca` implements the request/display correctness repair for the existing
+`/pair_history` path; implementation, product/documentation, and test re-Gates have no
+P0/P1 finding, and exact-SHA acceptance is pending. It adds no backend, market-data,
+strategy, Backtest execution, Runtime, Paper, Live, or AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -301,15 +304,19 @@ The preceding accepted slice closed the demonstrated `BacktestingView` polling l
 preserves observation when the user returns to a still-running job. It does not redesign
 background jobs, cancel the server job, or add a scheduler.
 
-No bounded implementation is active. The latest accepted slice corrects the Docker
-quick-start so users reach 8081 `/graph` and 8083 `/backtest` without presenting frozen
-`/research` as the authoritative backtest. It changes no product code, route, service,
-or port.
+The implemented Pair-History Context Truth slice is the smaller complete repair selected
+by the preceding audit. A historic-chart display slot remains `pair + timeframe`, but
+only its latest-started request may update it and a dataset may render only when its
+complete request context matches the current selection. Status and slow-request state
+are panel-local. Existing reduced-column Plot Config refresh remains available without
+letting mismatched data render. The repair reuses the local `/chart_candles` generation
+pattern and does not create a generalized request or evidence platform.
 
-The next selection returns to a demonstrated functional evidence boundary. Before
-implementation, compare the remaining chart request/context truth gap with the Backtest
-visualization evidence-drift gap, reproduce the user-visible harm, and choose the smaller
-repair. Do not build a generalized evidence platform or spend the retired holdout.
+After that invariant is accepted, the next bounded slice should permanently distinguish
+selected historical Backtest Trades from current `/pair_history` candle/indicator/signal
+recomputation. It must not claim exact historical reproduction or execute archived
+strategy code. Doing that disclosure first would be premature because the current cache
+can still contain a different strategy or timerange than the visible selection.
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.
