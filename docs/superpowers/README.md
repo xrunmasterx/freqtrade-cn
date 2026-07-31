@@ -1,6 +1,6 @@
 # Superpowers Documentation Index
 
-**Current status date:** 2026-07-31
+**Current status date:** 2026-08-01
 
 Read this file before selecting an implementation plan. Dated plans and specifications
 are retained as design and acceptance history; unchecked boxes in a completed plan are
@@ -89,15 +89,16 @@ not an active backlog.
   six preregistered performance/risk Gates. Its
   [rejection report](reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
   is the evidence authority. Safety analysis, the sealed holdout, strategy edits,
-  Paper, and Live were not opened by that study; the follow-up below is now active.
-- The active
+  Paper, and Live were not opened by that study; the follow-up below is now completed.
+- The
   [VolatilitySystem Breakout-Episode Risk Calibration](plans/2026-07-31-volatility-breakout-episode-risk-calibration.md)
-  preregisters exactly one follow-up on the already-viewed development interval. It keeps
-  the existing shifted-ATR eligibility threshold, changes entry eligibility to its
-  finite-frame false-to-true edge, preserves persistent exit eligibility and the existing
-  half-stake initial allocation, disables additional fills, and reuses the frozen `-0.10`
-  risk budget. It adds no platform code and does not open the still-unrun holdout before
-  an unchanged development survivor passes every frozen Gate.
+  is completed and rejected at its pre-performance signal-parity Gate. The finite-edge
+  candidate matched the actual 599-candle cold/warm frames and the 600/799 profiles, but
+  three development rows produced five signal-field differences at the frozen 499-candle
+  minimum. Its
+  [rejection report](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
+  is the evidence authority. B/S/C performance, safety analysis, holdout, tracked
+  strategy edits, Paper, and Live were not opened; no strategy candidate is active.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -153,9 +154,10 @@ not an active backlog.
 | Latest completed implementation | `plans/2026-07-31-phase1-evidence-guided-backtest-pair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-evidence-guided-backtest-pair-acceptance.md` | Accepted pair-interpretation receipt |
 | Latest Futures dogfood evidence | `reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md` | Accepted workflow receipt; candidate rejected |
-| Latest strategy research | `plans/2026-07-31-volatility-static-stop-calibration.md` | Completed; candidate rejected at calibration |
-| Latest strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened |
-| Active strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Preregistered; no candidate performance run yet |
+| Preceding strategy research | `plans/2026-07-31-volatility-static-stop-calibration.md` | Completed; candidate rejected at calibration |
+| Preceding strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened |
+| Latest strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Completed; candidate rejected before performance |
+| Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

@@ -1,11 +1,15 @@
 # VolatilitySystem Breakout-Episode Risk Calibration
 
-**Status:** preregistered design; no candidate performance run has started
+**Status:** completed; candidate rejected at the pre-performance 499-candle signal-parity
+Gate; B/S/C performance, safety analysis, and holdout were not opened
 
 **Decision date:** 2026-07-31
 
 **Preceding evidence:**
 [VolatilitySystem Static-Stop Calibration Rejection](../reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
+
+**Outcome evidence:**
+[VolatilitySystem Breakout-Episode Risk Calibration Rejection](../reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 ## Decision question
 
