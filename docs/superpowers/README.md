@@ -126,8 +126,10 @@ not an active backlog.
   acceptance. Its
   [acceptance report](reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
   is the evidence authority. The image's embedded UI version cannot yet self-report the
-  frontend SHA; Buildx/SLSA provenance, the Root submodule tree, and immutable-image
-  behavior are the accepted identity chain. It adds no analysis algorithm, data run,
+  frontend SHA. Its historical local acceptance combined the Root submodule tree,
+  Buildx-recorded metadata, immutable-image identity, and actual behavior; the Buildx
+  metadata is corroborating audit data, not an independently trusted source binding. It
+  adds no analysis algorithm, data run,
   strategy candidate, receipt, persistence, Runtime, Paper, Live, or AI scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
@@ -192,7 +194,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
 | Latest completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
-| Active implementation | — | None; a packaging-provenance P2 requires a separate bounded decision |
+| Active implementation | `plans/2026-08-01-reviewed-image-ui-self-identity.md` | Approved; implementation pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

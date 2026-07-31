@@ -20,8 +20,9 @@
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 **Active bounded implementation:**
-None. The accepted image's embedded FreqUI identity is a recorded packaging-provenance
-P2 and requires a separate bounded design decision.
+[Phase 1 Reviewed Image UI Self-Identity](plans/2026-08-01-reviewed-image-ui-self-identity.md)
+is approved with implementation pending. It is limited to reviewed-image packaging and
+does not activate strategy, market-data, Runtime, Paper, Live, or AI scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -308,9 +309,11 @@ Passing it does not activate a paused platform feature.
 
 The exact-image Gate recorded one non-blocking packaging-provenance gap: the packaged UI
 cannot yet self-report its accepted frontend SHA. The current acceptance instead uses
-the clean Root submodule tree, Buildx VCS/SLSA record, immutable image ID, and actual
-browser behavior. Any self-describing image fix must remain a separate bounded slice;
-it must not reactivate strategy, Runtime, Paper, Live, or AI scope.
+the clean Root submodule tree, locally recorded Buildx metadata, immutable image ID, and
+actual browser behavior. The local Buildx VCS/SLSA fields corroborate that historical
+receipt but are not an independently signed or trusted source binding. The proposed
+self-describing image repair remains a separate bounded slice and does not reactivate
+strategy, Runtime, Paper, Live, or AI scope.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without
