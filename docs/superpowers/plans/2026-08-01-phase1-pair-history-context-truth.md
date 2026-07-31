@@ -1,6 +1,6 @@
 # Phase 1 Pair-History Context Truth
 
-**Status:** Implemented; acceptance Gate pending
+**Status:** Completed; exact-SHA accepted
 
 **Design Gates:** PASS; state model P0/P1 = 0, product P0/P1 = 0, test design
 P0/P1 = 0
@@ -9,6 +9,9 @@ P0/P1 = 0
 0, test P0/P1 = 0 with one non-blocking pre-existing Happy DOM teardown-noise P2
 
 **Frontend implementation:** `69fa10cae618f7ed6cc8d19b7084ff9696845d64`
+
+**Acceptance:**
+[Phase 1 Pair-History Context Truth Acceptance Report](../reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md)
 
 **Scope:** FreqUI `/pair_history` request state and historic-chart presentation only;
 no backend API, market-data, strategy, Backtest execution, holdout, Runtime, Paper, Live,

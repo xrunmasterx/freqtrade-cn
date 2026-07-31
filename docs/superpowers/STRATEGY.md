@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Operator Entrypoint Truth](plans/2026-08-01-phase1-operator-entrypoint-truth.md)
+[Phase 1 Pair-History Context Truth](plans/2026-08-01-phase1-pair-history-context-truth.md)
 
 **Latest accepted implementation evidence:**
-[Phase 1 Operator Entrypoint Truth Acceptance](reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
+[Phase 1 Pair-History Context Truth Acceptance](reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md)
 
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
@@ -20,17 +20,14 @@
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 **Latest completed bounded implementation:**
-[Phase 1 Operator Entrypoint Truth](plans/2026-08-01-phase1-operator-entrypoint-truth.md)
-is accepted at Root `783a412d`; all submodule SHAs are unchanged. Its
-[acceptance report](reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
-is the static route/documentation evidence authority.
+[Phase 1 Pair-History Context Truth](plans/2026-08-01-phase1-pair-history-context-truth.md)
+is accepted at Root `6005903c` and frontend `69fa10ca`; backend and strategy submodule
+SHAs are unchanged. Its
+[acceptance report](reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md)
+is the deterministic historic-chart request/display evidence authority.
 
-**Active bounded implementation:**
-[Phase 1 Pair-History Context Truth](plans/2026-08-01-phase1-pair-history-context-truth.md).
-Frontend `69fa10ca` implements the request/display correctness repair for the existing
-`/pair_history` path; implementation, product/documentation, and test re-Gates have no
-P0/P1 finding, and exact-SHA acceptance is pending. It adds no backend, market-data,
-strategy, Backtest execution, Runtime, Paper, Live, or AI-worker scope.
+**Active bounded implementation:** None. The accepted context repair adds no backend,
+market-data, strategy, Backtest execution, Runtime, Paper, Live, or AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -304,19 +301,20 @@ The preceding accepted slice closed the demonstrated `BacktestingView` polling l
 preserves observation when the user returns to a still-running job. It does not redesign
 background jobs, cancel the server job, or add a scheduler.
 
-The implemented Pair-History Context Truth slice is the smaller complete repair selected
-by the preceding audit. A historic-chart display slot remains `pair + timeframe`, but
-only its latest-started request may update it and a dataset may render only when its
-complete request context matches the current selection. Status and slow-request state
-are panel-local. Existing reduced-column Plot Config refresh remains available without
-letting mismatched data render. The repair reuses the local `/chart_candles` generation
-pattern and does not create a generalized request or evidence platform.
+The latest accepted Pair-History Context Truth slice keeps a historic-chart display slot
+at `pair + timeframe`, but only its latest-started request may update it and a dataset
+may render only when its complete request context matches the current selection. Status
+and slow-request state are panel-local. Existing reduced-column Plot Config refresh
+remains available without letting mismatched data render. The repair reuses the local
+`/chart_candles` generation pattern and does not create a generalized request or evidence
+platform.
 
-After that invariant is accepted, the next bounded slice should permanently distinguish
+The next bounded slice should permanently distinguish
 selected historical Backtest Trades from current `/pair_history` candle/indicator/signal
 recomputation. It must not claim exact historical reproduction or execute archived
 strategy code. Doing that disclosure first would be premature because the current cache
-can still contain a different strategy or timerange than the visible selection.
+previously could contain a different strategy or timerange than the visible selection;
+that prerequisite is now closed.
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.
