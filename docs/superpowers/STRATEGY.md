@@ -16,7 +16,7 @@
 **Latest strategy-research evidence:**
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
-**Active bounded implementation plan:**
+**Bounded implementation awaiting exact-SHA acceptance:**
 [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md)
 
 **Active strategy candidate:** None; the latest candidate was rejected before
@@ -265,7 +265,7 @@ compares indicators at only one final row, omits entry/exit signals, stops evalu
 later profiles after an earlier exact match, and presents an empty sparse result as a
 green general success.
 
-The active bounded product slice is the
+The implemented bounded product slice awaiting exact-SHA acceptance is the
 [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md):
 
 1. keep the existing route, API, page, form, background job, and Freqtrade authority;

@@ -1,6 +1,6 @@
 # Phase 1 Recursive Analysis Truthfulness Repair
 
-**Status:** Design approved; active implementation entrypoint; implementation has not started
+**Status:** Implementation complete; exact-SHA acceptance pending
 
 **Product authority:** [Product Strategy and Delivery Policy](../STRATEGY.md)
 

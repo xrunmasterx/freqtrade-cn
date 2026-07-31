@@ -99,12 +99,12 @@ not an active backlog.
   [rejection report](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
   is the evidence authority. B/S/C performance, safety analysis, holdout, tracked
   strategy edits, Paper, and Live were not opened; no strategy candidate is active.
-- The design-approved active product slice is
+- The implemented product slice awaiting exact-SHA acceptance is
   [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md).
   It makes the existing 8083 Recursive Analysis evaluate every materialized startup
   profile and narrows the empty-result UI to neutral, final-candle indicator evidence.
   It adds no API, signal comparison, page, service, persistence, Runtime, Paper, or Live
-  scope. Its design Gate passed; implementation has not started.
+  scope. Implementation and independent re-Gate passed; exact-SHA acceptance is pending.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -164,7 +164,7 @@ not an active backlog.
 | Preceding strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened |
 | Latest strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Completed; candidate rejected before performance |
 | Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened |
-| Active implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Design approved; implementation not started |
+| Active implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Implementation complete; exact-SHA acceptance pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
