@@ -11,13 +11,16 @@
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
 
 **Latest completed strategy research:**
-[VolatilitySystem Static-Stop Calibration](plans/2026-07-31-volatility-static-stop-calibration.md)
+[VolatilitySystem Breakout-Episode Risk Calibration](plans/2026-07-31-volatility-breakout-episode-risk-calibration.md)
 
 **Latest strategy-research evidence:**
-[VolatilitySystem Static-Stop Calibration Rejection](reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
+[VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
-**Active strategy-research plan:**
-[VolatilitySystem Breakout-Episode Risk Calibration](plans/2026-07-31-volatility-breakout-episode-risk-calibration.md)
+**Active bounded implementation plan:**
+[Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md)
+
+**Active strategy candidate:** None; the latest candidate was rejected before
+performance, and its holdout remains unopened.
 
 ## Product purpose
 
@@ -256,26 +259,37 @@ acceptance.
 
 ### Next
 
-The fixed static-stop study is complete and rejected. Its mechanism has now produced one
-active, preregistered follow-up rather than another stop search:
+The Breakout-Episode follow-up is complete and rejected before performance. It exposed
+that the existing Recursive Analysis can look more conclusive than its evidence: it
+compares indicators at only one final row, omits entry/exit signals, stops evaluating
+later profiles after an earlier exact match, and presents an empty sparse result as a
+green general success.
 
-1. keep the current `close_change > atr.shift(1)` eligibility threshold and its short
-   mirror;
-2. arm entry only on a finite-frame false-to-true eligibility edge while preserving
-   persistent opposite-side exit eligibility;
-3. retain the existing half-stake initial allocation, disable position adjustment, and
-   reuse the already frozen `-0.10` risk budget as one bounded lifecycle policy;
-4. test only on the viewed `2024-07-01` to `2025-07-01` development interval first, with
-   exact B/S/C retained-data comparisons and predeclared failure thresholds;
-5. generate strategy output for the still-unrun `2025-07-02` to `2026-07-02` holdout only
-   for an unchanged development survivor, then stop regardless of its result;
-6. add no platform code unless this repeated workflow exposes a concrete evidence or
-   usability defect which the existing Freqtrade Backtest and analysis surfaces cannot
-   answer.
+The active bounded product slice is the
+[Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md):
 
-The directional-latch, cooldown, delayed/two-row pulse, database callback, alternate
-stop, Hyperopt, daemon, and platform-expansion alternatives remain rejected as either
-stateful, tunable, semantically broader, or unsupported by the current user bottleneck.
+1. keep the existing route, API, page, form, background job, and Freqtrade authority;
+2. evaluate every materialized startup profile even when an earlier one matches;
+3. replace the broad green success state with neutral, final-candle indicator-only copy;
+4. add focused backend, frontend, locale, and existing-journey regression evidence;
+5. add no signal API, checkbox, persistence, scoring, or promotion machinery.
+
+A one-final-candle signal comparison is not implemented: the rejected study directly
+confirmed three specific intraday mismatch witnesses among 8,760 scored rows without
+certifying that they were the only mismatches, and the current date-only form cannot
+reliably target those witnesses. A generic all-row rolling-prefix engine is also not part
+of this repair.
+For any future strategy candidate intended for a restartable Runtime, Paper, or Live path,
+formal full-window PASS must come from the frozen real strategy path at every scored
+endpoint and every frozen startup profile, unless a separately accepted state-restoration
+contract proves equivalent decision state across restart. Omitting restart stability
+from a candidate document is not an exemption. A candidate-specific fast evaluator may
+search for a failure witness, but each witness must be confirmed by the real strategy and
+it may never sign a full-window PASS unless exact-domain equivalence is proved exhaustively
+or formally. No number of final-candle samples can be accumulated into that PASS.
+
+No new candidate, viewed-window performance rerun, or holdout spend is active while this
+product boundary is being implemented and accepted.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate
