@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Per-Pair Live Chart Refresh Truth](plans/2026-08-01-phase1-per-pair-live-chart-refresh-truth.md)
+[Phase 1 Backtest Poll Lifecycle](plans/2026-08-01-phase1-backtest-poll-lifecycle.md)
 
 **Latest accepted implementation evidence:**
-[Phase 1 Per-Pair Live Chart Refresh Truth Acceptance](reports/2026-08-01-phase1-per-pair-live-chart-refresh-truth-acceptance.md)
+[Phase 1 Backtest Poll Lifecycle Acceptance](reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md)
 
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
@@ -20,17 +20,13 @@
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 **Latest completed bounded implementation:**
-[Phase 1 Per-Pair Live Chart Refresh Truth](plans/2026-08-01-phase1-per-pair-live-chart-refresh-truth.md)
-is accepted at Root `064908fc` and frontend `c74ad28d`. Its
-[acceptance report](reports/2026-08-01-phase1-per-pair-live-chart-refresh-truth-acceptance.md)
-is the frontend state-isolation evidence authority.
-
-**Active bounded implementation:**
 [Phase 1 Backtest Poll Lifecycle](plans/2026-08-01-phase1-backtest-poll-lifecycle.md)
-is implemented with P0/P1/P2 = 0 design and implementation Gates and awaits acceptance.
-It is limited to ownership of the existing FreqUI Backtest polling timer and does not
-activate backend, strategy, market-data,
-Runtime, Paper, Live, or AI-worker scope.
+is accepted at Root `b99bba88` and frontend `a084c152`. Its
+[acceptance report](reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md)
+is the frontend lifecycle evidence authority.
+
+**Active bounded implementation:** None. The accepted polling repair does not activate
+backend, strategy, market-data, Runtime, Paper, Live, or AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -300,12 +296,16 @@ acceptance.
 
 ### Next
 
-The active implemented slice addresses one demonstrated lifecycle defect in the existing
-8083 Backtest journey: the running-job polling interval can outlive `BacktestingView`
-when the user navigates away. It first reproduces the boundary with a focused component
-test, then gives the existing interval a view-instance lifecycle. Immediate watcher
-evaluation preserves polling when a user returns while the backend job is still running.
-It does not redesign background jobs, cancel the server job, or add a scheduler.
+No bounded implementation is active. The latest accepted slice closes the demonstrated
+`BacktestingView` polling leak and preserves observation when the user returns to a
+still-running job. It does not redesign background jobs, cancel the server job, or add a
+scheduler.
+
+The next bounded selection should correct the current operator entrypoints before a
+larger functional slice: the root quick-start material must lead users to the accepted
+8081 `/graph` and 8083 `/backtest` journeys, and must not present frozen `/research` as
+the authoritative backtest. Treat that as a documentation/navigation repair unless
+direct route inspection proves a product defect.
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.

@@ -1,10 +1,13 @@
 # Phase 1 Backtest Poll Lifecycle
 
-**Status:** Implemented; acceptance Gate pending
+**Status:** Completed; exact-SHA accepted
 
 **Design Gate:** PASS; P0 = 0, P1 = 0, P2 = 0
 
 **Implementation Gate:** PASS; P0 = 0, P1 = 0, P2 = 0
+
+**Acceptance evidence:**
+[Phase 1 Backtest Poll Lifecycle Acceptance](../reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md)
 
 **Scope:** FreqUI only; no backend API, background-job protocol, Backtest engine,
 strategy, market-data, Runtime, Paper, Live, deployment, or AI-worker changes
