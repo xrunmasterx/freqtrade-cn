@@ -142,6 +142,13 @@ not an active backlog.
   [acceptance report](reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md)
   is the exact-SHA and image evidence authority. It adds no strategy, market-data,
   Backtest, Runtime, Paper, Live, deployment, or AI scope.
+- The active bounded implementation is
+  [Phase 1 Per-Pair Live Chart Refresh Truth](plans/2026-08-01-phase1-per-pair-live-chart-refresh-truth.md).
+  Static review found that failed live-chart refreshes retain old data without a visible
+  failure warning, while one bot-wide status and first-pair presentation metadata can
+  cross-contaminate multiple pair panels. The implemented FreqUI-only repair makes
+  refresh state, `plot_config`, and warnings pair/timeframe-local. It adds no backend,
+  market-data request, strategy, Backtest, Runtime, Paper, Live, or AI-worker scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -207,7 +214,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
 | Latest completed implementation | `plans/2026-08-01-reviewed-image-ui-self-identity.md` | Completed; exact-image accepted |
 | Latest acceptance evidence | `reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md` | Accepted packaging-provenance receipt |
-| Active implementation | None | No bounded implementation is active |
+| Active implementation | `plans/2026-08-01-phase1-per-pair-live-chart-refresh-truth.md` | Implemented; acceptance Gate pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

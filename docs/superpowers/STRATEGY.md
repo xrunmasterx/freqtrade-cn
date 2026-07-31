@@ -25,8 +25,12 @@ is accepted at exact implementation SHAs and one retained immutable local image.
 [acceptance report](reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md)
 is the evidence authority.
 
-**Active bounded implementation:** None. The completed packaging slice does not activate
-strategy, market-data, Runtime, Paper, Live, or AI scope.
+**Active bounded implementation:**
+[Phase 1 Per-Pair Live Chart Refresh Truth](plans/2026-08-01-phase1-per-pair-live-chart-refresh-truth.md)
+is implemented with a P0/P1/P2 = 0 design Gate and awaits acceptance. It is limited to
+pair/timeframe-local chart refresh
+state and presentation metadata; it does not activate backend, strategy, market-data,
+Runtime, Paper, Live, or AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -296,18 +300,17 @@ acceptance.
 
 ### Next
 
-No new bounded implementation is active. The latest packaging slice closes the recorded
-embedded UI-identity P2 using the existing committed-image wrapper and no new product
-surface. The accepted image now binds its visible UI version to the frontend gitlink,
-while ordinary local builds remain honestly marked `unknown`. This improves incident and
-atomic-deployment evidence but does not change the user's chart, Backtest, Lookahead, or
-Recursive Analysis workflow and is not strategy-quality evidence.
+The active implemented slice repairs one demonstrated truthfulness defect in the accepted
+8081 watch journey. A failed `/chart_candles` refresh currently keeps the last successful
+dataset visible without a failure warning, while one bot-wide status and the first
+selected pair's `plot_config`/warnings are reused across all pair panels. The bounded
+FreqUI repair makes these states pair/timeframe-local, retains old data only with an
+explicit warning, and clears that warning after recovery.
 
-The next implementation selection must return to a demonstrated user decision in the
-accepted Phase 1 workflow. Do not expand the platform, create a second analysis engine,
-or activate dynamic Runtime/Paper merely because packaging provenance is now complete.
-Select the smallest remaining chart, strategy-review, or Backtest problem whose user
-impact can be reproduced and whose acceptance does not require the retired holdout.
+The slice does not add a freshness clock, backend field, request, chart platform,
+Decision Snapshot writer, Runtime, Paper, Live, optimizer, or AI worker. Dynamic Paper
+remains a NO-GO because no strategy candidate is active, the former holdout is retired,
+and no replacement holdout or formal release chain exists.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without
