@@ -82,6 +82,13 @@ not an active backlog.
   OKX `BTC/USDT:USDT`, and required no new API or platform surface. The controlled
   candidate lost 2.021% versus the baseline's 1.751%, so the validation workflow is
   accepted but the candidate is not eligible for Paper promotion.
+- The preregistered
+  [VolatilitySystem Static-Stop Calibration](plans/2026-07-31-volatility-static-stop-calibration.md)
+  is the active strategy-research entrypoint. It freezes one static-stop candidate
+  (`stoploss: -1 -> -0.10`), a one-year calibration window, a strictly disjoint sealed
+  one-year holdout which this study asserts it has not inspected, and fail-closed
+  sufficiency/performance/safety Gates before any candidate run. It adds no product
+  surface and does not authorize Paper or Live use.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -137,7 +144,7 @@ not an active backlog.
 | Latest completed implementation | `plans/2026-07-31-phase1-evidence-guided-backtest-pair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-evidence-guided-backtest-pair-acceptance.md` | Accepted pair-interpretation receipt |
 | Latest Futures dogfood evidence | `reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md` | Accepted workflow receipt; candidate rejected |
-| Active implementation | None | Next step is protocol-bound strategy research, not a new platform feature |
+| Active strategy research | `plans/2026-07-31-volatility-static-stop-calibration.md` | Preregistered; calibration not yet run |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

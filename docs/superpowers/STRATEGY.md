@@ -10,7 +10,8 @@
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
 
-**Active execution plan:** none; the next step is protocol-bound strategy research
+**Active strategy-research plan:**
+[VolatilitySystem Static-Stop Calibration](plans/2026-07-31-volatility-static-stop-calibration.md)
 
 ## Product purpose
 
@@ -249,16 +250,20 @@ acceptance.
 
 ### Next
 
-Use the existing authoritative engine for protocol-bound strategy research before adding
-platform features:
+Execute the preregistered fixed-risk study with the existing authoritative engine before
+adding platform features:
 
-1. state one falsifiable strategy hypothesis and its intended market behavior;
-2. compare it with a named baseline on one calibration window, using the maximum startup
-   requirement across both strategies and otherwise identical settings;
-3. reject candidates that do not show a credible in-window result instead of optimizing
-   around noise;
-4. only for a surviving candidate, spend a strictly disjoint historical window on a
-   same-strategy cross-window review and record the limits of that evidence.
+1. preserve the accepted `VolatilitySystem` as baseline and change only the effective
+   stop risk from `-1` to `-0.10` in an isolated candidate overlay;
+2. use the frozen 2024-07-01 to 2025-07-01 calibration window, common 499-candle warmup,
+   one pair, and otherwise identical settings;
+3. reject or stop as insufficient unless the predeclared trade-count, direction,
+   profitability, drawdown, tail-loss, Lookahead, and Recursive Gates all pass;
+4. only for that unchanged survivor, spend the strictly disjoint 2025-07-02 to
+   2026-07-02 holdout which this study asserts it has not inspected, and require both
+   same-window and cross-window evidence reviews;
+5. change tracked strategy code only after every Gate passes; otherwise record rejection
+   and keep the accepted baseline unchanged.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate
