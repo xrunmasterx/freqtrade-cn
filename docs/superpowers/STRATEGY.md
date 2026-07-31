@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md)
+[Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md)
 
 **Latest accepted implementation evidence:**
-[Recursive Analysis Truthfulness Repair Acceptance](reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md)
+[Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair Acceptance](reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
 
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
@@ -20,8 +20,8 @@
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 **Active bounded implementation:**
-[Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md)
-— implemented; exact-image acceptance pending.
+None. The accepted image's embedded FreqUI identity is a recorded packaging-provenance
+P2 and requires a separate bounded design decision.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -267,20 +267,29 @@ acceptance.
   also records and contains the preparatory/acceptance-run holdout breach: the former
   reserved window is retired, and formal acceptance was rerun on development-only
   history.
+- Lookahead Analysis Sufficiency Truthfulness Repair is accepted at Root `c79df336`,
+  backend `8b1ec827`, frontend `a0a4502a`, and unchanged strategies `dec5adb77`. API
+  2.56 reports backend-owned sufficiency state and thresholds; FreqUI shows green only
+  for an internally consistent completed clean result and keeps insufficient, legacy,
+  and malformed responses neutral. Its
+  [acceptance report](reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
+  records independent Gates, Buildx/SLSA provenance, immutable-image API/UI behavior,
+  no market/holdout analysis, and one non-blocking embedded UI-identity P2.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-The active bounded slice repairs a demonstrated truthfulness gap in the accepted 8083
+No new bounded implementation is active. The completed Lookahead slice repaired a
+demonstrated truthfulness gap in the accepted 8083
 Lookahead Analysis journey. The baseline accepted a job that returned `has_bias=false`
 with zero analyzed signals only because its evidence report manually recorded that the
 result lacked meaningful coverage. Normal FreqUI instead turns that same payload shape
 into a green success. Freqtrade's command-line presentation already treats a result below
 `minimum_trade_amount` as too few trades and a failed test.
 
-The repair adds a backend-owned `completed` or `insufficient_signals` result state plus
+The accepted repair adds a backend-owned `completed` or `insufficient_signals` result state plus
 the effective positive minimum and target counts. API validation is aligned with the
 CLI's existing positive-integer invariant so zero signals cannot satisfy a zero minimum.
 Minimum is the validity threshold; target is a work goal/cap and is not promoted into a
@@ -291,10 +300,17 @@ atomically; backend-first deployment to an old UI is unsupported because the old
 ignores the additive state. The supporting diagnostic still does not prove strategy
 quality, representative coverage, robustness, Paper/Live eligibility, or profit.
 
-This slice changes no analysis algorithm, market data, strategy candidate, threshold,
-request, route, persisted evidence, Runtime, Paper, Live, optimization, or AI behavior.
-It does not use the retired holdout or assign a replacement. Passing it does not activate
-a paused platform feature.
+This slice changes no analysis algorithm, market data, strategy candidate, threshold
+default, request shape/default, route, persisted evidence, Runtime, Paper, Live,
+optimization, or AI behavior. Positive-integer API validation is its only
+request-behavior change. It does not use the retired holdout or assign a replacement.
+Passing it does not activate a paused platform feature.
+
+The exact-image Gate recorded one non-blocking packaging-provenance gap: the packaged UI
+cannot yet self-report its accepted frontend SHA. The current acceptance instead uses
+the clean Root submodule tree, Buildx VCS/SLSA record, immutable image ID, and actual
+browser behavior. Any self-describing image fix must remain a separate bounded slice;
+it must not reactivate strategy, Runtime, Paper, Live, or AI scope.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without

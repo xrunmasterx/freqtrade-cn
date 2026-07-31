@@ -100,7 +100,7 @@ not an active backlog.
   is the evidence authority. B/S/C performance, safety analysis, holdout, tracked
   strategy edits, Paper, and Live were not opened during that study; no strategy
   candidate is active.
-- The latest completed product slice is
+- The preceding completed product slice is
   [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md).
   It makes the existing 8083 Recursive Analysis evaluate every materialized startup
   profile and narrows the empty-result UI to neutral, final-candle indicator evidence.
@@ -113,7 +113,7 @@ not an active backlog.
   final-row indicators. That window is retired and cannot support future fresh-holdout
   claims; formal acceptance was rerun on `20250101-20250701`. No signal, trade,
   performance, Paper, or Live evidence was opened.
-- The active bounded implementation is
+- The latest completed product slice is
   [Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md).
   It separates minimum-signal completion from the detected/not-detected bias verdict in
   the existing 8083 API and FreqUI result. The additive contract reports backend-owned
@@ -121,10 +121,14 @@ not an active backlog.
   instead of rendering a false-green success. API thresholds become positive integers,
   matching the existing CLI invariant. API 2.56 must ship frontend-first or atomically
   with its matching FreqUI because an old UI cannot interpret the additive state.
-  Backend `8b1ec827` and frontend `a0a4502a` are implemented and passed independent
-  implementation Gates; exact combined-image acceptance is pending. It adds no analysis
-  algorithm, data run, strategy candidate, receipt, persistence, Runtime, Paper, Live,
-  or AI scope.
+  Root `c79df336`, backend `8b1ec827`, frontend `a0a4502a`, and unchanged strategies
+  `dec5adb77` passed independent implementation Gates and exact combined-image API/UI
+  acceptance. Its
+  [acceptance report](reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
+  is the evidence authority. The image's embedded UI version cannot yet self-report the
+  frontend SHA; Buildx/SLSA provenance, the Root submodule tree, and immutable-image
+  behavior are the accepted identity chain. It adds no analysis algorithm, data run,
+  strategy candidate, receipt, persistence, Runtime, Paper, Live, or AI scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -184,9 +188,11 @@ not an active backlog.
 | Preceding strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
 | Latest strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Completed; candidate rejected before performance |
 | Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
-| Latest completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
-| Latest acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
-| Active implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Implemented; exact-image acceptance pending |
+| Preceding completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
+| Preceding acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
+| Latest completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |
+| Latest acceptance evidence | `reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
+| Active implementation | — | None; a packaging-provenance P2 requires a separate bounded decision |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

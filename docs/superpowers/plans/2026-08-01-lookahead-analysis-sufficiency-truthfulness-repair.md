@@ -1,6 +1,6 @@
 # Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair
 
-**Status:** Implemented; exact-image acceptance pending
+**Status:** Completed; exact-SHA accepted
 
 **Product authority:** [Product Strategy and Delivery Policy](../STRATEGY.md)
 
