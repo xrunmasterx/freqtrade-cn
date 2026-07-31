@@ -25,8 +25,12 @@ is accepted at Root `064908fc` and frontend `c74ad28d`. Its
 [acceptance report](reports/2026-08-01-phase1-per-pair-live-chart-refresh-truth-acceptance.md)
 is the frontend state-isolation evidence authority.
 
-**Active bounded implementation:** None. The accepted chart refresh slice does not
-activate backend, strategy, market-data, Runtime, Paper, Live, or AI-worker scope.
+**Active bounded implementation:**
+[Phase 1 Backtest Poll Lifecycle](plans/2026-08-01-phase1-backtest-poll-lifecycle.md)
+is implemented with P0/P1/P2 = 0 design and implementation Gates and awaits acceptance.
+It is limited to ownership of the existing FreqUI Backtest polling timer and does not
+activate backend, strategy, market-data,
+Runtime, Paper, Live, or AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -296,16 +300,12 @@ acceptance.
 
 ### Next
 
-No bounded implementation is active. The latest accepted slice closes the demonstrated
-multi-pair live-chart state-isolation defect without adding a freshness clock, backend
-field, request, chart platform, Decision Snapshot writer, Runtime, Paper, Live,
-optimizer, or AI worker.
-
-Static review identified a smaller next candidate in the existing 8083 Backtest journey:
-the running-job poll interval may outlive `BacktestingView` when the user navigates away.
-Before changing production code, reproduce that lifecycle boundary with a focused
-component test. If confirmed, stop the interval on unmount using the existing polling
-mechanism; do not redesign background jobs or add a scheduler.
+The active implemented slice addresses one demonstrated lifecycle defect in the existing
+8083 Backtest journey: the running-job polling interval can outlive `BacktestingView`
+when the user navigates away. It first reproduces the boundary with a focused component
+test, then gives the existing interval a view-instance lifecycle. Immediate watcher
+evaluation preserves polling when a user returns while the backend job is still running.
+It does not redesign background jobs, cancel the server job, or add a scheduler.
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.
