@@ -27,6 +27,8 @@ class VolatilitySystem(IStrategy):
     """
     can_short = True
 
+    startup_candle_count = 499
+
     minimal_roi = {
         "0": 100
     }
