@@ -19,8 +19,9 @@
 **Latest strategy-research evidence:**
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
-**Active bounded implementation:** None; the next slice requires a separate user-value
-decision.
+**Active bounded implementation:**
+[Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md)
+— design approved; implementation not started.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -272,9 +273,27 @@ acceptance.
 
 ### Next
 
-No bounded implementation or strategy candidate is active. The next slice must be chosen
-from a concrete user decision or a demonstrated gap in the accepted watch, Backtest,
-analysis, and evidence-review loop; passing this supporting diagnostic does not activate
+The active bounded slice repairs a demonstrated truthfulness gap in the accepted 8083
+Lookahead Analysis journey. The baseline accepted a job that returned `has_bias=false`
+with zero analyzed signals only because its evidence report manually recorded that the
+result lacked meaningful coverage. Normal FreqUI instead turns that same payload shape
+into a green success. Freqtrade's command-line presentation already treats a result below
+`minimum_trade_amount` as too few trades and a failed test.
+
+The repair adds a backend-owned `completed` or `insufficient_signals` result state plus
+the effective positive minimum and target counts. API validation is aligned with the
+CLI's existing positive-integer invariant so zero signals cannot satisfy a zero minimum.
+Minimum is the validity threshold; target is a work goal/cap and is not promoted into a
+second Gate. FreqUI may show a bounded green detected/not-detected result only after
+explicit completion. Insufficient or legacy responses remain neutral and state that no
+conclusion is available. API 2.56 must deploy the new FreqUI first or update both sides
+atomically; backend-first deployment to an old UI is unsupported because the old UI
+ignores the additive state. The supporting diagnostic still does not prove strategy
+quality, representative coverage, robustness, Paper/Live eligibility, or profit.
+
+This slice changes no analysis algorithm, market data, strategy candidate, threshold,
+request, route, persisted evidence, Runtime, Paper, Live, optimization, or AI behavior.
+It does not use the retired holdout or assign a replacement. Passing it does not activate
 a paused platform feature.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly

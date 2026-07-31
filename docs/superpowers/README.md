@@ -112,8 +112,17 @@ not an active backlog.
   accidentally crossed into the reserved `20250702-20260702` holdout and exposed
   final-row indicators. That window is retired and cannot support future fresh-holdout
   claims; formal acceptance was rerun on `20250101-20250701`. No signal, trade,
-  performance, Paper, or Live evidence was opened. No bounded implementation is
-  currently active.
+  performance, Paper, or Live evidence was opened.
+- The active bounded implementation is
+  [Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md).
+  It separates minimum-signal completion from the detected/not-detected bias verdict in
+  the existing 8083 API and FreqUI result. The additive contract reports backend-owned
+  effective minimum and target counts; insufficient and legacy responses remain neutral
+  instead of rendering a false-green success. API thresholds become positive integers,
+  matching the existing CLI invariant. API 2.56 must ship frontend-first or atomically
+  with its matching FreqUI because an old UI cannot interpret the additive state. Design
+  is approved and implementation has not started. It adds no analysis algorithm, data
+  run, strategy candidate, receipt, persistence, Runtime, Paper, Live, or AI scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -175,6 +184,7 @@ not an active backlog.
 | Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
 | Latest completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
+| Active implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Design approved; implementation not started |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
