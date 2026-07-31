@@ -167,10 +167,26 @@ _Avoid:_ ExperimentRevision ID, BacktestRun ID, DataSnapshot ID.
 
 A versioned, run-scoped record identifying the primary strategy source captured for
 execution and the supported Freqtrade-resolved parameters used by an Authoritative
-Backtest. It is not a StrategyRelease, transitive dependency closure, Environment
-Identity, or authenticity proof.
+Backtest. Legacy v1 covers its original bounded parameter set; context-bound v2 owns the
+exact declared Freqtrade-resolved strategy execution-setting allowlist, captured after
+`ft_bot_start`, including custom ROI enablement and the protection list actually consumed,
+so those values are not misclassified as environmental drift. It is not a StrategyRelease,
+transitive dependency closure, Environment Identity, or authenticity proof.
 
 _Avoid:_ Freqtrade Run ID, strategy version, StrategyRelease.
+
+### Backtest Execution Context Evidence
+
+A versioned, run-scoped fingerprint of the declared core-runtime versions, effective
+simulation configuration, and admitted-pair exchange simulation facts sealed by an
+Authoritative static-PairList Spot or Futures Backtest. Equality means only that declared
+scope matched. The effective configuration includes the proxy-wallet balance that clamps
+available capital; the exchange scope includes only a formula-consumed liquidation taker
+rate, not a general fee model. It is not Environment Identity, authenticity proof,
+equal-result proof, or environment restoration. Dynamic PairList execution has no v1
+context claim.
+
+_Avoid:_ Environment Identity, environment snapshot, reproducible environment.
 
 ### Backtest Revision Receipt
 

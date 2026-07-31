@@ -7,7 +7,8 @@
 **Latest completed execution plan:**
 [Phase 1 Retained DataSnapshot Replay](plans/2026-07-31-phase1-retained-data-snapshot-replay.md)
 
-**Active execution plan:** none; exact-SHA acceptance does not activate the next slice
+**Active execution plan:**
+[Phase 1 Backtest Execution Context Evidence](plans/2026-07-31-phase1-backtest-execution-context-evidence.md)
 
 ## Product purpose
 
@@ -17,8 +18,8 @@ evidence:
 1. Is the market view current enough to review the strategy?
 2. What indicators, signals, and executions did the strategy produce, and which source
    does each point come from?
-3. Does the same strategy pass reproducible Freqtrade backtesting and safety analysis
-   before any governed Paper observation?
+3. Does the same strategy pass comparable, evidence-bound Freqtrade backtesting and
+   safety analysis before any governed Paper observation?
 
 The first supported execution scope is digital-asset Spot in Paper/dry-run conditions.
 Live trading, exchange writes, and real-money acceptance are outside the current program.
@@ -102,6 +103,38 @@ This gate does not create StrategyRelease or prove imported helpers, FreqAI mode
 the complete environment, artifact authenticity, retained replay, Paper eligibility, or
 future profit.
 
+### Gate A.4: Backtest execution-context evidence — active, acceptance pending
+
+API 2.55 keeps the same authoritative Backtest form and engine while sealing three
+bounded fingerprints for the core runtime versions, effective simulation configuration,
+and admitted-pair exchange simulation facts actually used by the run. Result, history,
+selector, and comparison views report this context as same, different, or unknown
+independently of DataSnapshot and strategy evidence.
+
+To keep those axes truthful, every newly captured strategy artifact upgrades to normative
+Strategy Evidence v2: the exact declared Freqtrade-resolved strategy execution settings,
+including custom ROI enablement and the protection list actually consumed, remain on the
+intended-change axis and are excluded from context. Open settings/protection maps are
+replaced by exact positive allowlists and the recursive hyperopt surface is resource
+bounded. Existing v1 evidence remains loadable.
+
+The user decision is whether a candidate-versus-baseline metric delta is comparable
+within the captured scope or is confounded by changed or unknown execution context.
+Only same captured context makes the pair eligible for later robustness analysis;
+different or unknown context must not be rewarded, ranked, learned from, or promoted as
+strategy improvement.
+
+This gate supports static-PairList Spot and Futures without adding exchange calls. Dynamic
+PairList and FreqAI fail closed because their executed order/model identity is not bound.
+Cross Margin object wallets that would require a mutable ticker conversion also fail
+closed before wallet construction. The context binds the one proxy-wallet free balance
+that still clamps `available_capital`, without retaining the wallet map. The exchange
+projection freezes the narrow taker-rate input used by applicable dry-run liquidation
+formulas, but does not create a general fee model. The gate does not persist raw config or
+exchange responses, enumerate the host, restore an environment, create an SBOM/container
+identity, bind imported helpers or arbitrary strategy I/O, guarantee the same result,
+establish artifact authenticity, qualify Paper, or predict profit.
+
 ### Gate B: Governed Experiment-to-Paper — not active
 
 After Gate A passes and one explicit next-journey decision is recorded, the smallest
@@ -143,18 +176,23 @@ acceptance.
   `9baff126f`, frontend `e2b5e36c`, and unchanged strategies `dbd5b0b`. It reuses the
   same retained standard market rows under the current execution context and does not
   claim the same result, full environment reproduction, Paper eligibility, or profit.
+- Gate A.4 Backtest Execution Context Evidence implementation is complete on
+  `xrunmasterx/phase1-complete-development` at backend `3209d4374`, frontend
+  `17e88f2d6`, and unchanged strategies `dbd5b0b21`; the Root implementation receipt and
+  documentation Gate are pending. Its boundary remains a static-PairList, receipt-local,
+  three-component correlation fingerprint, one engine-owned CLI/API seal, a fail-closed
+  Cross Margin wallet rule, proxy-wallet stake-clamp binding, formula-consumed
+  liquidation-rate binding, allowlisted and resource-bounded Strategy Evidence v2, and an
+  existing Backtest UI extension. It is not Environment Identity or an
+  environment-restoration platform.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Reassess and explicitly select a small Backtest Environment Evidence slice; no
-implementation plan is active yet. Its first-principles purpose would be to explain
-which current execution inputs can still change a replayed result, not to build a full
-container/SBOM or environment-restoration platform.
-
-After that decision, reassess revision-bound robustness/holdout evidence. Keep
+Complete the exact-SHA Root acceptance and documentation Gate for Backtest Execution
+Context Evidence, then reassess revision-bound robustness/holdout evidence. Keep
 optimization/ranking, continuous AI insight capture, dynamic RuntimeInstance, formal
 Paper Observation, Experiment UI, and platform cutover paused until their prerequisites
 and user journey are separately selected.

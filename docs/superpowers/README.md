@@ -55,6 +55,19 @@ not an active backlog.
   is the evidence authority. It stores canonical rows and admission routes inside each
   opted-in Backtest ZIP, adds one verified history-row replay action, and explicitly
   leaves the current exchange/software context unbound.
+- The active, implementation-complete
+  [Phase 1 Backtest Execution Context Evidence](plans/2026-07-31-phase1-backtest-execution-context-evidence.md)
+  slice keeps the existing 8083 Backtest journey and adds a bounded third comparison
+  axis for core-runtime versions, effective simulation configuration, and admitted-pair
+  exchange simulation facts. It is correlation evidence for detecting confounded
+  comparisons, not Environment Identity, complete reproducibility, or environment
+  restoration. The exact implementation is backend `3209d4374`, frontend `17e88f2d6`,
+  and unchanged strategies `dbd5b0b21`; Root exact-SHA acceptance remains pending. V1 is
+  deliberately limited to static-PairList Spot/Futures, rejects external Cross Margin
+  wallet conversion, freezes only the liquidation taker rate actually consumed by
+  applicable formulas, binds the one proxy-wallet balance that clamps available capital,
+  uses one CLI/API engine seal, and assigns an allowlisted, resource-bounded
+  resolved-strategy scope to normative Strategy Evidence v2.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -101,10 +114,11 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md` | Accepted strategy-evidence receipt |
 | Latest completed implementation | `plans/2026-07-31-phase1-retained-data-snapshot-replay.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-07-31-phase1-retained-data-snapshot-replay-acceptance.md` | Accepted retained-data replay receipt |
-| Active implementation | None | No next slice activated by acceptance |
+| Active implementation | `plans/2026-07-31-phase1-backtest-execution-context-evidence.md` | Implementation complete; exact-SHA acceptance pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
+| Execution-context evidence decision | `decisions/2026-07-31-backtest-execution-context-evidence-boundary.md` | Accepted for implementation after five design Gates |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |
