@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md)
+[Phase 1 Per-Pair Live Chart Refresh Truth](plans/2026-08-01-phase1-per-pair-live-chart-refresh-truth.md)
 
 **Latest accepted implementation evidence:**
-[Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair Acceptance](reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
+[Phase 1 Per-Pair Live Chart Refresh Truth Acceptance](reports/2026-08-01-phase1-per-pair-live-chart-refresh-truth-acceptance.md)
 
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
@@ -20,17 +20,13 @@
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 **Latest completed bounded implementation:**
-[Phase 1 Reviewed Image UI Self-Identity](plans/2026-08-01-reviewed-image-ui-self-identity.md)
-is accepted at exact implementation SHAs and one retained immutable local image. Its
-[acceptance report](reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md)
-is the evidence authority.
-
-**Active bounded implementation:**
 [Phase 1 Per-Pair Live Chart Refresh Truth](plans/2026-08-01-phase1-per-pair-live-chart-refresh-truth.md)
-is implemented with a P0/P1/P2 = 0 design Gate and awaits acceptance. It is limited to
-pair/timeframe-local chart refresh
-state and presentation metadata; it does not activate backend, strategy, market-data,
-Runtime, Paper, Live, or AI-worker scope.
+is accepted at Root `064908fc` and frontend `c74ad28d`. Its
+[acceptance report](reports/2026-08-01-phase1-per-pair-live-chart-refresh-truth-acceptance.md)
+is the frontend state-isolation evidence authority.
+
+**Active bounded implementation:** None. The accepted chart refresh slice does not
+activate backend, strategy, market-data, Runtime, Paper, Live, or AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -300,17 +296,19 @@ acceptance.
 
 ### Next
 
-The active implemented slice repairs one demonstrated truthfulness defect in the accepted
-8081 watch journey. A failed `/chart_candles` refresh currently keeps the last successful
-dataset visible without a failure warning, while one bot-wide status and the first
-selected pair's `plot_config`/warnings are reused across all pair panels. The bounded
-FreqUI repair makes these states pair/timeframe-local, retains old data only with an
-explicit warning, and clears that warning after recovery.
+No bounded implementation is active. The latest accepted slice closes the demonstrated
+multi-pair live-chart state-isolation defect without adding a freshness clock, backend
+field, request, chart platform, Decision Snapshot writer, Runtime, Paper, Live,
+optimizer, or AI worker.
 
-The slice does not add a freshness clock, backend field, request, chart platform,
-Decision Snapshot writer, Runtime, Paper, Live, optimizer, or AI worker. Dynamic Paper
-remains a NO-GO because no strategy candidate is active, the former holdout is retired,
-and no replacement holdout or formal release chain exists.
+Static review identified a smaller next candidate in the existing 8083 Backtest journey:
+the running-job poll interval may outlive `BacktestingView` when the user navigates away.
+Before changing production code, reproduce that lifecycle boundary with a focused
+component test. If confirmed, stop the interval on unmount using the existing polling
+mechanism; do not redesign background jobs or add a scheduler.
+
+Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
+holdout is retired, and no replacement holdout or formal release chain exists.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without

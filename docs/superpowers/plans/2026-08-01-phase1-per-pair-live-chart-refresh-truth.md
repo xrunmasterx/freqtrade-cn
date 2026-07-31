@@ -1,10 +1,13 @@
 # Phase 1 Per-Pair Live Chart Refresh Truth
 
-**Status:** Implemented; acceptance Gate pending
+**Status:** Completed; exact-SHA accepted
 
 **Design Gate:** PASS; P0 = 0, P1 = 0, P2 = 0
 
 **Implementation Gate:** PASS; P0 = 0, P1 = 0, P2 = 0
+
+**Acceptance evidence:**
+[Phase 1 Per-Pair Live Chart Refresh Truth Acceptance](../reports/2026-08-01-phase1-per-pair-live-chart-refresh-truth-acceptance.md)
 
 **Scope:** FreqUI only; no backend API, market-data, strategy, Backtest, Runtime,
 Paper, Live, deployment, or AI-worker changes
