@@ -21,8 +21,8 @@
 
 **Active bounded implementation:**
 [Phase 1 Reviewed Image UI Self-Identity](plans/2026-08-01-reviewed-image-ui-self-identity.md)
-is approved with implementation pending. It is limited to reviewed-image packaging and
-does not activate strategy, market-data, Runtime, Paper, Live, or AI scope.
+is implemented with exact-image acceptance pending. It is limited to reviewed-image
+packaging and does not activate strategy, market-data, Runtime, Paper, Live, or AI scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a

@@ -1,12 +1,16 @@
 FROM node:24-bookworm-slim AS frequi-builder
 
+ARG FREQUI_COMMIT_HASH=unknown
+ENV FREQUI_COMMIT_HASH=${FREQUI_COMMIT_HASH}
+
 WORKDIR /frequi
 RUN corepack enable
 COPY frequi/package.json frequi/pnpm-lock.yaml frequi/pnpm-workspace.yaml ./
 RUN corepack prepare pnpm@11.9.0 --activate \
   && pnpm install --frozen-lockfile
 COPY frequi/ ./
-RUN pnpm run build
+RUN pnpm run build \
+  && printf '%s' "local-frequi-${FREQUI_COMMIT_HASH}" > /frequi/dist/.uiversion
 
 FROM python:3.14.6-slim-trixie AS base
 
@@ -52,8 +56,7 @@ COPY --chown=root:root --chmod=0555 \
   /usr/local/bin/freqtrade-entrypoint
 
 USER ftuser
-RUN printf '%s\n' 'local-frequi-f5a81466' > /freqtrade/freqtrade/rpc/api_server/ui/.uiversion \
-  && pip install -e . --user --no-cache-dir \
+RUN pip install -e . --user --no-cache-dir \
   && mkdir -p /freqtrade/user_data/
 
 USER root

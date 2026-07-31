@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -26,6 +27,9 @@ else:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LABEL_PREFIX = "org.freqtrade-cn.revision."
 IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+CONTAINER_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+UI_VERSION_PATH = "/freqtrade/freqtrade/rpc/api_server/ui/installed/.uiversion"
+UI_VERSION_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -57,11 +61,22 @@ def expected_labels(identity: CommitIdentity) -> dict[str, str]:
     }
 
 
+def expected_ui_version(identity: CommitIdentity) -> str:
+    return f"local-frequi-{identity.frontend}"
+
+
 def build_committed_image(
     context: Path, identity: CommitIdentity, *, timeout_seconds: int = 1800
 ) -> str:
     tag = provenance_tag(identity)
-    command = ["docker", "build", "--tag", tag]
+    command = [
+        "docker",
+        "build",
+        "--tag",
+        tag,
+        "--build-arg",
+        f"FREQUI_COMMIT_HASH={identity.frontend}",
+    ]
     for name, value in expected_labels(identity).items():
         command.extend(["--label", f"{name}={value}"])
     command.append(str(context))
@@ -91,6 +106,8 @@ def build_committed_operator_image(
         "platform-operator-image",
         "--build-arg",
         f"PLATFORM_OPERATOR_ROOT_COMMIT={identity.root}",
+        "--build-arg",
+        f"FREQUI_COMMIT_HASH={identity.frontend}",
     ]
     for name, value in expected_labels(identity).items():
         command.extend(["--label", f"{name}={value}"])
@@ -161,10 +178,80 @@ def verify_operator_image_provenance(
         raise ValueError("Docker image labels do not match committed revisions")
 
 
+def _remove_verification_container(cidfile: Path) -> None:
+    try:
+        container_id = cidfile.read_text(encoding="ascii").strip()
+    except OSError:
+        return
+    if CONTAINER_ID_PATTERN.fullmatch(container_id) is None:
+        return
+    try:
+        subprocess.run(
+            ["docker", "container", "rm", "--force", container_id],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=UI_VERSION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def verify_embedded_ui_version(
+    image_id: str,
+    identity: CommitIdentity,
+    *,
+    timeout_seconds: int = UI_VERSION_TIMEOUT_SECONDS,
+) -> None:
+    if IMAGE_ID_PATTERN.fullmatch(image_id) is None:
+        raise ValueError("Docker image has an invalid image ID")
+    read_version = (
+        "from pathlib import Path; "
+        f"print(Path({UI_VERSION_PATH!r}).read_text(encoding='utf-8'), end='')"
+    )
+    with tempfile.TemporaryDirectory(prefix="freqtrade-ui-version-") as directory:
+        cidfile = Path(directory) / "container.cid"
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "1000:1000",
+            "--cidfile",
+            str(cidfile),
+            "--entrypoint",
+            "python",
+            image_id,
+            "-c",
+            read_version,
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            _remove_verification_container(cidfile)
+            raise ValueError("Docker image UI version verification failed") from None
+    if completed.stderr or completed.stdout != expected_ui_version(identity):
+        raise ValueError("Docker image UI version does not match committed frontend")
+
+
 def build_and_inspect_image(context: Path, identity: CommitIdentity) -> InspectedImage:
     tag = build_committed_image(context, identity)
     image = inspect_image(tag)
     verify_image_provenance(image, identity)
+    verify_embedded_ui_version(image.image_id, identity)
     return image
 
 
@@ -174,6 +261,7 @@ def build_and_inspect_operator_image(
     tag = build_committed_operator_image(context, identity)
     image = inspect_image(tag)
     verify_operator_image_provenance(image, identity)
+    verify_embedded_ui_version(image.image_id, identity)
     return image
 
 

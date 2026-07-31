@@ -98,6 +98,12 @@ gitlinks, builds and inspects the image's complete revision labels, and launches
 only the resulting immutable `sha256:` image ID. Uncommitted files never enter the
 image, and build, inspection, label, render, or launch-preflight failures do not
 fall back to a tag or an existing container. It is the formal runtime entrypoint.
+The same formal build injects the complete frontend revision fixed by the committed
+Root gitlink, then verifies both the existing Root/backend/frontend labels and the
+exact `local-frequi-<frontend-sha>` marker from the immutable image ID. Raw
+`docker build` and `docker compose build` remain available for local development;
+without that formal wrapper they report `local-frequi-unknown` and are not reviewed
+images.
 Every formal service uses `/freqtrade/state` as its writable userdata directory.
 Trading services load strategies from the read-only
 `/freqtrade/user_data/strategies` mount. Research does not preselect a strategy in
@@ -107,8 +113,9 @@ in its operational config.
 
 ## Offline formal startup verification
 
-Build the committed image and capture its inspected ID, then run the same blocking
-startup gate used by Root Safety:
+Build the committed image and capture its inspected ID. This command returns only
+after the exact revision labels and embedded UI marker pass. Then run the same
+blocking startup gate used by Root Safety:
 
 ```powershell
 $ImageId = python tools/image_provenance.py build --print-image-id

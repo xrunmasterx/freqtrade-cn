@@ -24,7 +24,7 @@ class ImageProvenanceTests(unittest.TestCase):
             f"freqtrade-cn:p0-{'a' * 12}-{'b' * 12}-{'c' * 12}",
         )
 
-    def test_build_uses_committed_context_and_complete_revision_labels(self) -> None:
+    def test_build_uses_committed_context_revision_and_complete_labels(self) -> None:
         completed = subprocess.CompletedProcess([], 0, "docker progress", "private detail")
         with tempfile.TemporaryDirectory() as directory:
             context = Path(directory)
@@ -38,6 +38,7 @@ class ImageProvenanceTests(unittest.TestCase):
         self.assertEqual(command[:3], ["docker", "build", "--tag"])
         self.assertEqual(command[3], reference)
         self.assertEqual(command[-1], str(context))
+        self.assertIn(f"FREQUI_COMMIT_HASH={IDENTITY.frontend}", command)
         for name, value in image_provenance.expected_labels(IDENTITY).items():
             self.assertIn(f"{name}={value}", command)
         self.assertNotIn("shell", run.call_args.kwargs)
@@ -73,6 +74,8 @@ class ImageProvenanceTests(unittest.TestCase):
                 "platform-operator-image",
                 "--build-arg",
                 f"PLATFORM_OPERATOR_ROOT_COMMIT={IDENTITY.root}",
+                "--build-arg",
+                f"FREQUI_COMMIT_HASH={IDENTITY.frontend}",
                 "--label",
                 f"org.freqtrade-cn.revision.root={IDENTITY.root}",
                 "--label",
@@ -142,6 +145,108 @@ class ImageProvenanceTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), f"{image.image_id}\n")
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_embedded_ui_version_uses_isolated_immutable_image(self) -> None:
+        image_id = "sha256:" + "d" * 64
+        completed = subprocess.CompletedProcess(
+            [], 0, image_provenance.expected_ui_version(IDENTITY), ""
+        )
+        with mock.patch.object(
+            image_provenance.subprocess, "run", return_value=completed
+        ) as run:
+            image_provenance.verify_embedded_ui_version(image_id, IDENTITY)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["docker", "run", "--rm"])
+        self.assertIn("--network", command)
+        self.assertEqual(command[command.index("--network") + 1], "none")
+        self.assertIn("--read-only", command)
+        self.assertEqual(command[command.index("--cap-drop") + 1], "ALL")
+        self.assertEqual(
+            command[command.index("--security-opt") + 1], "no-new-privileges"
+        )
+        self.assertEqual(command[command.index("--user") + 1], "1000:1000")
+        self.assertEqual(Path(command[command.index("--cidfile") + 1]).name, "container.cid")
+        self.assertEqual(command[command.index("--entrypoint") + 1], "python")
+        self.assertEqual(command[command.index(image_id) : -2], [image_id])
+        self.assertEqual(command[-2], "-c")
+        self.assertIn(image_provenance.UI_VERSION_PATH, command[-1])
+        self.assertTrue(run.call_args.kwargs["check"])
+        self.assertTrue(run.call_args.kwargs["capture_output"])
+        self.assertTrue(run.call_args.kwargs["text"])
+        self.assertEqual(
+            run.call_args.kwargs["timeout"], image_provenance.UI_VERSION_TIMEOUT_SECONDS
+        )
+
+    def test_embedded_ui_version_rejects_non_exact_output(self) -> None:
+        image_id = "sha256:" + "d" * 64
+        expected = image_provenance.expected_ui_version(IDENTITY)
+        for output in ("", "unknown", "local-frequi-short", expected + "\n", expected + "0"):
+            with self.subTest(output=output):
+                completed = subprocess.CompletedProcess([], 0, output, "")
+                with mock.patch.object(
+                    image_provenance.subprocess, "run", return_value=completed
+                ):
+                    with self.assertRaises(ValueError):
+                        image_provenance.verify_embedded_ui_version(image_id, IDENTITY)
+
+    def test_embedded_ui_version_timeout_removes_captured_container(self) -> None:
+        image_id = "sha256:" + "d" * 64
+        container_id = "e" * 64
+        commands: list[list[str]] = []
+
+        def run(command, **_kwargs):
+            commands.append(command)
+            if command[:2] == ["docker", "run"]:
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                cidfile.write_text(container_id, encoding="ascii")
+                raise subprocess.TimeoutExpired(command, 1)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(image_provenance.subprocess, "run", side_effect=run):
+            with self.assertRaises(ValueError):
+                image_provenance.verify_embedded_ui_version(
+                    image_id, IDENTITY, timeout_seconds=1
+                )
+
+        self.assertEqual(
+            commands[1], ["docker", "container", "rm", "--force", container_id]
+        )
+
+    def test_reviewed_builds_verify_ui_from_the_immutable_image_id(self) -> None:
+        cases = (
+            (
+                "build_and_inspect_image",
+                "build_committed_image",
+                "verify_image_provenance",
+                image_provenance.provenance_tag(IDENTITY),
+            ),
+            (
+                "build_and_inspect_operator_image",
+                "build_committed_operator_image",
+                "verify_operator_image_provenance",
+                image_provenance.operator_provenance_tag(IDENTITY),
+            ),
+        )
+        for entrypoint, builder, label_verifier, tag in cases:
+            with self.subTest(entrypoint=entrypoint):
+                image = image_provenance.InspectedImage(
+                    "sha256:" + "d" * 64,
+                    tag,
+                    image_provenance.expected_labels(IDENTITY),
+                )
+                with (
+                    mock.patch.object(image_provenance, builder, return_value=tag),
+                    mock.patch.object(image_provenance, "inspect_image", return_value=image),
+                    mock.patch.object(image_provenance, label_verifier),
+                    mock.patch.object(
+                        image_provenance, "verify_embedded_ui_version"
+                    ) as verify_ui,
+                ):
+                    result = getattr(image_provenance, entrypoint)(Path("context"), IDENTITY)
+
+                self.assertIs(result, image)
+                verify_ui.assert_called_once_with(image.image_id, IDENTITY)
 
     def test_workflow_keeps_render_artifact_outside_committed_checkout(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/root-safety.yml").read_text(

@@ -47,6 +47,12 @@ First run `python tools/image_provenance.py build-operator --print-image-id` and
 capture its single verified image ID. Only after that command succeeds, create
 the fixed Compose alias and invoke the typed surface:
 
+The reviewed operator build derives the complete frontend revision from the
+committed Root gitlink, injects it into the packaged FreqUI, and checks the exact
+embedded marker from the immutable image ID in addition to the existing
+Root/backend/frontend labels. A raw Compose or Docker build without this wrapper
+remains an ad-hoc image and is not a substitute for the verified ID.
+
 ```text
 docker image tag <verified-image-id> freqtrade-cn-operator:local
 docker compose --profile platform-operator run --rm --no-deps platform-operator runtime-template validate

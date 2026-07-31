@@ -194,7 +194,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
 | Latest completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
-| Active implementation | `plans/2026-08-01-reviewed-image-ui-self-identity.md` | Approved; implementation pending |
+| Active implementation | `plans/2026-08-01-reviewed-image-ui-self-identity.md` | Implemented; exact-image acceptance pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
