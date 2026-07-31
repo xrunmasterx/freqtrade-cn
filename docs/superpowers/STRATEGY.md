@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Backtest Artifact Secret Redaction](plans/2026-07-31-backtest-artifact-secret-redaction.md)
-
-**Active execution plan:**
 [Phase 1 Backtest Strategy Evidence Binding](plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md)
+
+**Active execution plan:** none; choose the next bounded offline evidence gap before
+coding.
 
 ## Product purpose
 
@@ -91,6 +91,18 @@ It does not archive the source rows, bind arbitrary strategy I/O or the complete
 environment, make the result artifact tamper-resistant, qualify Paper execution, or
 predict future profit.
 
+### Gate A.3: Exact primary strategy evidence — accepted
+
+API 2.53 keeps the same authoritative Backtest form and engine while binding the exact
+primary-module source captured for execution and the supported resolved Freqtrade
+parameters into the existing revision receipt and export artifact. Result, history,
+selector, and comparison views report same, different, or unknown independently of
+DataSnapshot identity.
+
+This gate does not create StrategyRelease or prove imported helpers, FreqAI model/data,
+the complete environment, artifact authenticity, retained replay, Paper eligibility, or
+future profit.
+
 ### Gate B: Governed Experiment-to-Paper — not active
 
 After Gate A passes and one explicit next-journey decision is recorded, the smallest
@@ -125,18 +137,19 @@ acceptance.
 - The forward-write Backtest artifact credential-redaction gap is accepted at Root
   `014c0f677` and backend `c8fb9af73`. Historical artifact remediation and credential
   rotation remain separately authorized operations.
+- Gate A.3 Backtest Strategy Evidence is accepted at Root `091a797a3`, backend
+  `d254eed96`, frontend `29097e95b`, and unchanged strategies `dbd5b0b`, with no
+  unresolved Blocker, High, or Medium finding inside its boundary.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Implement the active bounded Backtest Strategy Evidence plan: bind the primary source
-captured for execution and final supported Freqtrade parameters into the existing
-Backtest receipt/artifact, then expose same/different/unknown independently of
-DataSnapshot. This is not StrategyRelease. Environment identity and retained snapshot
-payload/replay remain separate later candidates, and dynamic runtime infrastructure is
-still not implied or active.
+No implementation slice is active automatically. Choose one bounded offline evidence
+gap before coding: retained DataSnapshot payload/replay or Environment Identity. Keep
+dynamic RuntimeInstance, formal Paper Observation, Experiment UI, and platform cutover
+paused until the user explicitly selects that journey.
 
 ### Later
 

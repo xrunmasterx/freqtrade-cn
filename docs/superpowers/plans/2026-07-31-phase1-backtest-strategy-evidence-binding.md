@@ -1,6 +1,6 @@
 # Phase 1 Backtest Strategy Evidence Binding Plan
 
-**Status:** active
+**Status:** completed; exact-SHA accepted
 
 **Branch:** `xrunmasterx/phase1-complete-development`
 
@@ -9,6 +9,9 @@
 
 **Identity decision:**
 [Captured primary source and resolved parameters](../decisions/2026-07-31-backtest-strategy-evidence-boundary.md)
+
+**Acceptance:**
+[Exact-SHA acceptance report](../reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md)
 
 ## 1. User outcome
 
@@ -169,7 +172,7 @@ pnpm exec playwright test e2e/backtest.spec.ts --project=chromium
 pnpm exec playwright test e2e/backtest.spec.ts --project=msedge
 ```
 
-### Pre-commit validation evidence (2026-07-31)
+### Final validation evidence (2026-07-31)
 
 - Backend acceptance suite: `619 passed, 1 deselected, 1 warning`; the deselected
   `test_api_freqaimodels` collection requires the optional `datasieve` dependency absent
@@ -179,13 +182,16 @@ pnpm exec playwright test e2e/backtest.spec.ts --project=msedge
   changed-file ESLint command exits successfully with zero errors; Windows CRLF/Prettier
   warnings remain non-failing and are not bulk-formatted in this bounded change.
 - Fully mocked Backtest browser acceptance: `5 passed` in Chromium and `5 passed` in
-  installed Microsoft Edge. Firefox and WebKit executables are not installed locally.
+  installed Microsoft Edge. The browser revisions required by the installed Playwright
+  package are unavailable locally for its Firefox and WebKit projects.
 - The build retains the existing third-party `@vueuse/core` pure-annotation warning and
   reports the entry chunk just over the configured 700 kB warning threshold. Mocked E2E
   startup retains the existing non-failing `recoverBgJobs` console noise.
 - The independent backend, frontend, and minimality/documentation Gate decisions are
-  PASS. Exact commit SHAs and the acceptance report remain intentionally pending until
-  the submodule and root implementation commits exist.
+  PASS. The acceptance report records exact Root `091a797a339381477f18149e4487b2093f42ce90`,
+  backend `d254eed9642d798aabc7334cc1e70a7af305bf61`, frontend
+  `29097e95beaa00a6b522c7e33a01f5eff54aa5bd`, and unchanged strategies
+  `dbd5b0b21cfbf5ee80588d37458ace2467b7f8a4`.
 
 An independent final Gate Review must inspect exact execute/capture equivalence,
 parameter completeness and precedence, canonical identity, TOCTOU closure, legacy/API
@@ -213,4 +219,4 @@ expansion into StrategyRelease, Environment, Runtime, Paper, or Live scope.
 - [x] Add API 2.53 capability and strict legacy-compatible schemas.
 - [x] Add result/history/selector/comparison UI and localization.
 - [x] Run focused and broader regressions plus mocked browser acceptance.
-- [ ] Complete independent Gate Review and exact-SHA acceptance report.
+- [x] Complete independent Gate Review and exact-SHA acceptance report.

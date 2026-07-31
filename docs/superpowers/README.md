@@ -38,6 +38,14 @@ not an active backlog.
   leakage before further automated strategy iteration. Its
   [acceptance report](reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md)
   records the separately authorized historical-artifact remediation boundary.
+- The bounded
+  [Phase 1 Backtest Strategy Evidence Binding](plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md)
+  is accepted on branch `xrunmasterx/phase1-complete-development` at implementation Root
+  `091a797a3`, backend `d254eed96`, frontend `29097e95b`, and unchanged strategies
+  `dbd5b0b`. Its
+  [exact-SHA acceptance report](reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md)
+  binds the executed primary-module source and supported resolved Freqtrade parameters
+  without adding StrategyRelease, Environment Identity, Runtime, Paper, or Live scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -78,11 +86,13 @@ not an active backlog.
 | Previous acceptance evidence | `reports/2026-07-31-phase1-backtest-revision-receipt-acceptance.md` | Accepted contract-slice receipt |
 | Preceding completed implementation | `plans/2026-07-31-phase1-data-snapshot-binding.md` | Completed; exact-SHA accepted |
 | Preceding acceptance evidence | `reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md` | Accepted contract-slice receipt |
-| Latest completed implementation | `plans/2026-07-31-backtest-artifact-secret-redaction.md` | Completed; exact-SHA accepted |
-| Latest acceptance evidence | `reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md` | Accepted forward-write security receipt |
-| Active implementation | `plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md` | Bind captured primary source and resolved parameters without StrategyRelease |
+| Security prerequisite implementation | `plans/2026-07-31-backtest-artifact-secret-redaction.md` | Completed; exact-SHA accepted |
+| Security prerequisite evidence | `reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md` | Accepted forward-write security receipt |
+| Latest completed implementation | `plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md` | Completed; exact-SHA accepted |
+| Latest acceptance evidence | `reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md` | Accepted strategy-evidence receipt |
+| Active implementation | None | Select one bounded offline evidence gap before coding |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
-| Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted for implementation |
+| Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |
 | Runtime Access decision | `specs/2026-07-30-runtime-access-rebaseline-design.md` | Approved resume design; execution paused |
