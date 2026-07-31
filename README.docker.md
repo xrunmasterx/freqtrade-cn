@@ -58,7 +58,9 @@ python tools/compose_runtime.py up freqtrade
 python tools/compose_runtime.py ps freqtrade
 ```
 
-Open the trading UI at `http://127.0.0.1:8081/trade`.
+Open the Phase 1 live-watch and strategy-review UI at
+`http://127.0.0.1:8081/graph`. Use `http://127.0.0.1:8081/trade` for runtime and
+trade observation.
 
 Build and start Futures independently:
 
@@ -78,7 +80,13 @@ python tools/compose_runtime.py up freqtrade-research
 python tools/compose_runtime.py ps freqtrade-research
 ```
 
-Open the research UI at `http://127.0.0.1:8083/research`.
+Open the authoritative standard Freqtrade Backtest at
+`http://127.0.0.1:8083/backtest`. The same webserver exposes the existing safety
+analysis pages at `http://127.0.0.1:8083/lookahead_analysis` and
+`http://127.0.0.1:8083/recursive_analysis`.
+
+`http://127.0.0.1:8083/research` is retained compatibility behavior. Its
+simplified SMA calculation is not the authoritative standard backtest.
 
 Services are assigned to profiles. To build and start all formal services, start
 each approved service explicitly, then inspect the complete project:
@@ -149,5 +157,5 @@ python tools/compose_runtime.py --profile trading --profile research ps
 - Run mode: `dry_run` for every P0 trading service
 - Main trading UI port: `8081`
 - Futures trading UI port: `8082`
-- Research UI port: `8083`
+- Offline validation/research webserver port: `8083`
 - Container API/UI port: `8080`

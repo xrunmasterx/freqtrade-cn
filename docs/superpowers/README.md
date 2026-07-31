@@ -159,6 +159,11 @@ not an active backlog.
   still-running job. It does not cancel the backend job or change Backtest behavior. Its
   [acceptance report](reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md)
   is the exact-SHA, fake-timer lifecycle evidence authority.
+- The active bounded implementation is
+  [Phase 1 Operator Entrypoint Truth](plans/2026-08-01-phase1-operator-entrypoint-truth.md).
+  It corrects the current Docker quick-start so users reach 8081 `/graph` for watch and
+  8083 `/backtest` for authoritative standard validation, while retaining `/trade` and
+  clearly labeling `/research` as compatibility behavior. It changes no route or service.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -228,7 +233,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-per-pair-live-chart-refresh-truth-acceptance.md` | Accepted frontend state-isolation receipt |
 | Latest completed implementation | `plans/2026-08-01-phase1-backtest-poll-lifecycle.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md` | Accepted frontend lifecycle receipt |
-| Active implementation | None | No bounded implementation is active |
+| Active implementation | `plans/2026-08-01-phase1-operator-entrypoint-truth.md` | Implemented; acceptance Gate pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

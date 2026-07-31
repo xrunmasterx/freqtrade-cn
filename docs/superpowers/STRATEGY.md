@@ -25,7 +25,11 @@ is accepted at Root `b99bba88` and frontend `a084c152`. Its
 [acceptance report](reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md)
 is the frontend lifecycle evidence authority.
 
-**Active bounded implementation:** None. The accepted polling repair does not activate
+**Active bounded implementation:**
+[Phase 1 Operator Entrypoint Truth](plans/2026-08-01-phase1-operator-entrypoint-truth.md)
+is implemented with P0/P1/P2 = 0 documentation design and implementation Gates and
+awaits acceptance. It only aligns the current Docker quick-start with accepted 8081/8083
+routes; it does not activate product,
 backend, strategy, market-data, Runtime, Paper, Live, or AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
@@ -296,16 +300,15 @@ acceptance.
 
 ### Next
 
-No bounded implementation is active. The latest accepted slice closes the demonstrated
-`BacktestingView` polling leak and preserves observation when the user returns to a
-still-running job. It does not redesign background jobs, cancel the server job, or add a
-scheduler.
+The latest accepted slice closes the demonstrated `BacktestingView` polling leak and
+preserves observation when the user returns to a still-running job. It does not redesign
+background jobs, cancel the server job, or add a scheduler.
 
-The next bounded selection should correct the current operator entrypoints before a
-larger functional slice: the root quick-start material must lead users to the accepted
-8081 `/graph` and 8083 `/backtest` journeys, and must not present frozen `/research` as
-the authoritative backtest. Treat that as a documentation/navigation repair unless
-direct route inspection proves a product defect.
+The active implemented slice corrects the current operator entrypoints before a larger
+functional slice. The Docker quick-start must lead users to the accepted 8081 `/graph`
+and 8083 `/backtest` journeys and must not present frozen `/research` as the authoritative
+backtest. Direct route inspection confirms a documentation/navigation defect, so this
+slice does not change product code, routes, services, or ports.
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.
