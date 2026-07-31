@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Backtest Poll Lifecycle](plans/2026-08-01-phase1-backtest-poll-lifecycle.md)
+[Phase 1 Operator Entrypoint Truth](plans/2026-08-01-phase1-operator-entrypoint-truth.md)
 
 **Latest accepted implementation evidence:**
-[Phase 1 Backtest Poll Lifecycle Acceptance](reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md)
+[Phase 1 Operator Entrypoint Truth Acceptance](reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
 
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
@@ -20,17 +20,14 @@
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 **Latest completed bounded implementation:**
-[Phase 1 Backtest Poll Lifecycle](plans/2026-08-01-phase1-backtest-poll-lifecycle.md)
-is accepted at Root `b99bba88` and frontend `a084c152`. Its
-[acceptance report](reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md)
-is the frontend lifecycle evidence authority.
-
-**Active bounded implementation:**
 [Phase 1 Operator Entrypoint Truth](plans/2026-08-01-phase1-operator-entrypoint-truth.md)
-is implemented with P0/P1/P2 = 0 documentation design and implementation Gates and
-awaits acceptance. It only aligns the current Docker quick-start with accepted 8081/8083
-routes; it does not activate product,
-backend, strategy, market-data, Runtime, Paper, Live, or AI-worker scope.
+is accepted at Root `783a412d`; all submodule SHAs are unchanged. Its
+[acceptance report](reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
+is the static route/documentation evidence authority.
+
+**Active bounded implementation:** None. The accepted entrypoint repair changes no
+product, backend, frontend, strategy, market-data, Runtime, Paper, Live, or AI-worker
+scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -300,15 +297,19 @@ acceptance.
 
 ### Next
 
-The latest accepted slice closes the demonstrated `BacktestingView` polling leak and
+The preceding accepted slice closed the demonstrated `BacktestingView` polling leak and
 preserves observation when the user returns to a still-running job. It does not redesign
 background jobs, cancel the server job, or add a scheduler.
 
-The active implemented slice corrects the current operator entrypoints before a larger
-functional slice. The Docker quick-start must lead users to the accepted 8081 `/graph`
-and 8083 `/backtest` journeys and must not present frozen `/research` as the authoritative
-backtest. Direct route inspection confirms a documentation/navigation defect, so this
-slice does not change product code, routes, services, or ports.
+No bounded implementation is active. The latest accepted slice corrects the Docker
+quick-start so users reach 8081 `/graph` and 8083 `/backtest` without presenting frozen
+`/research` as the authoritative backtest. It changes no product code, route, service,
+or port.
+
+The next selection returns to a demonstrated functional evidence boundary. Before
+implementation, compare the remaining chart request/context truth gap with the Backtest
+visualization evidence-drift gap, reproduce the user-visible harm, and choose the smaller
+repair. Do not build a generalized evidence platform or spend the retired holdout.
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.

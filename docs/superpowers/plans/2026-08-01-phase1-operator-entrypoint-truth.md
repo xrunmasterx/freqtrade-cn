@@ -1,10 +1,13 @@
 # Phase 1 Operator Entrypoint Truth
 
-**Status:** Implemented; acceptance Gate pending
+**Status:** Completed; exact-SHA accepted
 
 **Documentation design Gate:** PASS; P0 = 0, P1 = 0, P2 = 0
 
 **Documentation implementation Gate:** PASS; P0 = 0, P1 = 0, P2 = 0
+
+**Acceptance evidence:**
+[Phase 1 Operator Entrypoint Truth Acceptance](../reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
 
 **Scope:** current operator documentation only; no route, frontend, backend, Compose,
 service, port, market-data, strategy, Backtest execution, Runtime, Paper, or Live change
