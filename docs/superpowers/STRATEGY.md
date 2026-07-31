@@ -16,7 +16,8 @@
 **Latest strategy-research evidence:**
 [VolatilitySystem Static-Stop Calibration Rejection](reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
 
-**Active strategy-research plan:** none; the next candidate has not been preregistered
+**Active strategy-research plan:**
+[VolatilitySystem Breakout-Episode Risk Calibration](plans/2026-07-31-volatility-breakout-episode-risk-calibration.md)
 
 ## Product purpose
 
@@ -255,24 +256,26 @@ acceptance.
 
 ### Next
 
-The fixed static-stop study is complete and rejected. Preserve the accepted
-`VolatilitySystem`, do not tune the stop, and keep the untouched
-`2025-07-02` to `2026-07-02` holdout sealed.
+The fixed static-stop study is complete and rejected. Its mechanism has now produced one
+active, preregistered follow-up rather than another stop search:
 
-The next smallest user-facing task is research design, not platform expansion:
-
-1. treat the viewed `2024-07-01` to `2025-07-01` interval as development evidence, not
-   fresh validation;
-2. explain the interaction between persistent entry eligibility, one-position
-   occupancy, stop-triggered re-entry, and the after-fill static-stop rule before
-   proposing another semantic edit;
-3. preregister at most one mechanism-derived candidate and its failure thresholds before
-   any new performance run; do not infer a tighter or wider stop from this rejection;
-4. spend the still-sealed holdout only for an unchanged development survivor, then stop
-   regardless of its result;
-5. add product code only if this repeated workflow exposes a concrete evidence or
+1. keep the current `close_change > atr.shift(1)` eligibility threshold and its short
+   mirror;
+2. arm entry only on a finite-frame false-to-true eligibility edge while preserving
+   persistent opposite-side exit eligibility;
+3. retain the existing half-stake initial allocation, disable position adjustment, and
+   reuse the already frozen `-0.10` risk budget as one bounded lifecycle policy;
+4. test only on the viewed `2024-07-01` to `2025-07-01` development interval first, with
+   exact B/S/C retained-data comparisons and predeclared failure thresholds;
+5. generate strategy output for the still-unrun `2025-07-02` to `2026-07-02` holdout only
+   for an unchanged development survivor, then stop regardless of its result;
+6. add no platform code unless this repeated workflow exposes a concrete evidence or
    usability defect which the existing Freqtrade Backtest and analysis surfaces cannot
    answer.
+
+The directional-latch, cooldown, delayed/two-row pulse, database callback, alternate
+stop, Hyperopt, daemon, and platform-expansion alternatives remain rejected as either
+stateful, tunable, semantically broader, or unsupported by the current user bottleneck.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate

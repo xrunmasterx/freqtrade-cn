@@ -89,7 +89,15 @@ not an active backlog.
   six preregistered performance/risk Gates. Its
   [rejection report](reports/2026-07-31-volatility-static-stop-calibration-rejection.md)
   is the evidence authority. Safety analysis, the sealed holdout, strategy edits,
-  Paper, and Live were not opened; no new strategy-research plan is active.
+  Paper, and Live were not opened by that study; the follow-up below is now active.
+- The active
+  [VolatilitySystem Breakout-Episode Risk Calibration](plans/2026-07-31-volatility-breakout-episode-risk-calibration.md)
+  preregisters exactly one follow-up on the already-viewed development interval. It keeps
+  the existing shifted-ATR eligibility threshold, changes entry eligibility to its
+  finite-frame false-to-true edge, preserves persistent exit eligibility and the existing
+  half-stake initial allocation, disables additional fills, and reuses the frozen `-0.10`
+  risk budget. It adds no platform code and does not open the still-unrun holdout before
+  an unchanged development survivor passes every frozen Gate.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -147,7 +155,7 @@ not an active backlog.
 | Latest Futures dogfood evidence | `reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md` | Accepted workflow receipt; candidate rejected |
 | Latest strategy research | `plans/2026-07-31-volatility-static-stop-calibration.md` | Completed; candidate rejected at calibration |
 | Latest strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened |
-| Active strategy research | None | Next candidate not yet preregistered |
+| Active strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Preregistered; no candidate performance run yet |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
