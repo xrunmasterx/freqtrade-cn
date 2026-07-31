@@ -1,11 +1,19 @@
 # Phase 1 Recursive Analysis Truthfulness Repair
 
-**Status:** Implementation complete; exact-SHA acceptance pending
+**Status:** Completed; exact-SHA accepted
 
 **Product authority:** [Product Strategy and Delivery Policy](../STRATEGY.md)
 
 **Triggering evidence:**
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](../reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
+
+**Completion governance incident:** A preparatory API run, followed by the first
+exact-container acceptance request and UI journey, used `20250101-20250801` and therefore
+inspected final-row indicator evidence inside the previously sealed
+`20250702-20260702` holdout. That window is irreversibly retired as a fresh strategy
+holdout. No signal, trade, performance, Paper, or Live evidence was opened. Formal
+product acceptance was rerun on the development-only `20250101-20250701` domain; the
+acceptance report is the incident and rerun authority.
 
 ## User problem
 
@@ -82,8 +90,9 @@ FreqUI:
 Root documentation:
 
 - keep the completed Breakout-Episode rejection as the latest strategy-research
-  authority and keep the holdout unopened;
-- record this repair as the only active implementation entrypoint;
+  authority, distinguish its then-true unopened-holdout statement from the later
+  acceptance incident, and retire the contaminated holdout from future research;
+- record this repair and its exact-SHA acceptance as completed implementation evidence;
 - retain full-window exact signal parity as a separately preregistered research Gate for
   any future candidate intended for a restartable Runtime, Paper, or Live path, unless a
   separately accepted state-restoration contract proves equivalent decision state across
@@ -147,5 +156,6 @@ or Live.
   restart-stability claim;
 - no Backtest integration, artifact, receipt, database, Experiment, StrategyRelease,
   BotRelease, RuntimeInstance, Paper, Live, scheduler, daemon, or AI loop;
-- no strategy source edit, parameter search, performance rerun, holdout spend, or claim
-  of current or future profit.
+- no strategy source edit, parameter search, performance rerun, authorized holdout
+  spend, or claim of current or future profit. The accidental indicator-only holdout
+  inspection above is recorded as a governance breach, not as research evidence.

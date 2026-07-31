@@ -5,7 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Evidence-Guided Backtest Pair](plans/2026-07-31-phase1-evidence-guided-backtest-pair.md)
+[Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md)
+
+**Latest accepted implementation evidence:**
+[Recursive Analysis Truthfulness Repair Acceptance](reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md)
 
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
@@ -16,11 +19,12 @@
 **Latest strategy-research evidence:**
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
-**Bounded implementation awaiting exact-SHA acceptance:**
-[Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md)
+**Active bounded implementation:** None; the next slice requires a separate user-value
+decision.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
-performance, and its holdout remains unopened.
+performance. Its former `20250702-20260702` holdout was later contaminated by a
+final-row indicator acceptance run and is retired.
 
 ## Product purpose
 
@@ -253,26 +257,25 @@ acceptance.
   [acceptance report](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
   records the exact image, controlled common-warmup pair, Lookahead and Recursive
   results, evidence limits, and the decision not to promote the losing candidate.
+- Recursive Analysis Truthfulness Repair is accepted at Root `bc51d415`, backend
+  `53fb46d0`, frontend `8a26426f`, and unchanged strategies `dec5adb77`. It evaluates
+  every materialized profile at the final indicator row and permanently states the
+  result's indicator-only, one-row evidence boundary. Its
+  [acceptance report](reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md)
+  is the exact-SHA authority; it is not a full-window signal-stability PASS. The report
+  also records and contains the preparatory/acceptance-run holdout breach: the former
+  reserved window is retired, and formal acceptance was rerun on development-only
+  history.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-The Breakout-Episode follow-up is complete and rejected before performance. It exposed
-that the existing Recursive Analysis can look more conclusive than its evidence: it
-compares indicators at only one final row, omits entry/exit signals, stops evaluating
-later profiles after an earlier exact match, and presents an empty sparse result as a
-green general success.
-
-The implemented bounded product slice awaiting exact-SHA acceptance is the
-[Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md):
-
-1. keep the existing route, API, page, form, background job, and Freqtrade authority;
-2. evaluate every materialized startup profile even when an earlier one matches;
-3. replace the broad green success state with neutral, final-candle indicator-only copy;
-4. add focused backend, frontend, locale, and existing-journey regression evidence;
-5. add no signal API, checkbox, persistence, scoring, or promotion machinery.
+No bounded implementation or strategy candidate is active. The next slice must be chosen
+from a concrete user decision or a demonstrated gap in the accepted watch, Backtest,
+analysis, and evidence-review loop; passing this supporting diagnostic does not activate
+a paused platform feature.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without
@@ -288,8 +291,11 @@ search for a failure witness, but each witness must be confirmed by the real str
 it may never sign a full-window PASS unless exact-domain equivalence is proved exhaustively
 or formally. No number of final-candle samples can be accumulated into that PASS.
 
-No new candidate, viewed-window performance rerun, or holdout spend is active while this
-product boundary is being implemented and accepted.
+No new candidate, viewed-window performance rerun, or holdout spend is active. The
+former `20250702-20260702` holdout is retired and must not be used for fresh validation.
+A future candidate needs a separately preregistered window that has not already been
+used for strategy indicator, signal, trade, or metric inspection; no replacement window
+is assigned now.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate
