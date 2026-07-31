@@ -102,8 +102,9 @@ The same formal build injects the complete frontend revision fixed by the commit
 Root gitlink, then verifies both the existing Root/backend/frontend labels and the
 exact `local-frequi-<frontend-sha>` marker from the immutable image ID. Raw
 `docker build` and `docker compose build` remain available for local development;
-without that formal wrapper they report `local-frequi-unknown` and are not reviewed
-images.
+without an explicitly supplied build argument they default to
+`local-frequi-unknown`. Regardless of any manually supplied value, builds outside the
+formal wrapper are not reviewed images.
 Every formal service uses `/freqtrade/state` as its writable userdata directory.
 Trading services load strategies from the read-only
 `/freqtrade/user_data/strategies` mount. Research does not preselect a strategy in

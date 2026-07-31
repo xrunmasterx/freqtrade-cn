@@ -113,7 +113,7 @@ not an active backlog.
   final-row indicators. That window is retired and cannot support future fresh-holdout
   claims; formal acceptance was rerun on `20250101-20250701`. No signal, trade,
   performance, Paper, or Live evidence was opened.
-- The latest completed product slice is
+- The preceding completed product slice is
   [Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md).
   It separates minimum-signal completion from the detected/not-detected bias verdict in
   the existing 8083 API and FreqUI result. The additive contract reports backend-owned
@@ -125,12 +125,23 @@ not an active backlog.
   `dec5adb77` passed independent implementation Gates and exact combined-image API/UI
   acceptance. Its
   [acceptance report](reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
-  is the evidence authority. The image's embedded UI version cannot yet self-report the
-  frontend SHA. Its historical local acceptance combined the Root submodule tree,
-  Buildx-recorded metadata, immutable-image identity, and actual behavior; the Buildx
-  metadata is corroborating audit data, not an independently trusted source binding. It
-  adds no analysis algorithm, data run,
+  is the functional evidence authority. That frozen report records an embedded
+  UI-identity P2; the subsequent packaging slice closes it without changing the
+  historical report. Its local acceptance combined the Root submodule tree,
+  Buildx-recorded metadata, immutable-image identity, and actual behavior. The Buildx
+  metadata remains corroborating audit data, not an independently trusted source
+  binding. It adds no analysis algorithm, data run,
   strategy candidate, receipt, persistence, Runtime, Paper, Live, or AI scope.
+- The latest completed bounded implementation is
+  [Phase 1 Reviewed Image UI Self-Identity](plans/2026-08-01-reviewed-image-ui-self-identity.md).
+  Root `39177df0` and frontend `212c9121` pass the full frontend identity through the
+  existing committed-image wrapper, preserve the exact Root/backend/frontend labels,
+  verify the embedded marker from the immutable image ID, and display the same complete
+  frontend identity once in the packaged UI. Ad-hoc builds remain usable and
+  non-reviewed. Its
+  [acceptance report](reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md)
+  is the exact-SHA and image evidence authority. It adds no strategy, market-data,
+  Backtest, Runtime, Paper, Live, deployment, or AI scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -192,9 +203,11 @@ not an active backlog.
 | Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
 | Preceding completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Preceding acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
-| Latest completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |
-| Latest acceptance evidence | `reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
-| Active implementation | `plans/2026-08-01-reviewed-image-ui-self-identity.md` | Implemented; exact-image acceptance pending |
+| Preceding completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |
+| Preceding acceptance evidence | `reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
+| Latest completed implementation | `plans/2026-08-01-reviewed-image-ui-self-identity.md` | Completed; exact-image accepted |
+| Latest acceptance evidence | `reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md` | Accepted packaging-provenance receipt |
+| Active implementation | None | No bounded implementation is active |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

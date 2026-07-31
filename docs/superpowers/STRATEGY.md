@@ -19,10 +19,14 @@
 **Latest strategy-research evidence:**
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
-**Active bounded implementation:**
+**Latest completed bounded implementation:**
 [Phase 1 Reviewed Image UI Self-Identity](plans/2026-08-01-reviewed-image-ui-self-identity.md)
-is implemented with exact-image acceptance pending. It is limited to reviewed-image
-packaging and does not activate strategy, market-data, Runtime, Paper, Live, or AI scope.
+is accepted at exact implementation SHAs and one retained immutable local image. Its
+[acceptance report](reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md)
+is the evidence authority.
+
+**Active bounded implementation:** None. The completed packaging slice does not activate
+strategy, market-data, Runtime, Paper, Live, or AI scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -276,44 +280,34 @@ acceptance.
   [acceptance report](reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
   records independent Gates, Buildx/SLSA provenance, immutable-image API/UI behavior,
   no market/holdout analysis, and one non-blocking embedded UI-identity P2.
+- Reviewed Image UI Self-Identity is accepted at Root `39177df0`, unchanged backend
+  `8b1ec827`, frontend `212c9121`, and unchanged strategies `dec5adb77`. The formal
+  committed-image helper now injects the exact frontend gitlink identity, verifies the
+  existing Root/backend/frontend labels and the embedded marker from the immutable image
+  ID, and the packaged UI displays that full identity once. Ordinary Docker/Compose
+  builds remain usable, default to visible `local-frequi-unknown` identity without an
+  explicit argument, and remain non-reviewed regardless of caller-supplied values. Its
+  [acceptance report](reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md)
+  closes the preceding report's P2 without claiming signed provenance, strategy
+  evidence, Paper/Live eligibility, or profit.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-No new bounded implementation is active. The completed Lookahead slice repaired a
-demonstrated truthfulness gap in the accepted 8083
-Lookahead Analysis journey. The baseline accepted a job that returned `has_bias=false`
-with zero analyzed signals only because its evidence report manually recorded that the
-result lacked meaningful coverage. Normal FreqUI instead turns that same payload shape
-into a green success. Freqtrade's command-line presentation already treats a result below
-`minimum_trade_amount` as too few trades and a failed test.
+No new bounded implementation is active. The latest packaging slice closes the recorded
+embedded UI-identity P2 using the existing committed-image wrapper and no new product
+surface. The accepted image now binds its visible UI version to the frontend gitlink,
+while ordinary local builds remain honestly marked `unknown`. This improves incident and
+atomic-deployment evidence but does not change the user's chart, Backtest, Lookahead, or
+Recursive Analysis workflow and is not strategy-quality evidence.
 
-The accepted repair adds a backend-owned `completed` or `insufficient_signals` result state plus
-the effective positive minimum and target counts. API validation is aligned with the
-CLI's existing positive-integer invariant so zero signals cannot satisfy a zero minimum.
-Minimum is the validity threshold; target is a work goal/cap and is not promoted into a
-second Gate. FreqUI may show a bounded green detected/not-detected result only after
-explicit completion. Insufficient or legacy responses remain neutral and state that no
-conclusion is available. API 2.56 must deploy the new FreqUI first or update both sides
-atomically; backend-first deployment to an old UI is unsupported because the old UI
-ignores the additive state. The supporting diagnostic still does not prove strategy
-quality, representative coverage, robustness, Paper/Live eligibility, or profit.
-
-This slice changes no analysis algorithm, market data, strategy candidate, threshold
-default, request shape/default, route, persisted evidence, Runtime, Paper, Live,
-optimization, or AI behavior. Positive-integer API validation is its only
-request-behavior change. It does not use the retired holdout or assign a replacement.
-Passing it does not activate a paused platform feature.
-
-The exact-image Gate recorded one non-blocking packaging-provenance gap: the packaged UI
-cannot yet self-report its accepted frontend SHA. The current acceptance instead uses
-the clean Root submodule tree, locally recorded Buildx metadata, immutable image ID, and
-actual browser behavior. The local Buildx VCS/SLSA fields corroborate that historical
-receipt but are not an independently signed or trusted source binding. The proposed
-self-describing image repair remains a separate bounded slice and does not reactivate
-strategy, Runtime, Paper, Live, or AI scope.
+The next implementation selection must return to a demonstrated user decision in the
+accepted Phase 1 workflow. Do not expand the platform, create a second analysis engine,
+or activate dynamic Runtime/Paper merely because packaging provenance is now complete.
+Select the smallest remaining chart, strategy-review, or Backtest problem whose user
+impact can be reproduced and whose acceptance does not require the retired holdout.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without

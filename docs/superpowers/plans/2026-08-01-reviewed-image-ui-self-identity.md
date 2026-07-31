@@ -1,6 +1,6 @@
 # Phase 1 Reviewed Image UI Self-Identity
 
-**Status:** Implemented; exact-image acceptance pending
+**Status:** Completed; exact-image accepted
 
 **Design Gate:** PASS; P0 = 0, P1 = 0
 
@@ -8,6 +8,9 @@
 
 **Triggering evidence:**
 [Lookahead Analysis Sufficiency Truthfulness Repair Acceptance](../reports/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair-acceptance.md)
+
+**Acceptance evidence:**
+[Reviewed Image UI Self-Identity Acceptance](../reports/2026-08-01-reviewed-image-ui-self-identity-acceptance.md)
 
 ## User problem
 
