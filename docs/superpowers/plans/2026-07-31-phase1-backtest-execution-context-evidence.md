@@ -1,6 +1,6 @@
 # Phase 1 Backtest Execution Context Evidence Plan
 
-**Status:** active; implementation complete, exact-SHA acceptance pending
+**Status:** completed; exact-SHA accepted
 
 **Branch:** `xrunmasterx/phase1-complete-development`
 
@@ -9,6 +9,9 @@
 
 **Boundary decision:**
 [Bounded Backtest execution-context evidence](../decisions/2026-07-31-backtest-execution-context-evidence-boundary.md)
+
+**Acceptance:**
+[Phase 1 Backtest Execution Context Evidence](../reports/2026-07-31-phase1-backtest-execution-context-evidence-acceptance.md)
 
 ## 1. User outcome
 
@@ -332,5 +335,5 @@ pnpm exec playwright test e2e/backtest.spec.ts --project=msedge
 - [x] Add failing frontend capability, strict-state, localization, and journey tests.
 - [x] Add the third result/history/selector/comparison axis without a new form control.
 - [x] Run focused and broader verification plus Chromium/Edge journeys.
-- [ ] Pass independent backend, frontend, security/minimality, and documentation Gates.
-- [ ] Commit backend and frontend first, then root pointers/docs and exact-SHA acceptance.
+- [x] Pass independent backend, frontend, security/minimality, and documentation Gates.
+- [x] Commit backend and frontend first, then root pointers/docs and exact-SHA acceptance.

@@ -5,10 +5,9 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Retained DataSnapshot Replay](plans/2026-07-31-phase1-retained-data-snapshot-replay.md)
-
-**Active execution plan:**
 [Phase 1 Backtest Execution Context Evidence](plans/2026-07-31-phase1-backtest-execution-context-evidence.md)
+
+**Active execution plan:** none; a new slice requires explicit first-principles selection
 
 ## Product purpose
 
@@ -103,7 +102,7 @@ This gate does not create StrategyRelease or prove imported helpers, FreqAI mode
 the complete environment, artifact authenticity, retained replay, Paper eligibility, or
 future profit.
 
-### Gate A.4: Backtest execution-context evidence — active, acceptance pending
+### Gate A.4: Backtest execution-context evidence — accepted
 
 API 2.55 keeps the same authoritative Backtest form and engine while sealing three
 bounded fingerprints for the core runtime versions, effective simulation configuration,
@@ -176,23 +175,22 @@ acceptance.
   `9baff126f`, frontend `e2b5e36c`, and unchanged strategies `dbd5b0b`. It reuses the
   same retained standard market rows under the current execution context and does not
   claim the same result, full environment reproduction, Paper eligibility, or profit.
-- Gate A.4 Backtest Execution Context Evidence implementation is complete on
-  `xrunmasterx/phase1-complete-development` at backend `3209d4374`, frontend
-  `17e88f2d6`, and unchanged strategies `dbd5b0b21`; the Root implementation receipt and
-  documentation Gate are pending. Its boundary remains a static-PairList, receipt-local,
-  three-component correlation fingerprint, one engine-owned CLI/API seal, a fail-closed
-  Cross Margin wallet rule, proxy-wallet stake-clamp binding, formula-consumed
-  liquidation-rate binding, allowlisted and resource-bounded Strategy Evidence v2, and an
-  existing Backtest UI extension. It is not Environment Identity or an
-  environment-restoration platform.
+- Gate A.4 Backtest Execution Context Evidence is accepted at Root `290fecbe8`, backend
+  `3209d4374`, frontend `17e88f2d6`, and unchanged strategies `dbd5b0b21`, with no
+  unresolved Blocker, High, or Medium finding. Its boundary remains a static-PairList,
+  receipt-local, three-component correlation fingerprint, one engine-owned CLI/API seal,
+  a fail-closed Cross Margin wallet rule, proxy-wallet stake-clamp binding,
+  formula-consumed liquidation-rate binding, allowlisted and resource-bounded Strategy
+  Evidence v2, and an existing Backtest UI extension. It is not Environment Identity or
+  an environment-restoration platform.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Complete the exact-SHA Root acceptance and documentation Gate for Backtest Execution
-Context Evidence, then reassess revision-bound robustness/holdout evidence. Keep
+No implementation plan is active. Reassess whether a small revision-bound
+robustness/holdout evidence slice is the next real user need before activating it. Keep
 optimization/ranking, continuous AI insight capture, dynamic RuntimeInstance, formal
 Paper Observation, Experiment UI, and platform cutover paused until their prerequisites
 and user journey are separately selected.
