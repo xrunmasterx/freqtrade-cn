@@ -205,10 +205,15 @@ acceptance.
   formula-consumed liquidation-rate binding, allowlisted and resource-bounded Strategy
   Evidence v2, and an existing Backtest UI extension. It is not Environment Identity or
   an environment-restoration platform.
-- Gate A.5 Evidence-Guided Backtest Pair is implemented and independently accepted at
-  frontend `515b00cccb882c3f304bab18d0eb5520f934901e`. Its boundary is frontend-only,
-  exactly two loaded results, two neutral review shapes, and fail-closed identity/window
-  interpretation.
+- Gate A.5 Evidence-Guided Backtest Pair is accepted at Root
+  `bb769e459aa62d653ddc1f40ed4a29d42d024a54`, unchanged backend
+  `3209d437450fd1cc72903d9cc5ae8225bd7f8fb6`, frontend
+  `515b00cccb882c3f304bab18d0eb5520f934901e`, and unchanged strategies
+  `dbd5b0b21cfbf5ee80588d37458ace2467b7f8a4`. Its boundary is frontend-only, exactly
+  two loaded results, two neutral review shapes, and fail-closed identity/window
+  interpretation. The
+  [acceptance report](reports/2026-07-31-phase1-evidence-guided-backtest-pair-acceptance.md)
+  is the exact-SHA evidence authority.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
