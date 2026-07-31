@@ -48,10 +48,13 @@ not an active backlog.
   without adding StrategyRelease, Environment Identity, Runtime, Paper, or Live scope.
 - The bounded
   [Phase 1 Retained DataSnapshot Replay](plans/2026-07-31-phase1-retained-data-snapshot-replay.md)
-  is the active implementation on branch `xrunmasterx/phase1-complete-development`.
-  Its accepted boundary stores canonical rows and admission routes inside each new
-  Backtest ZIP, adds one verified history-row replay action, and explicitly leaves the
-  current exchange/software context unbound. No implementation SHA is accepted yet.
+  is accepted on branch `xrunmasterx/phase1-complete-development` at implementation
+  Root `02563c1d`, backend `9baff126f`, frontend `e2b5e36c`, and unchanged strategies
+  `dbd5b0b`. Its
+  [exact-SHA acceptance report](reports/2026-07-31-phase1-retained-data-snapshot-replay-acceptance.md)
+  is the evidence authority. It stores canonical rows and admission routes inside each
+  opted-in Backtest ZIP, adds one verified history-row replay action, and explicitly
+  leaves the current exchange/software context unbound.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -94,11 +97,13 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-07-31-phase1-data-snapshot-binding-acceptance.md` | Accepted contract-slice receipt |
 | Security prerequisite implementation | `plans/2026-07-31-backtest-artifact-secret-redaction.md` | Completed; exact-SHA accepted |
 | Security prerequisite evidence | `reports/2026-07-31-backtest-artifact-secret-redaction-acceptance.md` | Accepted forward-write security receipt |
-| Latest completed implementation | `plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md` | Completed; exact-SHA accepted |
-| Latest acceptance evidence | `reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md` | Accepted strategy-evidence receipt |
-| Active implementation | `plans/2026-07-31-phase1-retained-data-snapshot-replay.md` | Active; not yet accepted |
+| Preceding completed implementation | `plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md` | Completed; exact-SHA accepted |
+| Preceding acceptance evidence | `reports/2026-07-31-phase1-backtest-strategy-evidence-binding-acceptance.md` | Accepted strategy-evidence receipt |
+| Latest completed implementation | `plans/2026-07-31-phase1-retained-data-snapshot-replay.md` | Completed; exact-SHA accepted |
+| Latest acceptance evidence | `reports/2026-07-31-phase1-retained-data-snapshot-replay-acceptance.md` | Accepted retained-data replay receipt |
+| Active implementation | None | No next slice activated by acceptance |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
-| Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted for implementation |
+| Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
 | Chart source semantics | `../chart-data-source-rules.md` | Standing contract |
 | Runtime Registry coordination | `plans/2026-07-12-runtime-registry-v2-master.md` | Paused target sequence |

@@ -5,10 +5,9 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Backtest Strategy Evidence Binding](plans/2026-07-31-phase1-backtest-strategy-evidence-binding.md)
-
-**Active execution plan:**
 [Phase 1 Retained DataSnapshot Replay](plans/2026-07-31-phase1-retained-data-snapshot-replay.md)
+
+**Active execution plan:** none; exact-SHA acceptance does not activate the next slice
 
 ## Product purpose
 
@@ -140,22 +139,25 @@ acceptance.
 - Gate A.3 Backtest Strategy Evidence is accepted at Root `091a797a3`, backend
   `d254eed96`, frontend `29097e95b`, and unchanged strategies `dbd5b0b`, with no
   unresolved Blocker, High, or Medium finding inside its boundary.
+- Result-local Retained DataSnapshot Replay is accepted at Root `02563c1d`, backend
+  `9baff126f`, frontend `e2b5e36c`, and unchanged strategies `dbd5b0b`. It reuses the
+  same retained standard market rows under the current execution context and does not
+  claim the same result, full environment reproduction, Paper eligibility, or profit.
 - Preserve Phase 2D Tasks 1-4 as reusable, unpublished backend assets.
 - Keep Phase 2D Tasks 5-8, Phase 2E, Experiment UI, dynamic Runtime, Paper Observation,
   and new Research scope paused.
 
 ### Next
 
-Implement the bounded result-local Retained DataSnapshot Replay slice. It closes the
-existing authoritative Backtest evidence loop without a CAS, database, generic snapshot
-product, second engine, or environment restoration. Replay promises the same retained
-standard market data under the current execution context, not the same result.
+Reassess and explicitly select a small Backtest Environment Evidence slice; no
+implementation plan is active yet. Its first-principles purpose would be to explain
+which current execution inputs can still change a replayed result, not to build a full
+container/SBOM or environment-restoration platform.
 
-After exact-SHA acceptance, reassess a small Backtest Environment Evidence slice and then
-revision-bound robustness/holdout evidence. Keep optimization/ranking, continuous AI
-insight capture, dynamic RuntimeInstance, formal Paper Observation, Experiment UI, and
-platform cutover paused until their prerequisites and user journey are separately
-selected.
+After that decision, reassess revision-bound robustness/holdout evidence. Keep
+optimization/ranking, continuous AI insight capture, dynamic RuntimeInstance, formal
+Paper Observation, Experiment UI, and platform cutover paused until their prerequisites
+and user journey are separately selected.
 
 ### Later
 

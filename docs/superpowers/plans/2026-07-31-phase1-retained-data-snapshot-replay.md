@@ -1,6 +1,6 @@
 # Phase 1 Retained DataSnapshot Replay Plan
 
-**Status:** active; implementation not yet accepted
+**Status:** completed; exact-SHA accepted
 
 **Branch:** `xrunmasterx/phase1-complete-development`
 
@@ -9,6 +9,14 @@
 
 **Boundary decision:**
 [Result-local retained DataSnapshot replay](../decisions/2026-07-31-retained-data-snapshot-replay-boundary.md)
+
+**Acceptance:**
+[Phase 1 Retained DataSnapshot Replay](../reports/2026-07-31-phase1-retained-data-snapshot-replay-acceptance.md)
+
+**Accepted implementation:** Root `02563c1d2d40e9dea62788ecfb8e5264d031fe1d`,
+backend `9baff126f77d952811ebaba187bb7008c44f8dab`, frontend
+`e2b5e36ce29d0a30b49266c9c4222345dff4b896`, and unchanged strategies
+`dbd5b0b21cfbf5ee80588d37458ace2467b7f8a4`.
 
 ## 1. User outcome
 
@@ -284,10 +292,12 @@ The final uncommitted-tree run on 2026-07-31 produced:
 - mocked browsers: Chromium 6/6 and Edge 6/6 passed. The existing mocked background-job
   response still emits `recoverBgJobs` console noise and is not a replay-path failure.
 
-An independent final Gate Review must inspect identity preservation, route completeness,
-zero OHLCV fallback, archive/member safety, resource bounds, publication ordering,
-legacy compatibility, privacy, UI claims, and accidental expansion into environment,
-exchange-context, StrategyRelease, Runtime, Paper, or Live scope.
+Independent backend, frontend, and minimality/documentation Gate Reviews inspected
+identity preservation, route completeness, zero OHLCV fallback, archive/member safety,
+resource bounds, publication ordering, legacy compatibility, privacy, UI claims, and
+accidental expansion into environment, exchange-context, StrategyRelease, Runtime,
+Paper, or Live scope. All final reviews passed with no unresolved Blocker, High, or
+Medium finding; the acceptance report records their task evidence.
 
 ## 9. Implementation checklist
 
@@ -298,7 +308,7 @@ exchange-context, StrategyRelease, Runtime, Paper, or Live scope.
 - [x] Route Backtesting/DataProvider standard OHLCV exclusively through verified replay.
 - [x] Add API 2.54 admission/history compatibility and the minimal FreqUI history action.
 - [x] Run focused and broader regressions plus the 1,000,000-row performance gate.
-- [ ] Complete independent Gate Review, submodule/root commits, and exact-SHA acceptance.
+- [x] Complete independent Gate Review, submodule/root commits, and exact-SHA acceptance.
 
 ## 10. Explicit non-goals
 
