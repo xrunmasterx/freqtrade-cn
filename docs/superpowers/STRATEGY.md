@@ -21,7 +21,7 @@
 
 **Active bounded implementation:**
 [Phase 1 Lookahead Analysis Sufficiency Truthfulness Repair](plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md)
-— design approved; implementation not started.
+— implemented; exact-image acceptance pending.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a

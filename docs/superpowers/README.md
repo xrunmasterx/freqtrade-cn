@@ -120,9 +120,11 @@ not an active backlog.
   effective minimum and target counts; insufficient and legacy responses remain neutral
   instead of rendering a false-green success. API thresholds become positive integers,
   matching the existing CLI invariant. API 2.56 must ship frontend-first or atomically
-  with its matching FreqUI because an old UI cannot interpret the additive state. Design
-  is approved and implementation has not started. It adds no analysis algorithm, data
-  run, strategy candidate, receipt, persistence, Runtime, Paper, Live, or AI scope.
+  with its matching FreqUI because an old UI cannot interpret the additive state.
+  Backend `8b1ec827` and frontend `a0a4502a` are implemented and passed independent
+  implementation Gates; exact combined-image acceptance is pending. It adds no analysis
+  algorithm, data run, strategy candidate, receipt, persistence, Runtime, Paper, Live,
+  or AI scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -184,7 +186,7 @@ not an active backlog.
 | Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
 | Latest completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
-| Active implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Design approved; implementation not started |
+| Active implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Implemented; exact-image acceptance pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
