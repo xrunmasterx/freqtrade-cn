@@ -6,10 +6,12 @@ after independent statistical/product and implementation Gates returned
 admission, and exhaustive eight-shard real-strategy restart matrix are frozen outside
 tracked paths. All 8,760 development targets, 43,800 records, and 35,040 comparisons
 passed with zero mismatch. No Backtest, performance metric, strategy edit, or result has
-been opened. The commit containing this update seals the
+been opened. One controller invocation under the superseded receipt failed closed during
+pre-attempt restart-evidence verification and created no attempt directory, spent lease,
+network, container, B output, or result. The commit containing this update reseals the
 [credential-free research receipt](../receipts/2026-08-01-volatility-bounded-true-range/README.md),
 its independently re-Gated one-shot controller/validator, and canonical runtime receipt
-SHA-256 `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`.
+SHA-256 `7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`.
 Development performance remains blocked until this package is committed and the worktree
 and Git index are independently verified clean and byte-exact. Runtime, Paper, and Live
 remain prohibited.
@@ -359,8 +361,18 @@ records the completed admission and matrix facts, the independent controller/val
 re-Gate, the exact 20 non-executable durable byte copies, the exact-13 runtime binding,
 and the evidence deliberately left outside Git. Its canonical runtime receipt is 1,509
 bytes with SHA-256
-`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`.
+`7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`.
 This remains pre-performance evidence and does not classify C.
+
+The superseded receipt
+`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`
+expected only the four raw-data restart rehash keys, while the frozen restart producer
+correctly emitted eight keys that also bind both baselines, candidate strategy, and test
+identity. The first controller invocation stopped at that comparison before creating any
+attempt resource or running B. The smallest pre-spend repair validates the exact eight-key
+map; it does not change the candidate, baseline, data, image, configuration, validator,
+shared contract, or 13-input runtime boundary. This is a reseal, not a byte-identical
+retry.
 
 Any parity miss rejects C immediately. Do not lengthen warmup, round a threshold, add a
 tolerance, or delay the pulse after seeing a witness. Compare exact booleans and validity

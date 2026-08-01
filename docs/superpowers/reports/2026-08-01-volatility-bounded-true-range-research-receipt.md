@@ -1,7 +1,8 @@
 # VolatilitySystem Bounded True-Range Research Receipt
 
-**Status:** sealed by the commit containing this report; development performance remains
-unopened until that commit and a clean worktree are independently verified
+**Status:** resealed by the commit containing this report after a pre-attempt controller
+compatibility repair; development performance remains unopened until that commit and a
+clean worktree are independently verified
 
 **Decision date:** 2026-08-01
 
@@ -48,7 +49,7 @@ The semantic protocol was committed before candidate performance at Root
 | Image tag observation | `freqtrade-cn:p0-788d2256cc77-382320523928-820bcc81d866` |
 | Platform | `linux/amd64` |
 | Portable image identity | 4,764 bytes; SHA-256 `69bcc0b555a4dbc530ec94928b846e8348463b4d1b54eef6777279783a513982` |
-| Canonical runtime receipt | 1,509 bytes; SHA-256 `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056` |
+| Canonical runtime receipt | 1,509 bytes; SHA-256 `7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348` |
 
 The image identity records a local immutable Engine image record, source/package/UI and
 entrypoint probes, and a clean four-repository source boundary. It does not claim registry
@@ -121,12 +122,41 @@ before parsing the receipt and then binds all 13 inputs below.
 | `b_strategy_mirror` | 6,618 | `fed33eceed8bec65f5c47d1727aa4a18b70f15d064b20000eb653622bb16fe85` |
 | `c_strategy` | 14,447 | `41e9aad2be1dd262bbc715cefa414c23293d4abea66e17a2cef3ac8559db3923` |
 | `validator` | 92,592 | `540c04d25fbd6aedd64c5036607f06ced66c7922fe75618d0b5e2915a7d1f72c` |
-| `controller` | 63,152 | `09f40adabf89facdf162afdd1294d776b77a158dc0a5d8fc233d6e0687bca960` |
+| `controller` | 64,085 | `03fd6ef62155a977c9a3ccf493f3e05c97c07894ce24a9e0c9ce1e00d3b49012` |
 | `backend_source_manifest` | 62,850 | `89fbada1b25a3cc707e34103642c05557bb8d56d3170e4c139bf794a3c2a773d` |
 
 The controller also requires the receipt-bound `controller` bytes to equal the code that
 is actually executing. Recomputing an alternate controller, its input binding, and the
 entire receipt therefore cannot replace this frozen host authority.
+
+## Pre-spend controller compatibility repair
+
+The first controller invocation used receipt
+`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`
+and stopped inside pre-attempt restart-evidence verification with `restart rehash set
+mismatch`. The frozen restart receipt contained the correct eight-key identity set:
+`baseline_a`, `baseline_b`, four `raw_*` inputs, `strategy`, and `test`; the old consumer
+still required only the four raw keys.
+
+Read-only post-failure checks found no attempt directory, spent lease, matching Docker
+network or container, B output, or performance result. No Backtest process was started
+and the first-visible-output spend boundary was not crossed. The failed invocation is
+not a performance attempt and does not authorize a semantic retry.
+
+The smallest repair validates the exact eight-key set: raw keys against admission,
+baseline keys against both accepted B bindings, strategy against frozen C, and the test
+rehash against the restart receipt's global test identity. Focused RED tests first failed
+on the old four-key check, then the repaired contract/controller suite passed 36 tests
+plus 101 subtests; the validator suite passed 52 tests and Ruff passed. The repaired
+controller is 64,085 bytes at SHA-256
+`03fd6ef62155a977c9a3ccf493f3e05c97c07894ce24a9e0c9ce1e00d3b49012`;
+its tests are 44,198 bytes at SHA-256
+`969aad46b6259bc08a095ffbdb03bcde8d47c075516eacb9c4e2e9cd01ae0d3f`.
+
+This reseal changes no candidate or baseline strategy byte, data hash, configuration,
+image, validator, shared contract, or logical input. The receipt still binds exactly 13
+inputs. A later execution must use a fresh attempt identity under the reseal commit; it
+must not present itself as a byte-identical retry of the failed invocation.
 
 ## Execution and validation boundary
 
@@ -160,7 +190,7 @@ reconstructed from B's native replay rows through the pinned engine loader,
 `combine_funding_and_mark(..., None)`, inclusive cumulative-amount intervals,
 `calculate_funding_fees`, and `FtPrecise`.
 
-## Independent repair and re-Gate
+## Initial independent repair and re-Gate
 
 The first cross-integration Gate returned `P0=0, P1=4, P2=1`. Before this receipt was
 created, focused RED tests exposed and the smallest implementation changes closed:

@@ -246,6 +246,9 @@ class Fixture:
                 "raw_size": len(payload),
                 "relative_path": relative,
             }
+        baseline_source = b"baseline\n"
+        candidate_source = b"candidate\n"
+        restart_test_sha256 = sha256(b"frozen restart test source\n")
         admission = {
             "command": "admit",
             "inputs": self.data,
@@ -260,12 +263,21 @@ class Fixture:
             "resolver_calls": 43800,
             "shard_count": 8,
             "summary_sha256": "b" * 64,
-            "global_identity": {"admission_sha256": "a" * 64},
+            "global_identity": {
+                "admission_sha256": "a" * 64,
+                "baseline_sha256": sha256(baseline_source),
+                "candidate_sha256": sha256(candidate_source),
+                "test_sha256": restart_test_sha256,
+            },
             "end_rehashes": {
+                "baseline_a": sha256(baseline_source),
+                "baseline_b": sha256(baseline_source),
                 "raw_funding": self.data["funding"]["raw_sha256"],
                 "raw_futures": self.data["futures"]["raw_sha256"],
                 "raw_leverage": self.data["leverage"]["raw_sha256"],
                 "raw_mark": self.data["mark"]["raw_sha256"],
+                "strategy": sha256(candidate_source),
+                "test": restart_test_sha256,
             },
         }
         image = {
@@ -285,9 +297,9 @@ class Fixture:
                     "role": "C",
                 }
             ),
-            "b_strategy": b"baseline\n",
-            "b_strategy_mirror": b"baseline\n",
-            "c_strategy": b"candidate\n",
+            "b_strategy": baseline_source,
+            "b_strategy_mirror": baseline_source,
+            "c_strategy": candidate_source,
             "validator": b"validator\n",
             "controller": Path(controller.__file__).read_bytes(),
             "backend_source_manifest": b"backend source evidence\n",
@@ -455,6 +467,108 @@ class HostControllerTests(unittest.TestCase):
         for name, expected in self.fx.data.items():
             destination = self.fx.host.role_paths["B"].data / str(expected["relative_path"])
             self.assertEqual(expected["raw_sha256"], sha256(destination.read_bytes()), name)
+
+    def test_restart_rehashes_bind_real_eight_key_identity(self):
+        self.fx.host._inputs = {
+            item.name: item for item in self.fx.config.inputs
+        }
+        admission_raw = self.fx.files["admission"].read_bytes()
+        restart = json.loads(self.fx.files["restart"].read_bytes())
+        self.assertEqual(
+            self.fx.data,
+            self.fx.host._verify_evidence(admission_raw, canonical(restart)),
+        )
+
+        for mutation in ("missing", "extra"):
+            with self.subTest(mutation=mutation):
+                value = copy.deepcopy(restart)
+                if mutation == "missing":
+                    value["end_rehashes"].pop("strategy")
+                else:
+                    value["end_rehashes"]["unexpected"] = "0" * 64
+                with self.assertRaisesRegex(controller.ControllerError, "rehash set"):
+                    self.fx.host._verify_evidence(admission_raw, canonical(value))
+
+        for key in (
+            "baseline_a",
+            "baseline_b",
+            "raw_funding",
+            "raw_futures",
+            "raw_leverage",
+            "raw_mark",
+            "strategy",
+        ):
+            with self.subTest(mismatch=key):
+                value = copy.deepcopy(restart)
+                value["end_rehashes"][key] = "0" * 64
+                with self.assertRaisesRegex(controller.ControllerError, "rehash mismatch"):
+                    self.fx.host._verify_evidence(admission_raw, canonical(value))
+
+        for key in ("baseline_sha256", "candidate_sha256"):
+            with self.subTest(global_identity_mismatch=key):
+                value = copy.deepcopy(restart)
+                value["global_identity"][key] = "0" * 64
+                with self.assertRaisesRegex(controller.ControllerError, "source identity"):
+                    self.fx.host._verify_evidence(admission_raw, canonical(value))
+
+        malformed = copy.deepcopy(restart)
+        malformed["end_rehashes"]["test"] = "not-a-sha256"
+        with self.assertRaisesRegex(controller.ControllerError, "invalid SHA-256"):
+            self.fx.host._verify_evidence(admission_raw, canonical(malformed))
+
+        inconsistent = copy.deepcopy(restart)
+        inconsistent["end_rehashes"]["test"] = "0" * 64
+        with self.assertRaisesRegex(controller.ControllerError, "rehash mismatch"):
+            self.fx.host._verify_evidence(admission_raw, canonical(inconsistent))
+
+        malformed_global = copy.deepcopy(restart)
+        malformed_global["global_identity"]["test_sha256"] = "not-a-sha256"
+        with self.assertRaisesRegex(controller.ControllerError, "invalid SHA-256"):
+            self.fx.host._verify_evidence(admission_raw, canonical(malformed_global))
+
+    def test_restart_rehash_failure_is_pre_attempt_and_pre_lease(self):
+        restart = json.loads(self.fx.files["restart"].read_bytes())
+        restart["end_rehashes"].pop("strategy")
+        restart_raw = canonical(restart)
+        self.fx.files["restart"].write_bytes(restart_raw)
+
+        receipt = json.loads(self.fx.files["receipt"].read_bytes())
+        receipt["files"]["restart"] = {
+            "bytes": len(restart_raw),
+            "sha256": sha256(restart_raw),
+        }
+        receipt_raw = canonical(receipt)
+        self.fx.files["receipt"].write_bytes(receipt_raw)
+        bindings = tuple(
+            controller.InputFile(
+                item.name,
+                item.path,
+                len(item.path.read_bytes()),
+                sha256(item.path.read_bytes()),
+            )
+            for item in self.fx.config.inputs
+        )
+        changed = replace(
+            self.fx.config,
+            receipt=controller.InputFile(
+                "receipt",
+                self.fx.files["receipt"],
+                len(receipt_raw),
+                sha256(receipt_raw),
+            ),
+            expected_receipt_sha256=sha256(receipt_raw),
+            inputs=bindings,
+        )
+        host = controller.HostController(
+            changed,
+            runner=self.fx.runner,
+            contract=self.fx.contract,
+        )
+        with self.assertRaisesRegex(controller.ControllerError, "rehash set"):
+            host.preflight()
+        self.assertFalse(host.attempt_root.exists())
+        self.assertFalse(self.fx.spent_lease.exists())
+        self.assertEqual([], self.fx.runner.calls)
 
     def test_preflight_is_create_once_and_second_run_refuses_spent_experiment(self):
         self.fx.host.preflight()

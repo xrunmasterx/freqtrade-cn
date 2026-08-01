@@ -729,13 +729,30 @@ class HostController:
         global_identity = restart.get("global_identity")
         if not isinstance(global_identity, dict) or global_identity.get("admission_sha256") != admission.get("summary_sha256"):
             raise ControllerError("restart admission binding mismatch")
+        baseline_sha256 = _validate_hash(global_identity.get("baseline_sha256"))
+        candidate_sha256 = _validate_hash(global_identity.get("candidate_sha256"))
+        test_sha256 = _validate_hash(global_identity.get("test_sha256"))
+        if (
+            baseline_sha256 != self._inputs["b_strategy"].sha256
+            or baseline_sha256 != self._inputs["b_strategy_mirror"].sha256
+            or candidate_sha256 != self._inputs["c_strategy"].sha256
+        ):
+            raise ControllerError("restart source identity mismatch")
         rehashes = restart.get("end_rehashes")
-        if not isinstance(rehashes, dict) or set(rehashes) != {
-            "raw_funding", "raw_futures", "raw_leverage", "raw_mark"
-        }:
+        expected_rehashes = {
+            "baseline_a": baseline_sha256,
+            "baseline_b": baseline_sha256,
+            "raw_funding": inputs["funding"]["raw_sha256"],
+            "raw_futures": inputs["futures"]["raw_sha256"],
+            "raw_leverage": inputs["leverage"]["raw_sha256"],
+            "raw_mark": inputs["mark"]["raw_sha256"],
+            "strategy": candidate_sha256,
+            "test": test_sha256,
+        }
+        if not isinstance(rehashes, dict) or set(rehashes) != set(expected_rehashes):
             raise ControllerError("restart rehash set mismatch")
-        for name in DATA_FILES:
-            if rehashes[f"raw_{name}"] != inputs[name]["raw_sha256"]:
+        for name, expected in expected_rehashes.items():
+            if _validate_hash(rehashes[name]) != expected:
                 raise ControllerError("restart rehash mismatch")
         return inputs
 

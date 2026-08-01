@@ -107,10 +107,15 @@ not an active backlog.
   rules before performance. The exact four local OKX inputs passed a credential-free
   admission scan, and the frozen real-strategy restart matrix covered all 8,760 development
   targets, 43,800 fresh-strategy records, and 35,040 comparisons across eight shards with
-  zero mismatch. The commit containing this update seals the
+  zero mismatch. The first controller invocation against superseded receipt
+  `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`
+  failed closed while comparing the restart producer's eight identity keys with the
+  controller's obsolete four-key expectation. It created no attempt directory, spent
+  lease, network, container, B output, or performance result, so it did not spend the
+  development attempt. The commit containing this update reseals the
   [credential-free research receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md)
   and its 1,509-byte canonical runtime receipt at SHA-256
-  `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`;
+  `7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`;
   the [receipt report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md)
   is the pre-performance evidence authority. These are input-integrity,
   deterministic-mechanics, and reproducibility checks only: no Backtest, performance

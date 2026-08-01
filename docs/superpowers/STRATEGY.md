@@ -377,10 +377,14 @@ no viewed-window performance run or prospective spend has started. Its temporary
 deterministic tests, exact local data admission, and exhaustive real-strategy restart matrix
 are frozen; the development matrix passed all 8,760 targets and 35,040 comparisons with zero
 mismatch. This is deterministic-mechanics evidence, not Backtest or performance evidence.
-The commit containing this update seals the
+The first controller invocation under superseded receipt
+`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`
+failed closed on an obsolete four-key versus real eight-key restart-evidence contract,
+before an attempt directory, spent lease, container, B output, or result existed. It did
+not spend the development attempt. The commit containing this update reseals the
 [credential-free, content-addressed receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md),
 its independently supplied runtime-receipt SHA-256
-`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`,
+`7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`,
 and the [pre-performance evidence report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md).
 No Backtest or result has been opened yet. The former `20250702-20260702` holdout is retired
 and must not be used for fresh validation. The only replacement interval is

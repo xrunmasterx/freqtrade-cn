@@ -1,6 +1,7 @@
 # VolatilitySystem Bounded True-Range Research Receipt
 
-**Status:** sealed, credential-free, non-executable pre-performance evidence
+**Status:** resealed after a pre-attempt compatibility repair; credential-free,
+non-executable pre-performance evidence
 
 This directory preserves the exact temporary source and deterministic tool/test bytes
 required by the
@@ -9,7 +10,7 @@ It does not install a strategy, expose an import path, create a BotRelease, or a
 Runtime, Paper, Live, Hyperopt, Lookahead, Recursive, or any second performance run.
 
 The canonical [runtime receipt](runtime-receipt.json) is 1,509 bytes with SHA-256
-`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`.
+`7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`.
 Its independent caller-supplied hash is the authority checked before the one-shot
 controller parses the receipt. It binds exactly 13 logical inputs and immutable image
 `sha256:fb7bc20017bae79af1f7533c8b2018098bb627306d9c2286fb9b1501551fe03c`.
@@ -25,6 +26,21 @@ therefore host-specific, not portable source distributions. They remain here bec
 redacting or parameterizing them after verification would create different, unverified
 bytes; the active runtime controller does not derive its input paths from those constants.
 
+## Pre-spend compatibility reseal
+
+The first controller invocation authenticated superseded runtime receipt
+`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`
+and then failed closed during restart-evidence verification. The old controller expected
+only four `raw_*` rehash keys, while the frozen restart producer correctly emitted eight
+keys: both baselines, four raw inputs, candidate strategy, and test identity.
+
+Post-failure verification found no attempt directory, spent lease, matching Docker
+network or container, B output, or performance result. The output/spend boundary was
+never crossed. This is therefore a pre-spend repair and reseal, not a byte-identical
+retry. The repaired controller validates the exact eight-key map against the already
+admitted identities. Candidate, baseline, data, image, configuration, validator, shared
+contract, and the exact 13 logical runtime inputs are unchanged.
+
 ## Durable byte inventory
 
 | Stored evidence | Bytes | SHA-256 | Meaning |
@@ -36,8 +52,8 @@ bytes; the active runtime controller does not derive its input paths from those 
 | `bytes/test_restart_matrix.py.txt` | 76,962 | `6c34ef349338b42f5913127142312ed64339c9d3c8d2f4f9d6d69e2b056fad31` | Admission/restart tests |
 | `bytes/contract.py.txt` | 15,035 | `c05ef3a3987eec55994b9a7d007da1e183ac2213f4ae58416032eb1afc8d8790` | Shared B/C request contract |
 | `bytes/test_contract.py.txt` | 20,021 | `6684da1b4befa1df8119841973bdd16780e1a5f563208a83f3b2865d36f8d1a9` | Shared-contract tests |
-| `bytes/controller.py.txt` | 63,152 | `09f40adabf89facdf162afdd1294d776b77a158dc0a5d8fc233d6e0687bca960` | One-shot host controller |
-| `bytes/test_controller.py.txt` | 39,283 | `e1406cbcb664ab5f90a14d816bd694a667fd94bf29ef4887d5810a3f94e13f09` | Controller tests |
+| `bytes/controller.py.txt` | 64,085 | `03fd6ef62155a977c9a3ccf493f3e05c97c07894ce24a9e0c9ce1e00d3b49012` | One-shot host controller |
+| `bytes/test_controller.py.txt` | 44,198 | `969aad46b6259bc08a095ffbdb03bcde8d47c075516eacb9c4e2e9cd01ae0d3f` | Controller tests |
 | `bytes/validator.py.txt` | 92,592 | `540c04d25fbd6aedd64c5036607f06ced66c7922fe75618d0b5e2915a7d1f72c` | Fail-closed native-artifact validator |
 | `bytes/test_validator.py.txt` | 53,799 | `ebf52376b175885636e1f4fe9ef0b1673a7ea1629f57bb85f497cb0753889609` | Validator tests |
 | `bytes/generate_identity.py.txt` | 38,736 | `0ae68b3b98a5fa55847dcea7893d0337ff3f022aca8b7fa4ae302ce74f181023` | Immutable-image identity generator |
