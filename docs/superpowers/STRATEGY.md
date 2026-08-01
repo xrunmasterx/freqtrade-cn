@@ -5,10 +5,10 @@
 **Current status authority:** [README.md](README.md)
 
 **Latest completed execution plan:**
-[Phase 1 Backtest Chart Source Disclosure](plans/2026-08-01-phase1-backtest-chart-source-disclosure.md)
+[Phase 1 Backtest Effective Window Binding](plans/2026-08-01-phase1-backtest-effective-window-binding.md)
 
 **Latest accepted implementation evidence:**
-[Phase 1 Backtest Chart Source Disclosure Acceptance](reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md)
+[Phase 1 Backtest Effective Window Binding Acceptance](reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md)
 
 **Latest accepted dogfood:**
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
@@ -20,37 +20,19 @@
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
 **Latest completed bounded implementation:**
-[Phase 1 Backtest Chart Source Disclosure](plans/2026-08-01-phase1-backtest-chart-source-disclosure.md).
-It is accepted at Root `8daa1625`, backend `38232052`, and frontend `410018a1`; the
-strategy submodule is unchanged. Its
-[acceptance report](reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md)
-is the deterministic Backtest-chart source/context evidence authority. It permanently
-discloses that selected-result Trades are overlaid on current
-`/pair_history` data and, on API 2.57+, removes form-state drift by making the selected
-result the sole authority for its six weak context fields: strategy, timeframe, timerange,
-FreqAI model, trading mode, and margin mode. Pair remains user-selected, columns remain selected by
-Plot Config, and exchange remains Webserver-owned. The existing `freqaimodel` field has a
-minimal three-state presence contract so a result without FreqAI cannot inherit the
-Webserver's current model; this changes only a per-request deep copy and adds no schema
-field or route. API 2.57 advertises the explicit no-model meaning. The Backtest chart
-forces the existing POST Pair-History transport on that API even when the global
-reduced-call setting is off, because GET cannot apply result-owned trading and margin
-modes. Updated FreqUI fails
-closed with an upgrade message when a no-model result is viewed through an older backend,
-while a non-empty result model retains legacy chart compatibility without promising the
-complete six-field contract; the packaged local FreqUI/backend pair must be updated
-together. Merely unverified exact identity retains Trade markers with the
-warning; an explicitly detected strategy or timeframe mismatch remains fail-closed. It
-adds no market-data, strategy, Backtest execution, result snapshot, Runtime, Paper, Live,
-or AI-worker scope.
-
-**Active bounded implementation:**
 [Phase 1 Backtest Effective Window Binding](plans/2026-08-01-phase1-backtest-effective-window-binding.md).
-The selected result's actual effective timestamps now own both the current-reference chart
-request and a timezone-explicit header only when both are unambiguous, second-aligned 13-digit
-milliseconds. Invalid or legacy values preserve the existing requested timerange and legacy
-label. This is a frontend-only review-correctness repair; it does not add historical analyzed
-output, an API, a data run, a strategy candidate, Runtime, Paper, Live, or AI scope.
+It is accepted at Root `30793b22` and frontend `820bcc81`; backend `38232052` and
+strategies `dec5adb7` are unchanged. Its
+[acceptance report](reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md)
+is the exact-SHA evidence authority. When both result timestamps are unambiguous,
+second-aligned 13-digit milliseconds, one effective window now owns the current-reference
+Pair-History request and a timezone-explicit actual-window label. Invalid or legacy values
+fail closed to the original result timerange and legacy label. The existing permanent
+mixed-source disclosure, selected-result Trades, and all other source authorities remain
+unchanged. It adds no backend, API, artifact, market-data run, strategy candidate,
+Runtime, Paper, Live, or AI-worker scope.
+
+**Active bounded implementation:** None; no next bounded implementation has been selected.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -332,7 +314,7 @@ remains available without letting mismatched data render. The repair reuses the 
 `/chart_candles` generation pattern and does not create a generalized request or evidence
 platform.
 
-The latest completed bounded slice permanently distinguishes selected Backtest-result
+The preceding accepted source-disclosure slice permanently distinguishes selected Backtest-result
 Trades from current `/pair_history` candles loaded from local data and the
 indicators, Signals, and annotations calculated with the strategy installed now. It must
 not claim exact historical reproduction or execute archived strategy code. On API 2.57+,
@@ -352,6 +334,17 @@ preserves fail-closed hiding for an explicit context mismatch, and adds no backe
 comparison, API field, or route. Root `8daa1625`, backend `38232052`, and frontend
 `410018a1` are accepted by the
 [exact-SHA report](reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md).
+
+The latest accepted effective-window slice uses a selected result's concrete scored bounds
+for both its current-reference chart request and visible label only when both bounds are
+valid, safe, positive, second-aligned 13-digit millisecond timestamps with start before end.
+The display is timezone-explicit and reacts to a mounted timezone-setting change without
+changing the numeric request. Any ambiguous or legacy bound preserves the original result
+timerange and legacy label atomically. The permanent current-recomputation warning and all
+other result/user/Webserver source boundaries remain unchanged. Root `30793b22`, frontend
+`820bcc81`, unchanged backend `38232052`, and unchanged strategies `dec5adb7` are accepted
+by the
+[exact-SHA report](reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md).
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.

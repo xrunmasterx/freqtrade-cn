@@ -1,6 +1,9 @@
 # Phase 1 Backtest Effective Window Binding
 
-**Status:** Implemented; acceptance receipt pending
+**Status:** Accepted at Root `30793b226588914ae3ce3ab600ab45aef9824027`, frontend
+`820bcc81d8665f22969aa0f888fa1d3c548bac4d`, unchanged backend
+`3823205239281af56c34f4ff07f1674edddbe6db`, and unchanged strategies
+`dec5adb77f03b0c33ccfbc036ff0a3e57f7d571d`
 
 **Scope:** FreqUI selected-result Backtest chart timerange ownership, an explicit actual-window
 label, exact English and Chinese locale copy, focused component/locale tests, and lifecycle
