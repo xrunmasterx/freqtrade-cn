@@ -1,0 +1,766 @@
+from __future__ import annotations
+
+import hashlib
+import math
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import pytest
+
+
+WORKTREE_ENV = "FREQTRADE_WORKTREE_ROOT"
+STRATEGY_SOURCE_ENV = "VOLATILITY_STRATEGY_SOURCE"
+
+
+def _required_path(environment_name: str) -> Path:
+    value = os.environ.get(environment_name)
+    if not value:
+        raise RuntimeError(f"{environment_name} must be set to an explicit logical input path")
+    try:
+        return Path(value).resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"{environment_name} does not exist: {value}") from exc
+
+
+WORKTREE = _required_path(WORKTREE_ENV)
+STRATEGY_SOURCE = _required_path(STRATEGY_SOURCE_ENV)
+BACKEND = WORKTREE / "freqtrade"
+BASELINE_SOURCE = WORKTREE / "ft_userdata/user_data/strategies/VolatilitySystem.py"
+if not (BACKEND / "freqtrade").is_dir():
+    raise RuntimeError(f"{WORKTREE_ENV} has no Freqtrade backend: {BACKEND}")
+if not BASELINE_SOURCE.is_file():
+    raise RuntimeError(f"baseline strategy is absent: {BASELINE_SOURCE}")
+
+# The explicitly supplied worktree backend must win over any globally installed package.
+sys.path.insert(0, str(BACKEND))
+
+from freqtrade.configuration import TimeRange  # noqa: E402
+from freqtrade.enums import MarginMode, TradingMode  # noqa: E402
+from freqtrade.optimize import backtesting as backtesting_module  # noqa: E402
+from freqtrade.optimize.backtesting import Backtesting, HEADERS  # noqa: E402
+from freqtrade.resolvers import StrategyResolver  # noqa: E402
+
+PAIR = "BTC/USDT:USDT"
+META = {"pair": PAIR}
+OHLC_COLUMNS = ("open", "high", "low", "close")
+STATE_FLOAT_COLUMNS = [
+    "three_hour_open",
+    "three_hour_high",
+    "three_hour_low",
+    "three_hour_close",
+    "true_range",
+    "rolling_mean_true_range",
+    "volatility_threshold",
+    "delta",
+    "abs_delta",
+]
+STATE_BOOL_COLUMNS = [
+    "bucket_ok",
+    "valid",
+    "long_eligible",
+    "short_eligible",
+    "long_edge",
+    "short_edge",
+]
+SIGNAL_COLUMNS = ["enter_long", "enter_short", "exit_long", "exit_short"]
+PROTOCOL_COLUMNS = {
+    *STATE_FLOAT_COLUMNS,
+    *STATE_BOOL_COLUMNS,
+    *SIGNAL_COLUMNS,
+    "source_bucket_start",
+}
+
+
+def make_hourly_buckets(
+    closes: list[float],
+    ranges: list[float] | None = None,
+    *,
+    start: str = "2026-01-01T00:00:00Z",
+) -> pd.DataFrame:
+    if ranges is None:
+        ranges = [2.0] * len(closes)
+    assert len(ranges) == len(closes)
+
+    dates: list[pd.Timestamp] = []
+    rows: list[dict[str, float]] = []
+    origin = pd.Timestamp(start)
+    for bucket_index, (close, candle_range) in enumerate(zip(closes, ranges, strict=True)):
+        for hour in range(3):
+            dates.append(origin + pd.Timedelta(hours=3 * bucket_index + hour))
+            rows.append(
+                {
+                    "open": float(close),
+                    "high": float(close + candle_range / 2.0),
+                    "low": float(close - candle_range / 2.0),
+                    "close": float(close),
+                    "volume": float(10_000 + 3 * bucket_index + hour),
+                }
+            )
+    frame = pd.DataFrame(rows)
+    frame.insert(0, "date", dates)
+    return frame
+
+
+def analyze(frame: pd.DataFrame) -> tuple[Any, pd.DataFrame]:
+    strategy = load_strategy()
+    original_index = frame.index.copy()
+    original_dates = frame["date"].copy(deep=True)
+    result = strategy.advise_indicators(frame.copy(deep=True), META)
+    result = strategy.ft_advise_signals(result, META)
+    assert result.index.equals(original_index), "strategy changed the admitted input index"
+    assert result["date"].equals(original_dates), "strategy changed admitted input rows"
+    missing = sorted(PROTOCOL_COLUMNS.difference(result.columns))
+    assert not missing, f"bounded protocol semantic columns absent: {missing}"
+    return strategy, result
+
+
+def load_strategy(source: Path = STRATEGY_SOURCE) -> Any:
+    strategy = StrategyResolver.load_strategy(
+        {
+            "strategy": "VolatilitySystem",
+            "strategy_path": str(source.parent),
+            "user_data_dir": WORKTREE / "ft_userdata/user_data",
+            "trading_mode": TradingMode.FUTURES,
+            "margin_mode": MarginMode.ISOLATED,
+        }
+    )
+    assert Path(strategy.__file__).resolve() == source.resolve()
+    return strategy
+
+
+def completion_row(frame: pd.DataFrame, bucket_index: int) -> pd.Series:
+    return frame.iloc[3 * bucket_index + 2]
+
+
+def assert_float_exact(actual: Any, expected: float) -> None:
+    if math.isnan(expected):
+        assert pd.isna(actual)
+    else:
+        assert float(actual).hex() == float(expected).hex()
+
+
+def row_signature(row: pd.Series) -> tuple[Any, ...]:
+    values: list[Any] = []
+    for column in STATE_FLOAT_COLUMNS:
+        value = row[column]
+        values.append("NaN" if pd.isna(value) else float(value).hex())
+    source = row["source_bucket_start"]
+    values.append("NaT" if pd.isna(source) else pd.Timestamp(source).isoformat())
+    values.extend(bool(row[column]) for column in STATE_BOOL_COLUMNS)
+    values.extend(int(row[column]) for column in SIGNAL_COLUMNS)
+    return tuple(values)
+
+
+def strategy_source_functions(*names: str) -> tuple[Any, ...]:
+    strategy = load_strategy()
+    namespace = type(strategy).populate_indicators.__globals__
+    functions = tuple(namespace.get(name) for name in names)
+    missing = [name for name, function in zip(names, functions, strict=True) if not callable(function)]
+    assert not missing, f"bounded raw-admission semantics absent: {missing}"
+    return functions
+
+
+def test_pre_normalization_inventory_rejects_gap_duplicate_change_and_loader_fill() -> None:
+    canonical, digest, compare = strategy_source_functions(
+        "canonical_raw_ohlcv_inventory",
+        "raw_ohlcv_inventory_sha256",
+        "assert_loaded_matches_raw_inventory",
+    )
+
+    raw = make_hourly_buckets([100.0, 101.0])
+    inventory = canonical(raw)
+    assert digest(raw) == hashlib.sha256(inventory).hexdigest()
+    compare(inventory, raw.copy(deep=True))
+
+    changed = raw.copy(deep=True)
+    changed.loc[2, "close"] = np.nextafter(changed.loc[2, "close"], math.inf)
+    with pytest.raises(ValueError, match="does not match"):
+        compare(inventory, changed)
+
+    gap = raw.drop(index=2).reset_index(drop=True)
+    with pytest.raises(ValueError, match="one-hour continuity"):
+        canonical(gap)
+
+    duplicate = pd.concat([raw.iloc[:3], raw.iloc[[2]], raw.iloc[3:]], ignore_index=True)
+    with pytest.raises(ValueError, match="unique"):
+        canonical(duplicate)
+
+    loader_filled = gap.copy(deep=True)
+    flat = raw.iloc[[1]].copy(deep=True)
+    flat.loc[:, "date"] = raw.loc[2, "date"]
+    for column in ("open", "high", "low", "close"):
+        flat.loc[:, column] = raw.loc[1, "close"]
+    loader_filled = pd.concat([loader_filled.iloc[:2], flat, loader_filled.iloc[2:]], ignore_index=True)
+    with pytest.raises(ValueError, match="does not match"):
+        compare(inventory, loader_filled)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("naive", "UTC"),
+        ("off_hour", "exact hour"),
+        ("microsecond", "exact hour"),
+        ("nanosecond", "exact hour"),
+        ("out_of_order", "one-hour continuity"),
+    ],
+)
+def test_pre_normalization_inventory_rejects_noncanonical_timestamps(
+    mutation: str, message: str
+) -> None:
+    (canonical,) = strategy_source_functions("canonical_raw_ohlcv_inventory")
+    raw = make_hourly_buckets([100.0, 101.0])
+    if mutation == "naive":
+        raw["date"] = raw["date"].dt.tz_localize(None)
+    elif mutation == "off_hour":
+        raw.loc[2, "date"] += pd.Timedelta(minutes=1)
+    elif mutation == "microsecond":
+        raw.loc[2, "date"] += pd.Timedelta(microseconds=1)
+    elif mutation == "nanosecond":
+        raw["date"] = raw["date"].astype(object)
+        raw.at[2, "date"] = pd.Timestamp(raw.at[2, "date"]).as_unit("ns") + pd.Timedelta(
+            nanoseconds=1
+        )
+    elif mutation == "out_of_order":
+        dates = raw["date"].copy()
+        raw.loc[1, "date"], raw.loc[2, "date"] = dates.iloc[2], dates.iloc[1]
+    else:  # pragma: no cover - the table above is exhaustive
+        raise AssertionError(mutation)
+
+    with pytest.raises(ValueError, match=message):
+        canonical(raw)
+
+
+@pytest.mark.parametrize(
+    ("offset", "indicator_rows", "first_complete_bucket"),
+    [(0, 48, 15), (1, 50, 16), (2, 49, 16)],
+)
+def test_first_finite_indicator_boundary_for_every_start_offset(
+    offset: int, indicator_rows: int, first_complete_bucket: int
+) -> None:
+    source = make_hourly_buckets([100.0] * 20)
+
+    _, one_short = analyze(source.iloc[offset : offset + indicator_rows - 1].reset_index(drop=True))
+    assert not one_short["valid"].any()
+
+    _, exact = analyze(source.iloc[offset : offset + indicator_rows].reset_index(drop=True))
+    assert exact["valid"].sum() == 1
+    row = exact.iloc[-1]
+    assert row["date"] == source.iloc[3 * first_complete_bucket + 2]["date"]
+    assert bool(row["valid"])
+    assert_float_exact(row["rolling_mean_true_range"], 2.0)
+    assert_float_exact(row["volatility_threshold"], 4.0)
+
+    _, mapped = analyze(source.iloc[offset : offset + indicator_rows + 2].reset_index(drop=True))
+    expected_source = source.iloc[3 * first_complete_bucket]["date"]
+    for mapped_row in mapped.iloc[-3:].itertuples(index=False):
+        assert pd.Timestamp(mapped_row.source_bucket_start) == expected_source
+        assert bool(mapped_row.bucket_ok)
+        assert bool(mapped_row.valid)
+        assert_float_exact(mapped_row.three_hour_open, 100.0)
+        assert_float_exact(mapped_row.three_hour_high, 101.0)
+        assert_float_exact(mapped_row.three_hour_low, 99.0)
+        assert_float_exact(mapped_row.three_hour_close, 100.0)
+
+
+@pytest.mark.parametrize(
+    ("offset", "edge_rows", "edge_bucket"),
+    [(0, 51, 16), (1, 53, 17), (2, 52, 17)],
+)
+def test_first_rising_edge_boundary_for_every_start_offset(
+    offset: int, edge_rows: int, edge_bucket: int
+) -> None:
+    closes = [100.0] * 20
+    closes[edge_bucket] = 110.0
+    source = make_hourly_buckets(closes)
+
+    _, one_short = analyze(source.iloc[offset : offset + edge_rows - 1].reset_index(drop=True))
+    assert not one_short["long_edge"].any()
+    assert not one_short["enter_long"].any()
+
+    _, exact = analyze(source.iloc[offset : offset + edge_rows].reset_index(drop=True))
+    row = exact.iloc[-1]
+    assert row["date"] == source.iloc[3 * edge_bucket + 2]["date"]
+    assert bool(row["long_edge"])
+    assert int(row["enter_long"]) == 1
+
+    _, mapped = analyze(source.iloc[offset : offset + edge_rows + 2].reset_index(drop=True))
+    expected_source = source.iloc[3 * edge_bucket]["date"]
+    assert mapped.iloc[-3:]["source_bucket_start"].map(pd.Timestamp).eq(expected_source).all()
+    assert mapped.iloc[-3:]["long_eligible"].all()
+    assert mapped.iloc[-3:]["exit_short"].eq(1).all()
+    assert mapped.iloc[-3:]["long_edge"].tolist() == [True, False, False]
+    assert mapped.iloc[-3:]["enter_long"].tolist() == [1, 0, 0]
+
+
+def test_utc_aggregation_source_identity_mapping_pulse_and_persistent_exit() -> None:
+    closes = [100.0] * 16 + [110.0, 110.0]
+    _, result = analyze(make_hourly_buckets(closes))
+
+    # B16 starts at hour 48 and completes at hour 50. Its state maps to hours 50..52.
+    for hour in (50, 51, 52):
+        row = result.iloc[hour]
+        assert pd.Timestamp(row["source_bucket_start"]) == pd.Timestamp("2026-01-03T00:00:00Z")
+        assert bool(row["bucket_ok"])
+        assert bool(row["valid"])
+        assert bool(row["long_eligible"])
+        assert not bool(row["short_eligible"])
+        assert_float_exact(row["three_hour_open"], 110.0)
+        assert_float_exact(row["three_hour_high"], 111.0)
+        assert_float_exact(row["three_hour_low"], 109.0)
+        assert_float_exact(row["three_hour_close"], 110.0)
+        assert int(row["exit_short"]) == 1
+        assert int(row["exit_long"]) == 0
+
+    assert int(result.iloc[50]["enter_long"]) == 1
+    assert int(result.iloc[51]["enter_long"]) == 0
+    assert int(result.iloc[52]["enter_long"]) == 0
+
+    # B17 completes at hour 53 and replaces the old state rather than retaining it.
+    replaced = result.iloc[53]
+    assert pd.Timestamp(replaced["source_bucket_start"]) == pd.Timestamp("2026-01-03T03:00:00Z")
+    assert bool(replaced["valid"])
+    assert not bool(replaced["long_eligible"])
+    assert int(replaced["exit_short"]) == 0
+
+
+@pytest.mark.parametrize("column", OHLC_COLUMNS)
+@pytest.mark.parametrize("bad_value", [math.nan, math.inf, -math.inf])
+def test_nonfinite_ohlc_invalidates_and_preserves_the_slot(
+    column: str, bad_value: float
+) -> None:
+    source = make_hourly_buckets([100.0] * 20)
+    source.loc[3 * 16 + 1, column] = bad_value
+    _, result = analyze(source)
+
+    completion = completion_row(result, 16)
+    assert not bool(completion["bucket_ok"])
+    assert not bool(completion["valid"])
+    assert pd.isna(completion["three_hour_open"])
+    assert pd.Timestamp(completion["source_bucket_start"]) == pd.Timestamp(
+        "2026-01-03T00:00:00Z"
+    )
+    assert int(completion["enter_long"]) == 0
+    assert int(completion["enter_short"]) == 0
+    assert int(completion["exit_long"]) == 0
+    assert int(completion["exit_short"]) == 0
+
+
+@pytest.mark.parametrize("column", OHLC_COLUMNS)
+def test_nonnumeric_ohlc_invalidates_the_complete_slot(column: str) -> None:
+    source = make_hourly_buckets([100.0])
+    source[column] = source[column].astype(object)
+    source.loc[1, column] = "not-numeric"
+    _, result = analyze(source)
+    completion = completion_row(result, 0)
+    assert not bool(completion["bucket_ok"])
+    assert not bool(completion["valid"])
+    assert pd.isna(completion["three_hour_open"])
+
+
+@pytest.mark.parametrize(
+    ("open_value", "high_value", "low_value", "close_value", "expected_ok"),
+    [
+        pytest.param(100.0, 102.0, 100.5, 101.0, False, id="low-above-open"),
+        pytest.param(101.0, 102.0, 100.5, 100.0, False, id="low-above-close"),
+        pytest.param(103.0, 102.0, 99.0, 101.0, False, id="open-above-high"),
+        pytest.param(101.0, 102.0, 99.0, 103.0, False, id="close-above-high"),
+        pytest.param(100.0, 102.0, 100.0, 101.0, True, id="low-equals-open"),
+        pytest.param(101.0, 102.0, 100.0, 100.0, True, id="low-equals-close"),
+        pytest.param(102.0, 102.0, 99.0, 101.0, True, id="high-equals-open"),
+        pytest.param(101.0, 102.0, 99.0, 102.0, True, id="high-equals-close"),
+    ],
+)
+def test_each_ohlc_geometry_inequality_and_equality_control(
+    open_value: float,
+    high_value: float,
+    low_value: float,
+    close_value: float,
+    expected_ok: bool,
+) -> None:
+    source = make_hourly_buckets([100.0])
+    source.loc[1, ["open", "high", "low", "close"]] = [
+        open_value,
+        high_value,
+        low_value,
+        close_value,
+    ]
+    _, result = analyze(source)
+    assert bool(completion_row(result, 0)["bucket_ok"]) is expected_ok
+
+
+def test_volume_only_changes_do_not_affect_candidate_state_or_signals() -> None:
+    source = make_hourly_buckets([100.0] * 16 + [110.0, 120.0])
+    changed_volume = source.copy(deep=True)
+    changed_volume["volume"] = [
+        (-1.0 if index % 3 == 0 else 0.0 if index % 3 == 1 else 1.0e300)
+        for index in range(len(changed_volume))
+    ]
+
+    _, original_result = analyze(source)
+    _, changed_result = analyze(changed_volume)
+    assert [row_signature(row) for _, row in original_result.iterrows()] == [
+        row_signature(row) for _, row in changed_result.iterrows()
+    ]
+
+
+def test_impossible_geometry_partial_slots_gap_and_duplicate_never_drop_or_synthesize_rows() -> None:
+    source = make_hourly_buckets([100.0] * 20)
+    geometry = source.copy(deep=True)
+    geometry.loc[3 * 16, "low"] = geometry.loc[3 * 16, "open"] + 1.0
+    _, geometry_result = analyze(geometry)
+    assert not bool(completion_row(geometry_result, 16)["bucket_ok"])
+
+    partial = source.iloc[1:-1].reset_index(drop=True)
+    _, partial_result = analyze(partial)
+    assert len(partial_result) == len(partial)
+    assert partial_result["date"].tolist() == partial["date"].tolist()
+    assert not bool(partial_result.iloc[1]["bucket_ok"])
+
+    gap = source.drop(index=3 * 16 + 1).reset_index(drop=True)
+    _, gap_result = analyze(gap)
+    assert len(gap_result) == len(gap)
+    assert gap_result["date"].tolist() == gap["date"].tolist()
+    gap_completion = gap_result.loc[
+        gap_result["date"] == pd.Timestamp("2026-01-03T02:00:00Z")
+    ].iloc[0]
+    assert not bool(gap_completion["bucket_ok"])
+
+    duplicate = pd.concat(
+        [source.iloc[: 3 * 16 + 2], source.iloc[[3 * 16 + 1]], source.iloc[3 * 16 + 2 :]],
+        ignore_index=True,
+    )
+    _, duplicate_result = analyze(duplicate)
+    assert len(duplicate_result) == len(duplicate)
+    assert duplicate_result["date"].tolist() == duplicate["date"].tolist()
+    duplicate_completion = duplicate_result.loc[
+        duplicate_result["date"] == pd.Timestamp("2026-01-03T02:00:00Z")
+    ].iloc[0]
+    assert not bool(duplicate_completion["bucket_ok"])
+
+
+def test_true_range_uses_previous_close_up_gap_term() -> None:
+    _, result = analyze(make_hourly_buckets([100.0, 150.0]))
+    row = completion_row(result, 1)
+    # H-L is 2, H-prevC is 51, and L-prevC is 49.
+    assert_float_exact(row["true_range"], 51.0)
+
+
+def test_true_range_uses_previous_close_down_gap_term() -> None:
+    _, result = analyze(make_hourly_buckets([100.0, 50.0]))
+    row = completion_row(result, 1)
+    # H-L is 2, H-prevC is 49, and L-prevC is 51.
+    assert_float_exact(row["true_range"], 51.0)
+
+
+def test_invalid_slot_is_not_skipped_by_the_fourteen_value_mean() -> None:
+    source = make_hourly_buckets([100.0] * 25)
+    source.loc[3 * 8 + 1, "high"] = math.nan
+    _, result = analyze(source)
+
+    invalid_slot = completion_row(result, 8)
+    assert not bool(invalid_slot["bucket_ok"])
+    assert pd.Timestamp(invalid_slot["source_bucket_start"]) == pd.Timestamp(
+        "2026-01-02T00:00:00Z"
+    )
+    assert pd.isna(completion_row(result, 22)["rolling_mean_true_range"])
+    assert pd.isna(completion_row(result, 23)["rolling_mean_true_range"])
+    first_finite_after_gap = completion_row(result, 24)
+    assert bool(first_finite_after_gap["valid"])
+    assert_float_exact(first_finite_after_gap["rolling_mean_true_range"], 2.0)
+
+
+def test_chronological_fsum_mean_is_exact_and_excludes_current_true_range() -> None:
+    prior_true_ranges = [1.0e16] + [1.0] * 13
+    ranges_a = [2.0] + prior_true_ranges + [2.0, 2.0]
+    ranges_b = [2.0] + prior_true_ranges + [1000.0, 2.0]
+    closes = [100.0] * 17
+
+    _, result_a = analyze(make_hourly_buckets(closes, ranges_a))
+    _, result_b = analyze(make_hourly_buckets(closes, ranges_b))
+    row_a = completion_row(result_a, 15)
+    row_b = completion_row(result_b, 15)
+    expected_mean = math.fsum(prior_true_ranges) / 14.0
+
+    assert_float_exact(row_a["rolling_mean_true_range"], expected_mean)
+    assert_float_exact(row_a["volatility_threshold"], 2.0 * expected_mean)
+    assert_float_exact(row_b["rolling_mean_true_range"], expected_mean)
+    assert_float_exact(row_b["volatility_threshold"], 2.0 * expected_mean)
+    assert float(row_a["true_range"]).hex() != float(row_b["true_range"]).hex()
+
+    next_a = completion_row(result_a, 16)
+    next_b = completion_row(result_b, 16)
+    expected_next_a = 2.0 * math.fsum([1.0] * 13 + [2.0]) / 14.0
+    expected_next_b = 2.0 * math.fsum([1.0] * 13 + [1000.0]) / 14.0
+    assert_float_exact(next_a["volatility_threshold"], expected_next_a)
+    assert_float_exact(next_b["volatility_threshold"], expected_next_b)
+    assert float(next_a["volatility_threshold"]).hex() != float(
+        next_b["volatility_threshold"]
+    ).hex()
+
+
+def test_strict_equality_symmetry_false_to_true_and_false_rearm() -> None:
+    long_closes = [100.0] * 15 + [104.0, 110.0, 110.0, 120.0]
+    _, long_result = analyze(make_hourly_buckets(long_closes))
+    equality = completion_row(long_result, 15)
+    first_edge = completion_row(long_result, 16)
+    rearmed_false = completion_row(long_result, 17)
+    second_edge = completion_row(long_result, 18)
+    assert_float_exact(equality["delta"], 4.0)
+    assert_float_exact(equality["volatility_threshold"], 4.0)
+    assert not bool(equality["long_eligible"])
+    assert bool(first_edge["long_edge"])
+    assert not bool(rearmed_false["long_eligible"])
+    assert bool(second_edge["long_edge"])
+    assert int(second_edge["enter_long"]) == 1
+
+    short_closes = [100.0] * 15 + [96.0, 90.0]
+    _, short_result = analyze(make_hourly_buckets(short_closes))
+    short_equality = completion_row(short_result, 15)
+    short_edge = completion_row(short_result, 16)
+    assert_float_exact(short_equality["delta"], -4.0)
+    assert not bool(short_equality["short_eligible"])
+    assert bool(short_edge["short_edge"])
+    assert int(short_edge["enter_short"]) == 1
+    assert int(short_edge["exit_long"]) == 1
+
+
+def test_invalid_boundary_is_fail_closed_and_never_creates_a_catch_up_edge() -> None:
+    closes = [100.0] * 33
+    closes[32] = 110.0
+    source = make_hourly_buckets(closes)
+    source.loc[3 * 16, "high"] = math.nan
+    _, result = analyze(source)
+
+    invalid_completion = completion_row(result, 16)
+    assert not bool(invalid_completion["valid"])
+    assert int(invalid_completion["exit_short"]) == 0
+
+    first_valid_after_boundary = completion_row(result, 32)
+    assert bool(first_valid_after_boundary["valid"])
+    assert bool(first_valid_after_boundary["long_eligible"])
+    assert not bool(first_valid_after_boundary["long_edge"])
+    assert int(first_valid_after_boundary["enter_long"]) == 0
+
+
+def test_lifecycle_settings_and_unlisted_baseline_behavior() -> None:
+    strategy = load_strategy()
+    baseline = load_strategy(BASELINE_SOURCE)
+    assert strategy.can_short is True
+    assert strategy.timeframe == "1h"
+    assert strategy.minimal_roi == {0: 100}
+    assert strategy.minimal_roi == baseline.minimal_roi
+    assert strategy.order_types == baseline.order_types
+    assert strategy.order_time_in_force == baseline.order_time_in_force
+    assert strategy.startup_candle_count == 499
+    assert strategy.stoploss == -0.10
+    assert strategy.position_adjustment_enable is False
+    assert "adjust_trade_position" not in type(strategy).__dict__
+    assert "atr" not in str(strategy.plot_config).lower()
+    assert "rolling_mean_true_range" in str(strategy.plot_config)
+    assert "volatility_threshold" in str(strategy.plot_config)
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert strategy.custom_stake_amount(
+        PAIR, now, 100.0, 200.0, None, 1000.0, 1.0, None, "long"
+    ) == 100.0
+    assert strategy.leverage(PAIR, now, 100.0, 1.0, 10.0, "long") == 2.0
+    assert (
+        strategy.adjust_trade_position(
+            object(), now, 100.0, 0.0, None, 1000.0, 100.0, 100.0, 0.0, 0.0
+        )
+        is None
+    )
+
+
+def test_contiguous_eligibility_episode_has_one_entry_and_no_reentry() -> None:
+    _, result = analyze(make_hourly_buckets([100.0] * 16 + [110.0, 120.0]))
+    first = completion_row(result, 16)
+    same_episode = completion_row(result, 17)
+    assert bool(first["long_eligible"])
+    assert bool(same_episode["long_eligible"])
+    assert int(first["enter_long"]) == 1
+    assert int(same_episode["enter_long"]) == 0
+    assert result["enter_long"].sum() == 1
+
+
+def test_fresh_instance_every_target_every_suffix_restart_parity() -> None:
+    closes: list[float] = []
+    value = 100.0
+    for bucket in range(270):
+        if bucket % 19 == 0:
+            value += 8.0
+        elif bucket % 23 == 0:
+            value -= 9.0
+        closes.append(value)
+    source = make_hourly_buckets(closes)
+    suffix_lengths = (499, 599, 600, 799)
+
+    # Every target in this synthetic twelve-hour audit interval covers all three UTC offsets.
+    for target_index in range(798, 810):
+        through_target = source.iloc[: target_index + 1].reset_index(drop=True)
+        full_strategy, full = analyze(through_target)
+        reference = row_signature(full.iloc[-1])
+        assert full_strategy.startup_candle_count == 499
+
+        seen_suffix_bytes: set[bytes] = set()
+        for suffix_length in suffix_lengths:
+            suffix = through_target.iloc[-suffix_length:].reset_index(drop=True)
+            suffix_bytes = suffix.to_csv(index=False).encode()
+            if suffix_bytes in seen_suffix_bytes:
+                continue
+            seen_suffix_bytes.add(suffix_bytes)
+            suffix_strategy, replay = analyze(suffix)
+            assert suffix_strategy is not full_strategy
+            assert row_signature(replay.iloc[-1]) == reference
+
+
+@pytest.mark.parametrize(
+    (
+        "final_close",
+        "entry_column",
+        "other_entry_column",
+        "eligibility_column",
+        "edge_column",
+        "exit_column",
+        "other_exit_column",
+        "open_is_short",
+        "trade_direction",
+    ),
+    [
+        pytest.param(
+            110.0,
+            "enter_long",
+            "enter_short",
+            "long_eligible",
+            "long_edge",
+            "exit_short",
+            "exit_long",
+            True,
+            "long",
+            id="long-edge-open-short",
+        ),
+        pytest.param(
+            90.0,
+            "enter_short",
+            "enter_long",
+            "short_eligible",
+            "short_edge",
+            "exit_long",
+            "exit_short",
+            False,
+            "short",
+            id="short-edge-open-long",
+        ),
+    ],
+)
+def test_next_candle_shift_and_exact_end_exit_only_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+    final_close: float,
+    entry_column: str,
+    other_entry_column: str,
+    eligibility_column: str,
+    edge_column: str,
+    exit_column: str,
+    other_exit_column: str,
+    open_is_short: bool,
+    trade_direction: str,
+) -> None:
+    closes = [100.0] * 16 + [final_close]
+    scored = make_hourly_buckets(closes)
+    sentinel = make_hourly_buckets([final_close], start="2026-01-03T03:00:00Z").iloc[[0]]
+    with_sentinel = pd.concat([scored, sentinel], ignore_index=True)
+    strategy = load_strategy()
+    indicators = strategy.advise_indicators(with_sentinel.copy(deep=True), META)
+    result = strategy.ft_advise_signals(indicators.copy(deep=True), META)
+
+    final_scored_index = len(scored) - 1
+    sentinel_index = len(with_sentinel) - 1
+    assert int(result.iloc[final_scored_index][entry_column]) == 1
+    assert int(result.iloc[final_scored_index][exit_column]) == 1
+    assert int(result.iloc[sentinel_index][entry_column]) == 0
+    assert bool(result.iloc[sentinel_index][eligibility_column])
+    assert pd.Timestamp(result.iloc[sentinel_index]["source_bucket_start"]) == pd.Timestamp(
+        result.iloc[final_scored_index]["source_bucket_start"]
+    )
+    assert not bool(result.iloc[sentinel_index][edge_column])
+    assert result.iloc[sentinel_index]["date"] == pd.Timestamp("2026-01-03T03:00:00Z")
+
+    # Exercise the pinned engine conversion seam: it calls ft_advise_signals and shifts the
+    # final scored signal onto the following execution candle.
+    converter = SimpleNamespace(
+        strategy=strategy,
+        dataprovider=SimpleNamespace(_set_cached_df=lambda *args: None),
+        timeframe="1h",
+        config={"candle_type_def": None},
+        timerange=TimeRange(),
+        required_startup=0,
+        _set_progress_step=lambda *args: None,
+        check_abort=lambda: None,
+        _increment_progress=lambda: None,
+    )
+    converted = Backtesting._get_ohlcv_as_lists(
+        converter, {PAIR: indicators.copy(deep=True)}
+    )[PAIR]
+    sentinel_row = converted[-1]
+    sentinel_values = dict(zip(HEADERS, sentinel_row, strict=True))
+    assert sentinel_values["date"] == pd.Timestamp("2026-01-03T03:00:00Z")
+    assert int(sentinel_values[entry_column]) == 1
+    assert int(sentinel_values[other_entry_column]) == 0
+    assert int(sentinel_values[exit_column]) == 1
+    assert int(sentinel_values[other_exit_column]) == 0
+
+    # The pinned loop receives can_enter=False on its last row. That suppresses the shifted
+    # entry while its existing-trade exit path remains active on the same sentinel row.
+    entry_calls: list[tuple[Any, ...]] = []
+    exit_checks: list[list[Any]] = []
+    loop = SimpleNamespace(
+        _position_stacking=False,
+        manage_open_orders=lambda *args: False,
+        wallets=SimpleNamespace(update=lambda: None),
+        trade_slot_available=lambda *args: True,
+        _enter_trade=lambda *args: entry_calls.append(args),
+        _collate_rejected=lambda *args: None,
+        _try_close_open_order=lambda *args: False,
+        _check_trade_exit=lambda trade, row, current_time: exit_checks.append(row),
+        _process_exit_order=lambda *args: None,
+    )
+    monkeypatch.setattr(backtesting_module.LocalTrade, "bt_trades_open_pp", {PAIR: []})
+    Backtesting.backtest_loop(
+        loop,
+        sentinel_row,
+        PAIR,
+        sentinel_values["date"],
+        trade_direction,
+        can_enter=False,
+    )
+    assert entry_calls == []
+
+    open_opposite = SimpleNamespace(
+        is_short=open_is_short,
+        entry_side="sell" if open_is_short else "buy",
+        exit_side="buy" if open_is_short else "sell",
+        has_open_position=True,
+        select_order=lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        backtesting_module.LocalTrade, "bt_trades_open_pp", {PAIR: [open_opposite]}
+    )
+    Backtesting.backtest_loop(
+        loop,
+        sentinel_row,
+        PAIR,
+        sentinel_values["date"],
+        trade_direction,
+        can_enter=False,
+    )
+    assert entry_calls == []
+    assert len(exit_checks) == 1
+    assert int(exit_checks[0][HEADERS.index(exit_column)]) == 1
+    assert int(exit_checks[0][HEADERS.index(other_exit_column)]) == 0

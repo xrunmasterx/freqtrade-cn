@@ -1,0 +1,3067 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib
+import json
+import math
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import uuid
+import weakref
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from itertools import pairwise
+from numbers import Real
+from pathlib import Path
+from typing import Any
+
+
+# This prevents new cache writes. Existing cached bytecode can still be read, so the
+# executable package tree is independently required to contain no cache artifacts.
+sys.dont_write_bytecode = True
+
+PROTOCOL = "bounded-true-range-restart-matrix-v1"
+PAIR = "BTC/USDT:USDT"
+META = {"pair": PAIR}
+SHARD_COUNT = 8
+TARGET_COUNT = 8_760
+EXPECTED_CALLS = 43_800
+EXPECTED_COMPARISONS = 35_040
+# These generous fixed-schema limits bound malformed evidence before JSON decoding.
+MAX_RECORD_LINE_BYTES = 64 * 1024
+MAX_DONE_JSON_BYTES = 64 * 1024
+
+WORKTREE_ENV = "FREQTRADE_WORKTREE_ROOT"
+STRATEGY_ENV = "VOLATILITY_STRATEGY_SOURCE"
+DATA_ROOT_ENV = "BOUNDED_TR_DATA_ROOT"
+
+EXPECTED_WORKTREE = Path(
+    r"C:\Users\dezhengu\orca\workspaces\freqtrade-cn\phase1-complete-development"
+)
+EXPECTED_STRATEGY = Path(
+    r"C:\Users\dezhengu\AppData\Local\Temp\freqtrade-cn-bounded-tr-788d225"
+    r"\candidate\VolatilitySystem.py"
+)
+EXPECTED_TEST = Path(
+    r"C:\Users\dezhengu\AppData\Local\Temp\freqtrade-cn-bounded-tr-788d225"
+    r"\tests\test_bounded_true_range_episode.py"
+)
+EXPECTED_DATA_ROOT = Path(
+    r"G:\AI_Trading\freqtrade-cn\ft_userdata\user_data\data\okx"
+)
+
+ROOT_HEAD = "788d2256cc772f51e9442e3d3f25e4649aa5b4a9"
+BACKEND_HEAD = "3823205239281af56c34f4ff07f1674edddbe6db"
+FRONTEND_HEAD = "820bcc81d8665f22969aa0f888fa1d3c548bac4d"
+STRATEGIES_HEAD = "dec5adb77f03b0c33ccfbc036ff0a3e57f7d571d"
+FREQTRADE_VERSION = "2026.7-dev-382320523"
+FREQTRADE_INIT_SHA256 = "41679b4cb522ae0a002adb25127e034605b472ee51c4bd76da2ca2d7d9205a74"
+CRITICAL_BACKEND_SOURCES: dict[str, tuple[Path, str]] = {
+    "freqtrade": (
+        Path("freqtrade/__init__.py"),
+        FREQTRADE_INIT_SHA256,
+    ),
+    "freqtrade.data.history.history_utils": (
+        Path("freqtrade/data/history/history_utils.py"),
+        "7fd2a97485648f7626106ecadd7be2f7a1c73f96028854925c7cd6f2905086cc",
+    ),
+    "freqtrade.enums": (
+        Path("freqtrade/enums/__init__.py"),
+        "4c3c2b5cfdfded184612210b4087ace5235f51ea12458a9e21ef09b87a47d8f9",
+    ),
+    "freqtrade.resolvers": (
+        Path("freqtrade/resolvers/__init__.py"),
+        "995a15b80c5780d31cbda6c91b838f5b6aaf0aa67a6743f525f06359dde61299",
+    ),
+    "freqtrade.resolvers.iresolver": (
+        Path("freqtrade/resolvers/iresolver.py"),
+        "ef11c1462993b49cb2a91fb1f400ef229b39dd2a6068d5e61576208bbbcfff25",
+    ),
+    "freqtrade.resolvers.strategy_resolver": (
+        Path("freqtrade/resolvers/strategy_resolver.py"),
+        "394d55c6c1ce8f07bee80aac068deb560cf57897540b644d06000f7e68f94fe3",
+    ),
+    "freqtrade.strategy": (
+        Path("freqtrade/strategy/__init__.py"),
+        "cef6416573eb3f2054fdb8ef4509540744aee4994fc1e4b4c8fec33d96aae473",
+    ),
+    "freqtrade.strategy.interface": (
+        Path("freqtrade/strategy/interface.py"),
+        "632bd9ef58b7576e8cff11ce5df67770d2a01c335d03d0a4973c56a26c32b9a3",
+    ),
+}
+CORE_FREQTRADE_MODULES = (
+    "freqtrade",
+    "freqtrade.data.history.history_utils",
+    "freqtrade.enums",
+)
+RESOLVER_FREQTRADE_MODULES = tuple(CRITICAL_BACKEND_SOURCES)
+STRATEGY_SHA256 = "41e9aad2be1dd262bbc715cefa414c23293d4abea66e17a2cef3ac8559db3923"
+STRATEGY_SIZE = 14_447
+TEST_SHA256 = "a610b5182d393e697633ca33841e7387aaa4d118e79331d6fdcc3c38c2fa6941"
+BASELINE_SHA256 = "fed33eceed8bec65f5c47d1727aa4a18b70f15d064b20000eb653622bb16fe85"
+ADMISSION_SUMMARY_SHA256 = (
+    "5ad952715905d854a36b38fbb37f29f4b62c894760477e67e7f25c1ff8eaed3a"
+)
+
+RAW_COLUMNS = ("date", "open", "high", "low", "close", "volume")
+FLOAT_COLUMNS = (
+    "three_hour_open",
+    "three_hour_high",
+    "three_hour_low",
+    "three_hour_close",
+    "true_range",
+    "rolling_mean_true_range",
+    "volatility_threshold",
+    "delta",
+    "abs_delta",
+)
+BOOL_COLUMNS = (
+    "bucket_ok",
+    "valid",
+    "long_eligible",
+    "short_eligible",
+    "long_edge",
+    "short_edge",
+)
+SIGNAL_COLUMNS = ("enter_long", "enter_short", "exit_long", "exit_short")
+INDICATOR_BOUNDARY_FIELDS = (
+    *FLOAT_COLUMNS,
+    "bucket_ok",
+    "valid",
+    "long_eligible",
+    "short_eligible",
+    "exit_long",
+    "exit_short",
+    "source_bucket_start_ns",
+)
+EDGE_BOUNDARY_FIELDS = (
+    *FLOAT_COLUMNS,
+    *BOOL_COLUMNS,
+    *SIGNAL_COLUMNS,
+    "source_bucket_start_ns",
+)
+REQUIRED_OUTPUT_COLUMNS = set(FLOAT_COLUMNS + BOOL_COLUMNS + SIGNAL_COLUMNS) | {
+    "source_bucket_start"
+}
+
+
+def _iso_ns(value: str) -> int:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo != UTC:
+        raise AssertionError(f"constant is not UTC: {value}")
+    delta = parsed - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+
+
+PRIMARY_START_NS = _iso_ns("2024-01-01T00:00:00Z")
+PRIMARY_END_NS = _iso_ns("2025-07-01T00:00:00Z")
+SCORED_START_NS = _iso_ns("2024-07-01T00:00:00Z")
+SCORED_END_NS = PRIMARY_END_NS
+PERFORMANCE_START_NS = _iso_ns("2024-06-10T05:00:00Z")
+AUDIT_START_NS = _iso_ns("2024-05-28T18:00:00Z")
+HOUR_NS = 3_600_000_000_000
+
+WITNESS_ORDINALS = (5_658, 5_659, 5_660)
+WITNESS_TIMESTAMPS_NS = (
+    _iso_ns("2025-02-21T18:00:00Z"),
+    _iso_ns("2025-02-21T19:00:00Z"),
+    _iso_ns("2025-02-21T20:00:00Z"),
+)
+BOUNDARY_ROWS = {
+    0: {"indicator": 48, "edge": 51},
+    1: {"indicator": 50, "edge": 53},
+    2: {"indicator": 49, "edge": 52},
+}
+
+RAW_SPECS: dict[str, dict[str, Any]] = {
+    "futures": {
+        "relative": Path("futures/BTC_USDT_USDT-1h-futures.feather"),
+        "sha256": "fda58d314cbcacd8605d5b4996030b9fb73eb2544ed35b9ef64ffeca6a252369",
+        "size": 595_146,
+        "raw_inventory_sha256": "cd0fdd6a7f174786a4abea9104ed7c6c684ce3c2cffb0cb7127b28072bb2db91",
+        "loaded_inventory_sha256": (
+            "cd0fdd6a7f174786a4abea9104ed7c6c684ce3c2cffb0cb7127b28072bb2db91"
+        ),
+        "rows": 22_071,
+        "start_ns": _iso_ns("2024-01-01T00:00:00Z"),
+        "end_ns": _iso_ns("2026-07-08T14:00:00Z"),
+        "step_ns": HOUR_NS,
+        "route": "futures",
+    },
+    "mark": {
+        "relative": Path("futures/BTC_USDT_USDT-1h-mark.feather"),
+        "sha256": "6e4a742f05a36df2a0894583463ae7904c56596d824ac5a7c444be7dbce9c86f",
+        "size": 484_234,
+        "raw_inventory_sha256": "aac87caef43fea6d28c211b6d989ae89d400428a13a057bacad5da2276ec4b04",
+        "loaded_inventory_sha256": (
+            "fda0828c5cc10790866b52489bad60b66b312b9df059b5ee91f3dfce63bdebbe"
+        ),
+        "rows": 22_071,
+        "start_ns": _iso_ns("2024-01-01T00:00:00Z"),
+        "end_ns": _iso_ns("2026-07-08T14:00:00Z"),
+        "step_ns": HOUR_NS,
+        "route": "mark",
+    },
+    "funding": {
+        "relative": Path("futures/BTC_USDT_USDT-1h-funding_rate.feather"),
+        "sha256": "2a49b31fc35be0e3a26f4199fd773998a811ae19dd9e82a181c2fbfdf1c8fe94",
+        "size": 32_026,
+        "raw_inventory_sha256": "2bb3c7e2026f1f7b560d8983ffe54771c75dcdc3bb4d276fe36239b64f3cf941",
+        "loaded_inventory_sha256": (
+            "2bb3c7e2026f1f7b560d8983ffe54771c75dcdc3bb4d276fe36239b64f3cf941"
+        ),
+        "rows": 2_214,
+        "start_ns": _iso_ns("2024-06-30T16:00:00Z"),
+        "end_ns": _iso_ns("2026-07-08T08:00:00Z"),
+        "step_ns": 8 * HOUR_NS,
+        "route": "funding",
+    },
+    "leverage": {
+        "relative": Path("futures/leverage_tiers_USDT.json"),
+        "sha256": "fbfb3a0b96cd713a4050a8393c912a114634f953c69cc56440623f457ba2016e",
+        "size": 13_231_201,
+        "route": "leverage",
+    },
+}
+
+PROFILE_ORDER = ("full", "suffix-499", "suffix-599", "suffix-600", "suffix-799")
+PROFILE_LABELS = {
+    "full": ("full-reference",),
+    "suffix-499": ("499",),
+    "suffix-599": ("cold599", "explicit599", "warm599"),
+    "suffix-600": ("600",),
+    "suffix-799": ("799",),
+}
+SUFFIX_REQUESTS = (
+    ("499", 499),
+    ("cold599", 599),
+    ("warm599", 599),
+    ("explicit599", 599),
+    ("600", 600),
+    ("799", 799),
+)
+
+
+class ContractError(RuntimeError):
+    """An identity, input, or completeness contract failed."""
+
+
+class SemanticMismatch(ContractError):
+    """A strategy result differed from the frozen restart semantics."""
+
+    def __init__(self, message: str, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = {} if details is None else dict(details)
+
+
+_ADMISSION_GUARD = object()
+
+
+@dataclass(frozen=True)
+class AdmissionState:
+    guard: object
+    summary: dict[str, Any]
+    primary_frame: Any
+    paths: dict[str, Path]
+    raw_hashes: dict[str, str]
+    trading_mode: Any
+    margin_mode: Any
+
+
+@dataclass(frozen=True)
+class MergeContract:
+    shard_count: int = SHARD_COUNT
+    target_count: int = TARGET_COUNT
+    target_start_ns: int = SCORED_START_NS
+    witness_ordinals: tuple[int, ...] = WITNESS_ORDINALS
+
+
+DEFAULT_MERGE_CONTRACT = MergeContract()
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    try:
+        text = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"value is not canonical JSON: {exc}") from exc
+    return (text + "\n").encode("utf-8")
+
+
+def _json_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _require_authoritative_admission_summary(summary: Mapping[str, Any]) -> None:
+    stored = summary.get("summary_sha256")
+    unsigned = dict(summary)
+    unsigned.pop("summary_sha256", None)
+    recomputed = _json_sha256(unsigned)
+    if stored != ADMISSION_SUMMARY_SHA256 or recomputed != ADMISSION_SUMMARY_SHA256:
+        raise ContractError("admission summary does not match the authoritative identity")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _assert_no_links(path: Path) -> None:
+    absolute = path.absolute()
+    components = tuple(reversed(absolute.parents)) + (absolute,)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    for component in components:
+        details = os.lstat(component)
+        attributes = getattr(details, "st_file_attributes", 0)
+        if stat.S_ISLNK(details.st_mode) or attributes & reparse_flag:
+            raise ContractError(f"symbolic/reparse paths are prohibited: {component}")
+
+
+def _regular_file_no_links(path: Path, label: str) -> Path:
+    try:
+        _assert_no_links(path)
+        details = os.lstat(path)
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ContractError(f"{label} does not exist: {path}") from exc
+    if not stat.S_ISREG(details.st_mode) or not resolved.is_file():
+        raise ContractError(f"{label} is not a regular file: {path}")
+    return resolved
+
+
+def _directory_no_links(path: Path, label: str) -> Path:
+    try:
+        _assert_no_links(path)
+        details = os.lstat(path)
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ContractError(f"{label} does not exist: {path}") from exc
+    if not stat.S_ISDIR(details.st_mode) or not resolved.is_dir():
+        raise ContractError(f"{label} is not a directory: {path}")
+    return resolved
+
+
+def _validate_executable_backend_tree(backend: Path) -> Path:
+    validated_backend = _directory_no_links(backend, "backend repository")
+    expected_package = validated_backend / "freqtrade"
+    package = _directory_no_links(expected_package, "Freqtrade executable package")
+    if (
+        os.path.normcase(str(package)) != os.path.normcase(str(expected_package))
+        or not package.is_relative_to(validated_backend)
+        or package == validated_backend
+    ):
+        raise ContractError("Freqtrade executable package escapes the validated backend")
+
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    pending = [package]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+        except OSError as exc:
+            raise ContractError(
+                f"cannot inspect executable package directory: {directory}"
+            ) from exc
+        for entry in entries:
+            path = Path(entry.path).absolute()
+            if not path.is_relative_to(package) or not path.is_relative_to(validated_backend):
+                raise ContractError(f"executable package entry escapes the backend: {path}")
+            try:
+                details = os.lstat(path)
+            except OSError as exc:
+                raise ContractError(f"cannot inspect executable package entry: {path}") from exc
+            attributes = getattr(details, "st_file_attributes", 0)
+            if stat.S_ISLNK(details.st_mode) or attributes & reparse_flag:
+                raise ContractError(f"symbolic/reparse paths are prohibited: {path}")
+            if stat.S_ISDIR(details.st_mode):
+                if entry.name.casefold() == "__pycache__":
+                    raise ContractError(f"__pycache__ is prohibited: {path}")
+                pending.append(path)
+            elif stat.S_ISREG(details.st_mode):
+                if path.suffix.casefold() in {".pyc", ".pyo"}:
+                    raise ContractError(f"cached bytecode is prohibited: {path}")
+            else:
+                raise ContractError(f"executable package entry is not regular: {path}")
+    return package
+
+
+def _require_source_only_import_policy() -> None:
+    if not sys.dont_write_bytecode:
+        raise ContractError("cached bytecode writes must remain disabled")
+    if sys.pycache_prefix is not None:
+        raise ContractError("an external Python bytecode cache prefix is prohibited")
+
+
+def _validate_exact_path(
+    value: str | os.PathLike[str] | None,
+    *,
+    environment_name: str,
+    expected: Path,
+    kind: str,
+) -> Path:
+    if value is None or not str(value):
+        raise ContractError(f"{environment_name} is required")
+    supplied = Path(value)
+    if not supplied.is_absolute():
+        raise ContractError(f"{environment_name} must be absolute")
+    if os.path.normcase(str(supplied)) != os.path.normcase(str(expected)):
+        raise ContractError(f"{environment_name} is a substituted path: {supplied}")
+    try:
+        _assert_no_links(supplied)
+        resolved = supplied.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ContractError(f"{environment_name} does not exist: {supplied}") from exc
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(expected.resolve(strict=True))):
+        raise ContractError(f"{environment_name} does not resolve to its frozen identity")
+    if kind == "file" and not resolved.is_file():
+        raise ContractError(f"{environment_name} is not a file: {resolved}")
+    if kind == "directory" and not resolved.is_dir():
+        raise ContractError(f"{environment_name} is not a directory: {resolved}")
+    return resolved
+
+
+def _validate_output_path(path: Path, *, directory: bool) -> Path:
+    if not path.is_absolute():
+        raise ContractError(f"output path must be absolute: {path}")
+    if path.exists() or path.is_symlink():
+        raise ContractError(f"output already exists; resume is prohibited: {path}")
+    _assert_no_links(path.parent)
+    parent = path.parent.resolve(strict=True)
+    if not parent.is_dir():
+        raise ContractError(f"output parent is not a directory: {parent}")
+    if directory and path.name in ("", ".", ".."):
+        raise ContractError(f"invalid output directory: {path}")
+    return path
+
+
+def _timestamp_ns(value: Any, label: str = "timestamp") -> int:
+    pd = importlib.import_module("pandas")
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"{label} is not a timestamp") from exc
+    if (
+        pd.isna(timestamp)
+        or timestamp.tzinfo is None
+        or timestamp.utcoffset() is None
+        or timestamp.utcoffset().total_seconds() != 0
+    ):
+        raise ContractError(f"{label} must be an explicit UTC timestamp")
+    return int(timestamp.tz_convert("UTC").as_unit("ns").value)
+
+
+def _float_parts(value: Any, *, allow_nan: bool, label: str) -> tuple[str, str, str]:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ContractError(f"{label} must be a real number")
+    number = float(value)
+    if math.isnan(number):
+        if not allow_nan:
+            raise ContractError(f"{label} must be finite")
+        return "1", "x", "nan"
+    if not math.isfinite(number):
+        raise ContractError(f"{label} must not be infinite")
+    zero_sign = "x"
+    if number == 0.0:
+        zero_sign = "n" if math.copysign(1.0, number) < 0.0 else "p"
+    return "0", zero_sign, number.hex()
+
+
+def canonical_ohlcv_inventory(
+    dataframe: Any,
+    *,
+    allow_nan_columns: Iterable[str] = (),
+) -> bytes:
+    if tuple(dataframe.columns) != RAW_COLUMNS:
+        raise ContractError(
+            f"OHLCV columns must be exactly {RAW_COLUMNS}, got {tuple(dataframe.columns)}"
+        )
+    allowed = frozenset(allow_nan_columns)
+    rows: list[str] = []
+    for position in range(len(dataframe)):
+        row = dataframe.iloc[position]
+        timestamp_ns = _timestamp_ns(row["date"], f"row {position} date")
+        masks: list[str] = []
+        zero_signs: list[str] = []
+        tokens: list[str] = []
+        for column in RAW_COLUMNS[1:]:
+            nan_mask, zero_sign, token = _float_parts(
+                row[column],
+                allow_nan=column in allowed,
+                label=f"row {position} {column}",
+            )
+            masks.append(nan_mask)
+            zero_signs.append(zero_sign)
+            tokens.append(token)
+        rows.append(
+            "|".join(
+                (str(timestamp_ns), "".join(masks), "".join(zero_signs), *tokens)
+            )
+        )
+    return ("\n".join(rows) + ("\n" if rows else "")).encode("ascii")
+
+
+def _canonical_single_row(dataframe: Any, position: int) -> bytes:
+    return canonical_ohlcv_inventory(dataframe.iloc[[position]].reset_index(drop=True))
+
+
+def _validate_arrow_schema(table: Any, label: str) -> dict[str, Any]:
+    pa = importlib.import_module("pyarrow")
+    if tuple(table.column_names) != RAW_COLUMNS:
+        raise ContractError(f"{label} physical columns differ from {RAW_COLUMNS}")
+    date_type = table.schema.field("date").type
+    if not (
+        pa.types.is_timestamp(date_type)
+        and date_type.unit == "ms"
+        and date_type.tz == "UTC"
+    ):
+        raise ContractError(f"{label} date schema must be timestamp[ms, tz=UTC]")
+    for column in RAW_COLUMNS[1:]:
+        if not pa.types.is_float64(table.schema.field(column).type):
+            raise ContractError(f"{label} {column} schema must be double")
+    return {
+        "columns": list(RAW_COLUMNS),
+        "date": "timestamp[ms, tz=UTC]",
+        "values": "double",
+    }
+
+
+def _neutral_read_feather(path: Path, label: str) -> tuple[Any, dict[str, Any]]:
+    feather = importlib.import_module("pyarrow.feather")
+    try:
+        table = feather.read_table(path)
+    except Exception as exc:
+        raise ContractError(f"neutral Feather read failed for {label}: {exc}") from exc
+    schema = _validate_arrow_schema(table, label)
+    return table.to_pandas(), schema
+
+
+def validate_ohlcv_route(  # noqa: C901
+    dataframe: Any, spec: Mapping[str, Any]
+) -> dict[str, Any]:
+    route = str(spec["route"])
+    if tuple(dataframe.columns) != RAW_COLUMNS:
+        raise ContractError(f"{route} columns are not exact")
+    if len(dataframe) != int(spec["rows"]):
+        raise ContractError(f"{route} row count differs: {len(dataframe)}")
+    timestamps = [_timestamp_ns(value, f"{route} date") for value in dataframe["date"]]
+    if not timestamps:
+        raise ContractError(f"{route} is empty")
+    if timestamps[0] != int(spec["start_ns"]) or timestamps[-1] != int(spec["end_ns"]):
+        raise ContractError(f"{route} bounds differ")
+    if len(set(timestamps)) != len(timestamps):
+        raise ContractError(f"{route} has duplicate timestamps")
+    expected_step = int(spec["step_ns"])
+    for previous, current in pairwise(timestamps):
+        if current <= previous:
+            raise ContractError(f"{route} timestamps are out of order")
+        if current - previous != expected_step:
+            raise ContractError(f"{route} timestamp continuity differs")
+    for position in range(len(dataframe)):
+        row = dataframe.iloc[position]
+        if route in ("futures", "mark"):
+            prices: dict[str, float] = {}
+            for column in ("open", "high", "low", "close"):
+                _, _, token = _float_parts(
+                    row[column], allow_nan=False, label=f"{route} row {position} {column}"
+                )
+                prices[column] = float.fromhex(token)
+            if not (
+                prices["low"]
+                <= min(prices["open"], prices["close"])
+                <= max(prices["open"], prices["close"])
+                <= prices["high"]
+            ):
+                raise ContractError(f"{route} row {position} has impossible OHLC geometry")
+            if route == "futures":
+                _, _, volume = _float_parts(
+                    row["volume"], allow_nan=False, label=f"{route} row {position} volume"
+                )
+                if float.fromhex(volume) < 0.0:
+                    raise ContractError(f"{route} row {position} has negative volume")
+            elif not math.isnan(float(row["volume"])):
+                raise ContractError("mark raw volume must be NaN on every row")
+        elif route == "funding":
+            _float_parts(
+                row["open"], allow_nan=False, label=f"funding row {position} open"
+            )
+            for column in ("high", "low", "close", "volume"):
+                _, zero_sign, token = _float_parts(
+                    row[column], allow_nan=False, label=f"funding row {position} {column}"
+                )
+                if token != 0.0.hex() or zero_sign != "p":
+                    raise ContractError(f"funding row {position} {column} must be positive zero")
+        else:
+            raise ContractError(f"unsupported OHLCV route: {route}")
+    return {
+        "row_count": len(dataframe),
+        "start_ns": timestamps[0],
+        "end_ns": timestamps[-1],
+        "step_ns": expected_step,
+    }
+
+
+def _duplicate_rejecting_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ContractError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def validate_leverage_json(raw_bytes: bytes) -> dict[str, Any]:  # noqa: C901
+    try:
+        document = json.loads(
+            raw_bytes.decode("utf-8"), object_pairs_hook=_duplicate_rejecting_hook
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError(f"leverage JSON is invalid: {exc}") from exc
+    if not isinstance(document, dict) or set(document) != {"updated", "data"}:
+        raise ContractError("leverage JSON top-level structure differs")
+    if not isinstance(document["updated"], str) or not document["updated"]:
+        raise ContractError("leverage updated identity is absent")
+    data = document["data"]
+    if not isinstance(data, dict) or len(data) != 422:
+        raise ContractError("leverage pair inventory differs")
+    tier_count = 0
+    expected_tier_keys = {
+        "tier",
+        "symbol",
+        "currency",
+        "minNotional",
+        "maxNotional",
+        "maintenanceMarginRate",
+        "maxLeverage",
+        "info",
+    }
+    expected_info_keys = {
+        "baseMaxLoan",
+        "imr",
+        "instFamily",
+        "instId",
+        "maxLever",
+        "maxSz",
+        "minSz",
+        "mmr",
+        "optMgnFactor",
+        "quoteMaxLoan",
+        "tier",
+        "uly",
+    }
+    for symbol, tiers in data.items():
+        if not isinstance(symbol, str) or not symbol.endswith("/USDT:USDT"):
+            raise ContractError("leverage symbol key is invalid")
+        if not isinstance(tiers, list) or not tiers:
+            raise ContractError(f"leverage tiers are absent for {symbol}")
+        previous_tier = 0
+        previous_max = -math.inf
+        for item in tiers:
+            tier_count += 1
+            if not isinstance(item, dict) or set(item) != expected_tier_keys:
+                raise ContractError(f"leverage tier structure differs for {symbol}")
+            if item["symbol"] != symbol or item["currency"] != "USDT":
+                raise ContractError(f"leverage tier identity differs for {symbol}")
+            if not isinstance(item["tier"], int) or item["tier"] != previous_tier + 1:
+                raise ContractError(f"leverage tier order differs for {symbol}")
+            previous_tier = item["tier"]
+            numeric: dict[str, float] = {}
+            for key in (
+                "minNotional",
+                "maxNotional",
+                "maintenanceMarginRate",
+                "maxLeverage",
+            ):
+                if isinstance(item[key], bool) or not isinstance(item[key], Real):
+                    raise ContractError(f"leverage {key} is not numeric for {symbol}")
+                numeric[key] = float(item[key])
+                if not math.isfinite(numeric[key]):
+                    raise ContractError(f"leverage {key} is nonfinite for {symbol}")
+            if numeric["minNotional"] <= previous_max:
+                raise ContractError(f"leverage notional tiers overlap for {symbol}")
+            if numeric["maxNotional"] < numeric["minNotional"]:
+                raise ContractError(f"leverage notional bounds invert for {symbol}")
+            if numeric["maxLeverage"] <= 0.0 or numeric["maintenanceMarginRate"] < 0.0:
+                raise ContractError(f"leverage values are invalid for {symbol}")
+            previous_max = numeric["maxNotional"]
+            if not isinstance(item["info"], dict) or set(item["info"]) != expected_info_keys:
+                raise ContractError(f"leverage info structure differs for {symbol}")
+    if tier_count != 36_929:
+        raise ContractError(f"leverage tier count differs: {tier_count}")
+    if len(data.get(PAIR, [])) != 99:
+        raise ContractError("BTC leverage tier count differs")
+    return {
+        "pair_count": len(data),
+        "tier_count": tier_count,
+        "btc_tier_count": len(data[PAIR]),
+        "updated": document["updated"],
+    }
+
+
+def _run_git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if completed.returncode != 0:
+        raise ContractError(f"git identity command failed for {repository}")
+    return completed.stdout.strip()
+
+
+def _file_identity(path: Path, expected_sha256: str) -> dict[str, Any]:
+    resolved = _regular_file_no_links(path, "frozen identity file")
+    actual = _sha256_file(resolved)
+    if actual != expected_sha256:
+        raise ContractError(f"frozen source hash differs: {path}")
+    return {"path": str(path), "sha256": actual, "size": resolved.stat().st_size}
+
+
+def _validated_repository_paths(worktree: Path) -> dict[str, Path]:
+    resolved_root = _directory_no_links(worktree, "worktree repository")
+    candidates = {
+        "backend": resolved_root / "freqtrade",
+        "frontend": resolved_root / "frequi",
+        "strategies": resolved_root / "freqtrade-strategies",
+    }
+    repositories = {"root": resolved_root}
+    for name, expected_path in candidates.items():
+        resolved = _directory_no_links(expected_path, f"{name} repository")
+        if (
+            os.path.normcase(str(resolved)) != os.path.normcase(str(expected_path))
+            or not resolved.is_relative_to(resolved_root)
+            or resolved == resolved_root
+        ):
+            raise ContractError(f"{name} repository escapes the validated worktree")
+        repositories[name] = resolved
+    return repositories
+
+
+def _validate_repository_checkout(worktree: Path) -> dict[str, Any]:
+    repositories = _validated_repository_paths(worktree)
+    _validate_executable_backend_tree(repositories["backend"])
+    expected_heads = {
+        "root": ROOT_HEAD,
+        "backend": BACKEND_HEAD,
+        "frontend": FRONTEND_HEAD,
+        "strategies": STRATEGIES_HEAD,
+    }
+    heads: dict[str, str] = {}
+    for name, path in repositories.items():
+        expected_head = expected_heads[name]
+        actual_head = _run_git(path, "rev-parse", "HEAD")
+        if actual_head != expected_head:
+            raise ContractError(f"{name} HEAD differs from the frozen identity")
+        status = _run_git(path, "status", "--porcelain=v1", "--untracked-files=all")
+        if status:
+            raise ContractError(f"{name} checkout is not clean")
+        heads[name] = actual_head
+    return {
+        "root": {"path": str(repositories["root"]), "head": heads["root"]},
+        "submodules": {
+            name: heads[name] for name in ("backend", "frontend", "strategies")
+        },
+    }
+
+
+def _validate_code_identities(worktree: Path, strategy: Path) -> dict[str, Any]:
+    checkout = _validate_repository_checkout(worktree)
+    baseline_paths = (
+        worktree / "ft_userdata/user_data/strategies/VolatilitySystem.py",
+        worktree / "freqtrade-strategies/user_data/strategies/futures/VolatilitySystem.py",
+    )
+    return {
+        **checkout,
+        "candidate": _file_identity(strategy, STRATEGY_SHA256),
+        "frozen_test": _file_identity(EXPECTED_TEST, TEST_SHA256),
+        "baselines": [_file_identity(path, BASELINE_SHA256) for path in baseline_paths],
+    }
+
+
+def _expected_backend_file(backend: Path, relative: Path, label: str) -> Path:
+    expected = backend / relative
+    resolved = _regular_file_no_links(expected, label)
+    if (
+        os.path.normcase(str(resolved)) != os.path.normcase(str(expected))
+        or not resolved.is_relative_to(backend)
+    ):
+        raise ContractError(f"{label} escapes the validated backend")
+    return resolved
+
+
+def _validate_critical_backend_sources(backend: Path) -> dict[str, Path]:
+    validated: dict[str, Path] = {}
+    for module_name, (relative, expected_sha256) in CRITICAL_BACKEND_SOURCES.items():
+        source = _expected_backend_file(
+            backend, relative, f"critical backend source {module_name}"
+        )
+        if source.suffix.casefold() != ".py":
+            raise ContractError(f"critical backend source is not Python: {module_name}")
+        if _sha256_file(source) != expected_sha256:
+            raise ContractError(f"critical source hash differs: {module_name}")
+        validated[module_name] = source
+    return validated
+
+
+def _loaded_module_source_path(
+    value: Any, *, package: Path, label: str
+) -> Path:
+    if not isinstance(value, (str, os.PathLike)):
+        raise ContractError(f"{label} source path is absent")
+    supplied = Path(value)
+    if (
+        not supplied.is_absolute()
+        or supplied.suffix.casefold() != ".py"
+        or any(part.casefold() == "__pycache__" for part in supplied.parts)
+    ):
+        raise ContractError(f"{label} must be an absolute .py source")
+    resolved = _regular_file_no_links(supplied, f"{label} source")
+    if not resolved.is_relative_to(package):
+        raise ContractError(f"{label} source is outside the executable package")
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(supplied)):
+        raise ContractError(f"{label} source path differs after validation")
+    return resolved
+
+
+def _validate_loaded_freqtrade_modules(
+    backend: Path,
+    critical_sources: Mapping[str, Path],
+    *,
+    required_modules: Sequence[str],
+) -> None:
+    package = _directory_no_links(backend / "freqtrade", "Freqtrade executable package")
+    loaded_names: set[str] = set()
+    for module_name, module in tuple(sys.modules.items()):
+        if module_name != "freqtrade" and not module_name.startswith("freqtrade."):
+            continue
+        if module is None:
+            continue
+        module_file = getattr(module, "__file__", None)
+        spec = getattr(module, "__spec__", None)
+        spec_origin = getattr(spec, "origin", None)
+        has_file = isinstance(module_file, (str, os.PathLike)) or isinstance(
+            spec_origin, (str, os.PathLike)
+        )
+        if not has_file:
+            if module_name in required_modules:
+                raise ContractError(f"required loaded module has no source: {module_name}")
+            continue
+        file_path = _loaded_module_source_path(
+            module_file, package=package, label=f"loaded module {module_name} __file__"
+        )
+        origin_path = _loaded_module_source_path(
+            spec_origin, package=package, label=f"loaded module {module_name} origin"
+        )
+        if origin_path != file_path:
+            raise ContractError(f"loaded module origin differs from __file__: {module_name}")
+        expected = critical_sources.get(module_name)
+        if expected is not None and file_path != expected:
+            raise ContractError(f"critical loaded module path differs: {module_name}")
+        loaded_names.add(module_name)
+    missing = set(required_modules).difference(loaded_names)
+    if missing:
+        raise ContractError(f"required Freqtrade modules are not loaded: {sorted(missing)}")
+
+
+def _require_imported_module_file(
+    module: Any, expected: Path, backend: Path, label: str
+) -> Path:
+    supplied_value = getattr(module, "__file__", None)
+    if not isinstance(supplied_value, (str, os.PathLike)):
+        raise ContractError(f"{label} imported source path is absent")
+    supplied = Path(supplied_value)
+    if not supplied.is_absolute() or os.path.normcase(str(supplied)) != os.path.normcase(
+        str(expected)
+    ):
+        raise ContractError(f"{label} imported from an unexpected source path")
+    resolved = _regular_file_no_links(supplied, f"{label} imported source")
+    if resolved != expected or not resolved.is_relative_to(backend):
+        raise ContractError(f"{label} imported from outside the validated backend")
+    return resolved
+
+
+def _import_freqtrade_core(worktree: Path) -> dict[str, Any]:
+    backend = _validated_repository_paths(worktree)["backend"]
+    _require_source_only_import_policy()
+    existing = [
+        name
+        for name in sys.modules
+        if name == "freqtrade" or name.startswith("freqtrade.")
+    ]
+    if existing:
+        raise ContractError("Freqtrade was imported before admission completed")
+    _validate_repository_checkout(worktree)
+    _validate_critical_backend_sources(backend)
+    sys.path.insert(0, str(backend))
+    freqtrade = importlib.import_module("freqtrade")
+    history = importlib.import_module("freqtrade.data.history.history_utils")
+    enums = importlib.import_module("freqtrade.enums")
+    expected_files = _validate_critical_backend_sources(backend)
+    _validate_loaded_freqtrade_modules(
+        backend,
+        expected_files,
+        required_modules=CORE_FREQTRADE_MODULES,
+    )
+    _validate_repository_checkout(worktree)
+    package_file = _require_imported_module_file(
+        freqtrade, expected_files["freqtrade"], backend, "Freqtrade package"
+    )
+    if freqtrade.__version__ != FREQTRADE_VERSION:
+        raise ContractError(f"Freqtrade version differs: {freqtrade.__version__}")
+    _require_imported_module_file(
+        history,
+        expected_files["freqtrade.data.history.history_utils"],
+        backend,
+        "Freqtrade history_utils",
+    )
+    _require_imported_module_file(
+        enums, expected_files["freqtrade.enums"], backend, "Freqtrade enums"
+    )
+    return {
+        "package": freqtrade,
+        "history": history,
+        "CandleType": enums.CandleType,
+        "TradingMode": enums.TradingMode,
+        "MarginMode": enums.MarginMode,
+        "identity": {
+            "file": str(package_file),
+            "version": freqtrade.__version__,
+            "init_sha256": FREQTRADE_INIT_SHA256,
+            "backend_head": BACKEND_HEAD,
+        },
+    }
+
+
+def _assert_inventory_equal(
+    expected: Any,
+    actual: Any,
+    *,
+    label: str,
+    expected_nan_columns: Iterable[str] = (),
+    actual_nan_columns: Iterable[str] = (),
+) -> tuple[bytes, bytes]:
+    expected_bytes = canonical_ohlcv_inventory(
+        expected, allow_nan_columns=expected_nan_columns
+    )
+    actual_bytes = canonical_ohlcv_inventory(actual, allow_nan_columns=actual_nan_columns)
+    if expected_bytes != actual_bytes:
+        raise ContractError(f"{label} loaded inventory differs from neutral inventory")
+    return expected_bytes, actual_bytes
+
+
+def assert_mark_normalization(raw: Any, loaded: Any) -> int:
+    if tuple(raw.columns) != RAW_COLUMNS or tuple(loaded.columns) != RAW_COLUMNS:
+        raise ContractError("Mark normalization columns differ")
+    if len(raw) != len(loaded):
+        raise ContractError("Mark normalization changed row count")
+    normalized = 0
+    for position in range(len(raw)):
+        raw_row = raw.iloc[position]
+        loaded_row = loaded.iloc[position]
+        if _timestamp_ns(raw_row["date"], "raw Mark date") != _timestamp_ns(
+            loaded_row["date"], "loaded Mark date"
+        ):
+            raise ContractError("Mark normalization changed a timestamp")
+        for column in ("open", "high", "low", "close"):
+            _, _, raw_token = _float_parts(
+                raw_row[column], allow_nan=False, label=f"raw Mark {column}"
+            )
+            _, _, loaded_token = _float_parts(
+                loaded_row[column], allow_nan=False, label=f"loaded Mark {column}"
+            )
+            if raw_token != loaded_token:
+                raise ContractError(f"Mark normalization changed {column}")
+        if not math.isnan(float(raw_row["volume"])):
+            raise ContractError("raw Mark volume is not NaN")
+        _, sign, token = _float_parts(
+            loaded_row["volume"], allow_nan=False, label="loaded Mark volume"
+        )
+        if token != 0.0.hex() or sign != "p":
+            raise ContractError("Mark normalization did not produce positive volume zero")
+        normalized += 1
+    return normalized
+
+
+def _select_window(
+    dataframe: Any,
+    start_ns: int,
+    end_ns: int,
+    *,
+    include_end: bool,
+) -> Any:
+    positions: list[int] = []
+    for position, value in enumerate(dataframe["date"]):
+        timestamp_ns = _timestamp_ns(value)
+        if timestamp_ns >= start_ns and (
+            timestamp_ns <= end_ns if include_end else timestamp_ns < end_ns
+        ):
+            positions.append(position)
+    return dataframe.iloc[positions].copy(deep=True).reset_index(drop=True)
+
+
+def _assert_window(
+    dataframe: Any,
+    *,
+    label: str,
+    rows: int,
+    first_ns: int,
+    last_ns: int,
+) -> dict[str, int]:
+    if len(dataframe) != rows:
+        raise ContractError(f"{label} row count differs: {len(dataframe)}")
+    actual_first = _timestamp_ns(dataframe.iloc[0]["date"])
+    actual_last = _timestamp_ns(dataframe.iloc[-1]["date"])
+    if (actual_first, actual_last) != (first_ns, last_ns):
+        raise ContractError(f"{label} bounds differ")
+    return {"row_count": rows, "start_ns": first_ns, "end_ns": last_ns}
+
+
+def _admission_identity(summary: Mapping[str, Any]) -> dict[str, Any]:
+    _require_authoritative_admission_summary(summary)
+    inputs = {
+        name: {
+            key: value
+            for key, value in details.items()
+            if key
+            in {
+                "raw_sha256",
+                "raw_size",
+                "raw_inventory_sha256",
+                "loaded_inventory_sha256",
+                "row_count",
+                "start_ns",
+                "end_ns",
+            }
+        }
+        for name, details in summary["inputs"].items()
+    }
+    compact = {
+        "protocol": PROTOCOL,
+        "root_head": ROOT_HEAD,
+        "backend_head": BACKEND_HEAD,
+        "candidate_sha256": STRATEGY_SHA256,
+        "test_sha256": TEST_SHA256,
+        "baseline_sha256": BASELINE_SHA256,
+        "freqtrade_version": FREQTRADE_VERSION,
+        "freqtrade_init_sha256": FREQTRADE_INIT_SHA256,
+        "inputs": inputs,
+        "windows": summary["windows"],
+    }
+    compact["admission_sha256"] = ADMISSION_SUMMARY_SHA256
+    return compact
+
+
+def admit(  # noqa: C901
+    environment: Mapping[str, str] | None = None,
+) -> AdmissionState:
+    env = os.environ if environment is None else environment
+    worktree = _validate_exact_path(
+        env.get(WORKTREE_ENV),
+        environment_name=WORKTREE_ENV,
+        expected=EXPECTED_WORKTREE,
+        kind="directory",
+    )
+    strategy = _validate_exact_path(
+        env.get(STRATEGY_ENV),
+        environment_name=STRATEGY_ENV,
+        expected=EXPECTED_STRATEGY,
+        kind="file",
+    )
+    data_root = _validate_exact_path(
+        env.get(DATA_ROOT_ENV),
+        environment_name=DATA_ROOT_ENV,
+        expected=EXPECTED_DATA_ROOT,
+        kind="directory",
+    )
+    code_identities = _validate_code_identities(worktree, strategy)
+
+    raw_paths: dict[str, Path] = {}
+    initial_hashes: dict[str, str] = {}
+    for name, spec in RAW_SPECS.items():
+        supplied_raw_path = data_root / spec["relative"]
+        _assert_no_links(supplied_raw_path)
+        path = supplied_raw_path.resolve(strict=True)
+        if not path.is_file():
+            raise ContractError(f"{name} raw input is not a file")
+        if path.stat().st_size != spec["size"]:
+            raise ContractError(f"{name} raw byte size differs")
+        raw_paths[name] = path
+        digest = _sha256_file(path)
+        if digest != spec["sha256"]:
+            raise ContractError(f"{name} raw SHA256 differs")
+        initial_hashes[name] = digest
+
+    frames: dict[str, Any] = {}
+    schemas: dict[str, dict[str, Any]] = {}
+    raw_stats: dict[str, dict[str, Any]] = {}
+    raw_inventories: dict[str, bytes] = {}
+    for name in ("futures", "mark", "funding"):
+        frames[name], schemas[name] = _neutral_read_feather(raw_paths[name], name)
+        raw_stats[name] = validate_ohlcv_route(frames[name], RAW_SPECS[name])
+        raw_inventories[name] = canonical_ohlcv_inventory(
+            frames[name], allow_nan_columns=("volume",) if name == "mark" else ()
+        )
+        if hashlib.sha256(raw_inventories[name]).hexdigest() != RAW_SPECS[name][
+            "raw_inventory_sha256"
+        ]:
+            raise ContractError(f"{name} neutral inventory hash differs")
+    leverage_bytes = raw_paths["leverage"].read_bytes()
+    leverage_stats = validate_leverage_json(leverage_bytes)
+
+    neutral_rehashes = {name: _sha256_file(path) for name, path in raw_paths.items()}
+    if neutral_rehashes != initial_hashes:
+        raise ContractError("a raw input changed during neutral admission")
+
+    core = _import_freqtrade_core(worktree)
+    load_pair_history = core["history"].load_pair_history
+    candle_type = core["CandleType"]
+    loaded = {
+        "futures": load_pair_history(
+            PAIR,
+            "1h",
+            data_root,
+            fill_up_missing=True,
+            drop_incomplete=False,
+            data_format="feather",
+            candle_type=candle_type.FUTURES,
+        ),
+        "mark": load_pair_history(
+            PAIR,
+            "1h",
+            data_root,
+            fill_up_missing=True,
+            drop_incomplete=False,
+            data_format="feather",
+            candle_type=candle_type.MARK,
+        ),
+        "funding": load_pair_history(
+            PAIR,
+            "1h",
+            data_root,
+            fill_up_missing=False,
+            drop_incomplete=False,
+            data_format="feather",
+            candle_type=candle_type.FUNDING_RATE,
+        ),
+    }
+    _, futures_loaded = _assert_inventory_equal(
+        frames["futures"], loaded["futures"], label="Futures"
+    )
+    _, funding_loaded = _assert_inventory_equal(
+        frames["funding"], loaded["funding"], label="Funding"
+    )
+    mark_normalized_rows = assert_mark_normalization(frames["mark"], loaded["mark"])
+    mark_loaded = canonical_ohlcv_inventory(loaded["mark"])
+    loaded_inventories = {
+        "futures": futures_loaded,
+        "mark": mark_loaded,
+        "funding": funding_loaded,
+    }
+    for name, inventory in loaded_inventories.items():
+        if hashlib.sha256(inventory).hexdigest() != RAW_SPECS[name][
+            "loaded_inventory_sha256"
+        ]:
+            raise ContractError(f"{name} loaded inventory hash differs")
+
+    primary = _select_window(
+        loaded["futures"], PRIMARY_START_NS, PRIMARY_END_NS, include_end=False
+    )
+    scored = _select_window(
+        loaded["futures"], SCORED_START_NS, SCORED_END_NS, include_end=False
+    )
+    performance = _select_window(
+        loaded["futures"], PERFORMANCE_START_NS, SCORED_END_NS, include_end=True
+    )
+    audit = _select_window(
+        loaded["futures"], AUDIT_START_NS, SCORED_START_NS, include_end=True
+    )
+    windows = {
+        "primary": _assert_window(
+            primary,
+            label="primary",
+            rows=13_128,
+            first_ns=PRIMARY_START_NS,
+            last_ns=PRIMARY_END_NS - HOUR_NS,
+        ),
+        "scored": _assert_window(
+            scored,
+            label="scored",
+            rows=TARGET_COUNT,
+            first_ns=SCORED_START_NS,
+            last_ns=SCORED_END_NS - HOUR_NS,
+        ),
+        "performance": _assert_window(
+            performance,
+            label="performance",
+            rows=9_260,
+            first_ns=PERFORMANCE_START_NS,
+            last_ns=SCORED_END_NS,
+        ),
+        "audit_through_first_target": _assert_window(
+            audit,
+            label="audit",
+            rows=799,
+            first_ns=AUDIT_START_NS,
+            last_ns=SCORED_START_NS,
+        ),
+    }
+    offset_counts = Counter(
+        (_timestamp_ns(value) // HOUR_NS) % 3 for value in scored["date"]
+    )
+    if dict(offset_counts) != {0: 2_920, 1: 2_920, 2: 2_920}:
+        raise ContractError(f"scored UTC offsets differ: {dict(offset_counts)}")
+    for ordinal, timestamp_ns in zip(
+        WITNESS_ORDINALS, WITNESS_TIMESTAMPS_NS, strict=True
+    ):
+        if _timestamp_ns(scored.iloc[ordinal]["date"]) != timestamp_ns:
+            raise ContractError(f"restart witness ordinal differs: {ordinal}")
+    windows["scored"]["offset_counts"] = {str(key): value for key, value in offset_counts.items()}
+    windows["scored"]["witness_ordinals"] = list(WITNESS_ORDINALS)
+    windows["performance"]["prefix_rows"] = 499
+    windows["performance"]["sentinel_rows"] = 1
+
+    inputs: dict[str, dict[str, Any]] = {}
+    for name in ("futures", "mark", "funding"):
+        inputs[name] = {
+            "relative_path": RAW_SPECS[name]["relative"].as_posix(),
+            "raw_sha256": initial_hashes[name],
+            "raw_size": raw_paths[name].stat().st_size,
+            "schema": schemas[name],
+            **raw_stats[name],
+            "raw_inventory_sha256": hashlib.sha256(raw_inventories[name]).hexdigest(),
+            "raw_inventory_bytes": len(raw_inventories[name]),
+            "loaded_inventory_sha256": hashlib.sha256(
+                loaded_inventories[name]
+            ).hexdigest(),
+            "loaded_inventory_bytes": len(loaded_inventories[name]),
+            "fill_up_missing": name != "funding",
+        }
+    inputs["mark"]["permitted_normalized_rows"] = mark_normalized_rows
+    inputs["leverage"] = {
+        "relative_path": RAW_SPECS["leverage"]["relative"].as_posix(),
+        "raw_sha256": initial_hashes["leverage"],
+        "raw_size": raw_paths["leverage"].stat().st_size,
+        **leverage_stats,
+    }
+
+    end_hashes = {name: _sha256_file(path) for name, path in raw_paths.items()}
+    if end_hashes != initial_hashes:
+        raise ContractError("a raw input changed during loader admission")
+    if any(
+        name == "freqtrade.resolvers" or name.startswith("freqtrade.resolvers.")
+        for name in sys.modules
+    ):
+        raise ContractError("StrategyResolver became reachable during admission")
+    summary = {
+        "protocol": PROTOCOL,
+        "command": "admit",
+        "identities": {**code_identities, "freqtrade": core["identity"]},
+        "inputs": inputs,
+        "windows": windows,
+        "raw_rehashes": {
+            "initial": initial_hashes,
+            "after_neutral_read": neutral_rehashes,
+            "after_loader": end_hashes,
+        },
+        "strategy_resolver_imported": False,
+    }
+    summary["summary_sha256"] = _json_sha256(summary)
+    _require_authoritative_admission_summary(summary)
+    return AdmissionState(
+        guard=_ADMISSION_GUARD,
+        summary=summary,
+        primary_frame=primary,
+        paths={
+            "worktree": worktree,
+            "strategy": strategy,
+            "test": EXPECTED_TEST,
+            "baseline_a": worktree / "ft_userdata/user_data/strategies/VolatilitySystem.py",
+            "baseline_b": worktree
+            / "freqtrade-strategies/user_data/strategies/futures/VolatilitySystem.py",
+            **{f"raw_{name}": path for name, path in raw_paths.items()},
+        },
+        raw_hashes=initial_hashes,
+        trading_mode=core["TradingMode"].FUTURES,
+        margin_mode=core["MarginMode"].ISOLATED,
+    )
+
+
+def _ensure_admitted(state: AdmissionState) -> None:
+    if state.guard is not _ADMISSION_GUARD:
+        raise ContractError("StrategyResolver is unreachable before successful admission")
+    _require_authoritative_admission_summary(state.summary)
+    if state.raw_hashes != {name: spec["sha256"] for name, spec in RAW_SPECS.items()}:
+        raise ContractError("StrategyResolver is unreachable with incomplete raw admission")
+
+
+def _load_strategy_resolver(state: AdmissionState) -> Any:
+    _ensure_admitted(state)
+    worktree = state.paths["worktree"]
+    backend = _validated_repository_paths(worktree)["backend"]
+    _require_source_only_import_policy()
+    _validate_executable_backend_tree(backend)
+    expected_files = _validate_critical_backend_sources(backend)
+    _validate_loaded_freqtrade_modules(
+        backend,
+        expected_files,
+        required_modules=CORE_FREQTRADE_MODULES,
+    )
+    _validate_repository_checkout(worktree)
+    _validate_critical_backend_sources(backend)
+    resolvers = importlib.import_module("freqtrade.resolvers")
+    expected_files = _validate_critical_backend_sources(backend)
+    _validate_loaded_freqtrade_modules(
+        backend,
+        expected_files,
+        required_modules=RESOLVER_FREQTRADE_MODULES,
+    )
+    _validate_repository_checkout(worktree)
+    return resolvers.StrategyResolver
+
+
+class _IdentityWeakSet:
+    def __init__(self) -> None:
+        self._references: dict[int, weakref.ReferenceType[Any]] = {}
+
+    def add(self, value: Any) -> bool:
+        identity = id(value)
+        existing = self._references.get(identity)
+        if existing is not None and existing() is value:
+            return False
+
+        def discard(reference: weakref.ReferenceType[Any]) -> None:
+            if self._references.get(identity) is reference:
+                self._references.pop(identity, None)
+
+        try:
+            self._references[identity] = weakref.ref(value, discard)
+        except TypeError as exc:
+            raise SemanticMismatch("resolved strategy identity is not weak-referenceable") from exc
+        return True
+
+
+class FreshResolverGuard:
+    def __init__(self) -> None:
+        self.calls = 0
+        self._instances = _IdentityWeakSet()
+        self._classes = _IdentityWeakSet()
+
+    def accept(self, strategy: Any) -> int:
+        current_class = type(strategy)
+        if not self._instances.add(strategy):
+            raise SemanticMismatch("StrategyResolver reused a strategy instance")
+        if not self._classes.add(current_class):
+            raise SemanticMismatch("StrategyResolver reused a dynamic strategy class")
+        self.calls += 1
+        return self.calls
+
+
+def _strategy_config(state: AdmissionState) -> dict[str, Any]:
+    return {
+        "strategy": "VolatilitySystem",
+        "strategy_path": str(state.paths["strategy"].parent),
+        "user_data_dir": state.paths["worktree"] / "ft_userdata/user_data",
+        "trading_mode": state.trading_mode,
+        "margin_mode": state.margin_mode,
+    }
+
+
+def _assert_frame_preserved(before: Any, after: Any, stage: str) -> None:
+    if len(before) != len(after) or not after.index.equals(before.index):
+        raise SemanticMismatch(f"{stage} changed row count or index")
+    if "date" not in after.columns or not after["date"].equals(before["date"]):
+        raise SemanticMismatch(f"{stage} changed admitted date rows")
+
+
+def _resolve_and_run(
+    dataframe: Any,
+    *,
+    resolver_api: Any,
+    resolver_config: Mapping[str, Any],
+    source_path: Path,
+    guard: FreshResolverGuard,
+) -> tuple[Any, dict[str, Any]]:
+    source_before_path = _regular_file_no_links(source_path, "candidate source")
+    source_before = source_before_path.read_bytes()
+    before_hash = hashlib.sha256(source_before).hexdigest()
+    if before_hash != STRATEGY_SHA256 or len(source_before) != STRATEGY_SIZE:
+        raise ContractError("candidate source changed before resolver call")
+    strategy = resolver_api.load_strategy(dict(resolver_config))
+    ordinal = guard.accept(strategy)
+    try:
+        resolved_path = Path(strategy.__file__).resolve(strict=True)
+    except (AttributeError, FileNotFoundError) as exc:
+        raise SemanticMismatch("resolved strategy source path is absent") from exc
+    if resolved_path != source_path.resolve(strict=True):
+        raise SemanticMismatch(f"resolved strategy source differs: {resolved_path}")
+    captured_bytes = getattr(strategy, "__source_bytes__", None)
+    if type(captured_bytes) is not bytes:
+        raise SemanticMismatch("resolved strategy captured source bytes are absent")
+    captured_hash = hashlib.sha256(captured_bytes).hexdigest()
+    if (
+        captured_hash != STRATEGY_SHA256
+        or len(captured_bytes) != STRATEGY_SIZE
+        or captured_bytes != source_before
+    ):
+        raise SemanticMismatch("resolved strategy captured source bytes differ")
+    source_after_path = _regular_file_no_links(source_path, "candidate source")
+    source_after = source_after_path.read_bytes()
+    if (
+        hashlib.sha256(source_after).hexdigest() != before_hash
+        or len(source_after) != STRATEGY_SIZE
+        or source_after != source_before
+    ):
+        raise SemanticMismatch("resolved strategy source file changed")
+    if strategy.startup_candle_count != 499:
+        raise SemanticMismatch(f"startup count differs: {strategy.startup_candle_count}")
+
+    admitted = dataframe.copy(deep=True)
+    indicators = strategy.advise_indicators(admitted.copy(deep=True), META)
+    _assert_frame_preserved(admitted, indicators, "advise_indicators")
+    result = strategy.ft_advise_signals(indicators.copy(deep=True), META)
+    _assert_frame_preserved(indicators, result, "ft_advise_signals")
+    missing = sorted(REQUIRED_OUTPUT_COLUMNS.difference(result.columns))
+    if missing:
+        raise SemanticMismatch(f"strategy output columns are absent: {missing}")
+    return result, {
+        "ordinal": ordinal,
+        "path": str(resolved_path),
+        "source_sha256": captured_hash,
+        "source_size": len(captured_bytes),
+        "startup_candle_count": strategy.startup_candle_count,
+        "fresh_instance": True,
+        "fresh_dynamic_class": True,
+    }
+
+
+def signature_from_row(row: Any) -> dict[str, Any]:
+    pd = importlib.import_module("pandas")
+    nan_mask: list[str] = []
+    float_values: dict[str, str | None] = {}
+    for column in FLOAT_COLUMNS:
+        value = row[column]
+        if pd.isna(value):
+            nan_mask.append("1")
+            float_values[column] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise SemanticMismatch(f"{column} is not a real strategy value")
+        number = float(value)
+        if not math.isfinite(number):
+            raise SemanticMismatch(f"{column} is infinite")
+        nan_mask.append("0")
+        float_values[column] = number.hex()
+    booleans: dict[str, bool] = {}
+    for column in BOOL_COLUMNS:
+        value = row[column]
+        numpy_boolean = type(value).__module__.startswith("numpy") and type(value).__name__ in {
+            "bool",
+            "bool_",
+        }
+        if pd.isna(value) or (
+            not isinstance(value, bool) and not numpy_boolean
+        ):
+            raise SemanticMismatch(f"{column} is not boolean")
+        booleans[column] = bool(value)
+    signals: dict[str, int] = {}
+    for column in SIGNAL_COLUMNS:
+        value = row[column]
+        if pd.isna(value) or isinstance(value, bool):
+            raise SemanticMismatch(f"{column} is not an exact 0/1 signal")
+        try:
+            signal = int(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise SemanticMismatch(f"{column} is not an exact 0/1 signal") from exc
+        if signal not in (0, 1) or float(value) != float(signal):
+            raise SemanticMismatch(f"{column} is not an exact 0/1 signal")
+        signals[column] = signal
+    source = row["source_bucket_start"]
+    source_ns = None if pd.isna(source) else _timestamp_ns(source, "source bucket")
+    signature = {
+        "float_nan_mask": "".join(nan_mask),
+        "float_hex": float_values,
+        "booleans": booleans,
+        "signals": signals,
+        "source_bucket_start_ns": source_ns,
+    }
+    signature["sha256"] = _json_sha256(signature)
+    return signature
+
+
+def compare_signatures(reference: Mapping[str, Any], actual: Mapping[str, Any]) -> None:
+    for key in (
+        "float_nan_mask",
+        "float_hex",
+        "booleans",
+        "signals",
+        "source_bucket_start_ns",
+    ):
+        if reference.get(key) != actual.get(key):
+            raise SemanticMismatch(
+                f"target signature differs in {key}",
+                {
+                    "field": key,
+                    "reference": reference.get(key),
+                    "actual": actual.get(key),
+                },
+            )
+    if reference.get("sha256") != actual.get("sha256"):
+        raise SemanticMismatch(
+            "target signature hash differs",
+            {
+                "field": "sha256",
+                "reference": reference.get("sha256"),
+                "actual": actual.get("sha256"),
+            },
+        )
+
+
+def _require_finite_signature(signature: Mapping[str, Any], label: str) -> None:
+    if signature["float_nan_mask"] != "0" * len(FLOAT_COLUMNS):
+        raise SemanticMismatch(
+            f"{label} unexpectedly contains a NaN state value",
+            {"label": label, "signature": dict(signature)},
+        )
+
+
+def _boundary_field(signature: Mapping[str, Any], field: str) -> Any:
+    if field in FLOAT_COLUMNS:
+        index = FLOAT_COLUMNS.index(field)
+        return (
+            signature["float_nan_mask"][index],
+            signature["float_hex"][field],
+        )
+    if field in BOOL_COLUMNS:
+        return signature["booleans"][field]
+    if field in SIGNAL_COLUMNS:
+        return signature["signals"][field]
+    if field == "source_bucket_start_ns":
+        return signature[field]
+    raise ContractError(f"unknown boundary signature field: {field}")
+
+
+def _compare_boundary_signatures(
+    reference: Mapping[str, Any], actual: Mapping[str, Any], fields: Sequence[str]
+) -> None:
+    for field in fields:
+        if _boundary_field(reference, field) != _boundary_field(actual, field):
+            raise SemanticMismatch(
+                f"boundary signature differs in {field}",
+                {
+                    "field": field,
+                    "reference": _boundary_field(reference, field),
+                    "actual": _boundary_field(actual, field),
+                },
+            )
+
+
+def _row_at_timestamp(dataframe: Any, timestamp_ns: int) -> tuple[int, Any]:
+    matches = [
+        position
+        for position, value in enumerate(dataframe["date"])
+        if _timestamp_ns(value) == timestamp_ns
+    ]
+    if len(matches) != 1:
+        raise SemanticMismatch(f"timestamp identity has {len(matches)} rows: {timestamp_ns}")
+    position = matches[0]
+    return position, dataframe.iloc[position]
+
+
+def _source_identity(dataframe: Any, signature: Mapping[str, Any]) -> dict[str, Any]:
+    source_start = signature["source_bucket_start_ns"]
+    if source_start is None:
+        raise SemanticMismatch("mature target has no source bucket identity")
+    members: list[dict[str, Any]] = []
+    bucket_bytes = bytearray()
+    for timestamp_ns in (source_start, source_start + HOUR_NS, source_start + 2 * HOUR_NS):
+        position, _ = _row_at_timestamp(dataframe, timestamp_ns)
+        row_bytes = _canonical_single_row(dataframe, position)
+        bucket_bytes.extend(row_bytes)
+        members.append(
+            {
+                "timestamp_ns": timestamp_ns,
+                "row_sha256": hashlib.sha256(row_bytes).hexdigest(),
+            }
+        )
+    return {
+        "source_bucket_start_ns": source_start,
+        "constituents": members,
+        "bucket_rows_sha256": hashlib.sha256(bucket_bytes).hexdigest(),
+    }
+
+
+def deduplicate_suffix_bytes(
+    labelled_bytes: Sequence[tuple[str, int, bytes]],
+) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for label, requested_length, payload in labelled_bytes:
+        matching = next((group for group in groups if group["bytes"] == payload), None)
+        if matching is None:
+            matching = {
+                "bytes": payload,
+                "executed_rows": requested_length,
+                "labels": [],
+                "requested_lengths": {},
+            }
+            groups.append(matching)
+        matching["labels"].append(label)
+        matching["requested_lengths"][label] = requested_length
+    for group in groups:
+        group["labels"].sort()
+        group["sha256"] = hashlib.sha256(group["bytes"]).hexdigest()
+    return groups
+
+
+def _suffix_groups(through_target: Any) -> list[dict[str, Any]]:
+    labelled: list[tuple[str, int, bytes]] = []
+    frames: dict[int, Any] = {}
+    for label, requested_length in SUFFIX_REQUESTS:
+        if len(through_target) < requested_length:
+            raise SemanticMismatch(f"target lacks {requested_length} admitted rows")
+        frame = through_target.iloc[-requested_length:].copy(deep=True).reset_index(drop=True)
+        frames[requested_length] = frame
+        labelled.append((label, requested_length, canonical_ohlcv_inventory(frame)))
+    groups = deduplicate_suffix_bytes(labelled)
+    if len(groups) != 4:
+        raise SemanticMismatch(f"suffix byte dedup produced {len(groups)} executions")
+    for group in groups:
+        group["frame"] = frames[group["executed_rows"]]
+    actual = [(group["executed_rows"], tuple(group["labels"])) for group in groups]
+    expected = [
+        (499, ("499",)),
+        (599, ("cold599", "explicit599", "warm599")),
+        (600, ("600",)),
+        (799, ("799",)),
+    ]
+    if actual != expected:
+        raise SemanticMismatch(f"suffix labels did not collapse exactly: {actual}")
+    return groups
+
+
+def _completion_positions(dataframe: Any) -> list[int]:
+    pd = importlib.import_module("pandas")
+    positions: list[int] = []
+    for position in range(len(dataframe)):
+        source = dataframe.iloc[position]["source_bucket_start"]
+        if pd.isna(source):
+            continue
+        if _timestamp_ns(dataframe.iloc[position]["date"]) == _timestamp_ns(source) + 2 * HOUR_NS:
+            positions.append(position)
+    return positions
+
+
+def derive_and_verify_boundaries(  # noqa: C901
+    suffix: Any, result: Any, full_result: Any
+) -> dict[str, Any]:
+    first_ns = _timestamp_ns(suffix.iloc[0]["date"])
+    first_hour = (first_ns // HOUR_NS) % 24
+    offset = first_hour % 3
+    expected = BOUNDARY_ROWS[offset]
+    valid_positions = [
+        position
+        for position in range(len(result))
+        if bool(result.iloc[position]["valid"])
+    ]
+    if not valid_positions:
+        raise SemanticMismatch("suffix has no finite indicator boundary")
+    first_indicator = valid_positions[0]
+    if first_indicator != expected["indicator"] - 1:
+        raise SemanticMismatch(
+            f"offset {offset} first indicator position differs: {first_indicator + 1}"
+        )
+    for position in range(first_indicator):
+        row = result.iloc[position]
+        if bool(row["valid"]) or bool(row["long_eligible"]) or bool(row["short_eligible"]):
+            raise SemanticMismatch("pre-indicator masks did not fail closed")
+        if int(row["exit_long"]) != 0 or int(row["exit_short"]) != 0:
+            raise SemanticMismatch("pre-indicator exit masks did not fail closed")
+        if not math.isnan(float(row["rolling_mean_true_range"])) or not math.isnan(
+            float(row["volatility_threshold"])
+        ):
+            raise SemanticMismatch("pre-indicator floats did not retain NaN masks")
+
+    completion_positions = _completion_positions(result)
+    first_edge_computable: int | None = None
+    previous_completion: int | None = None
+    for position in completion_positions:
+        if previous_completion is not None:
+            previous = result.iloc[previous_completion]
+            current = result.iloc[position]
+            previous_source = _timestamp_ns(previous["source_bucket_start"])
+            current_source = _timestamp_ns(current["source_bucket_start"])
+            if (
+                bool(previous["valid"])
+                and bool(current["valid"])
+                and current_source - previous_source == 3 * HOUR_NS
+            ):
+                first_edge_computable = position
+                break
+        previous_completion = position
+    if first_edge_computable != expected["edge"] - 1:
+        actual = None if first_edge_computable is None else first_edge_computable + 1
+        raise SemanticMismatch(f"offset {offset} first edge boundary differs: {actual}")
+    for position in range(first_edge_computable):
+        row = result.iloc[position]
+        if bool(row["long_edge"]) or bool(row["short_edge"]):
+            raise SemanticMismatch("pre-edge boolean masks did not fail closed")
+        if int(row["enter_long"]) != 0 or int(row["enter_short"]) != 0:
+            raise SemanticMismatch("pre-edge entry masks did not fail closed")
+
+    indicator_ns = _timestamp_ns(result.iloc[first_indicator]["date"])
+    edge_ns = _timestamp_ns(result.iloc[first_edge_computable]["date"])
+    _, full_indicator_row = _row_at_timestamp(full_result, indicator_ns)
+    _, full_edge_row = _row_at_timestamp(full_result, edge_ns)
+    indicator_signature = signature_from_row(result.iloc[first_indicator])
+    indicator_reference = signature_from_row(full_indicator_row)
+    edge_signature = signature_from_row(result.iloc[first_edge_computable])
+    edge_reference = signature_from_row(full_edge_row)
+    _require_finite_signature(indicator_signature, "indicator boundary")
+    _require_finite_signature(edge_signature, "edge boundary")
+    _compare_boundary_signatures(
+        indicator_reference, indicator_signature, INDICATOR_BOUNDARY_FIELDS
+    )
+    _compare_boundary_signatures(edge_reference, edge_signature, EDGE_BOUNDARY_FIELDS)
+    return {
+        "start_offset": offset,
+        "indicator": {
+            "expected_raw_rows": expected["indicator"],
+            "actual_raw_rows": first_indicator + 1,
+            "timestamp_ns": indicator_ns,
+            "earlier_fail_closed": True,
+            "signature": indicator_signature,
+            "reference_signature": indicator_reference,
+            "compared_fields": list(INDICATOR_BOUNDARY_FIELDS),
+            "equal": True,
+        },
+        "edge": {
+            "expected_raw_rows": expected["edge"],
+            "actual_raw_rows": first_edge_computable + 1,
+            "timestamp_ns": edge_ns,
+            "earlier_fail_closed": True,
+            "signature": edge_signature,
+            "reference_signature": edge_reference,
+            "compared_fields": list(EDGE_BOUNDARY_FIELDS),
+            "equal": True,
+        },
+    }
+
+
+def _input_identity(dataframe: Any) -> dict[str, Any]:
+    inventory = canonical_ohlcv_inventory(dataframe)
+    return {
+        "row_count": len(dataframe),
+        "start_ns": _timestamp_ns(dataframe.iloc[0]["date"]),
+        "end_ns": _timestamp_ns(dataframe.iloc[-1]["date"]),
+        "inventory_sha256": hashlib.sha256(inventory).hexdigest(),
+        "inventory_bytes": len(inventory),
+    }
+
+
+def _target_descriptor(ordinal: int) -> dict[str, Any]:
+    timestamp_ns = SCORED_START_NS + ordinal * HOUR_NS
+    return {
+        "ordinal": ordinal,
+        "timestamp_ns": timestamp_ns,
+        "utc_offset": ordinal % 3,
+        "witness": ordinal in WITNESS_ORDINALS,
+    }
+
+
+def _comparison_payload(
+    reference_signature: Mapping[str, Any],
+    actual_signature: Mapping[str, Any],
+    reference_source: Mapping[str, Any],
+    actual_source: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "reference_signature_sha256": reference_signature["sha256"],
+        "actual_signature_sha256": actual_signature["sha256"],
+        "reference_source": reference_source,
+        "actual_source": actual_source,
+    }
+
+
+def _make_record(
+    *,
+    shard_id: int,
+    target: Mapping[str, Any],
+    profile: str,
+    labels: Sequence[str],
+    requested_lengths: Mapping[str, int],
+    resolver: Mapping[str, Any],
+    input_identity: Mapping[str, Any],
+    signature: Mapping[str, Any],
+    source_identity: Mapping[str, Any],
+    comparison: Mapping[str, Any] | None,
+    boundaries: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "protocol": PROTOCOL,
+        "shard_id": shard_id,
+        "shard_count": SHARD_COUNT,
+        "target": dict(target),
+        "profile": profile,
+        "labels": list(labels),
+        "requested_lengths": dict(requested_lengths),
+        "resolver": dict(resolver),
+        "input": dict(input_identity),
+        "signature": dict(signature),
+        "source_identity": dict(source_identity),
+        "comparison": None if comparison is None else dict(comparison),
+        "boundaries": None if boundaries is None else dict(boundaries),
+        "mismatch_count": 0,
+    }
+
+
+def _expected_end_rehashes(state: AdmissionState) -> dict[str, str]:
+    return {
+        "strategy": STRATEGY_SHA256,
+        "test": TEST_SHA256,
+        "baseline_a": BASELINE_SHA256,
+        "baseline_b": BASELINE_SHA256,
+        **{f"raw_{name}": digest for name, digest in state.raw_hashes.items()},
+    }
+
+
+def _capture_end_rehashes(state: AdmissionState) -> dict[str, str | None]:
+    actual: dict[str, str | None] = {}
+    for name in _expected_end_rehashes(state):
+        try:
+            path = _regular_file_no_links(state.paths[name], f"end identity {name}")
+            actual[name] = _sha256_file(path)
+        except (ContractError, OSError, KeyError):
+            actual[name] = None
+    return actual
+
+
+def _end_rehashes(
+    state: AdmissionState, failure_context: dict[str, Any] | None = None
+) -> dict[str, str]:
+    expected = _expected_end_rehashes(state)
+    actual = _capture_end_rehashes(state)
+    if failure_context is not None:
+        failure_context["end_identities"] = {
+            "expected": expected,
+            "actual": actual,
+        }
+    _validate_repository_checkout(state.paths["worktree"])
+    if actual != expected:
+        raise ContractError("an admitted source or input changed before shard commit")
+    return {name: digest for name, digest in actual.items() if digest is not None}
+
+
+def _initial_shard_failure_context(
+    state: AdmissionState, shard_id: int
+) -> dict[str, Any]:
+    return {
+        "shard_id": shard_id,
+        "target": None,
+        "profile": None,
+        "labels": None,
+        "requested_lengths": None,
+        "current_resolver_ordinal": None,
+        "next_resolver_ordinal": 1,
+        "admitted_global_identity": _admission_identity(state.summary),
+        "end_identities": {
+            "expected": _expected_end_rehashes(state),
+            "actual": None,
+        },
+    }
+
+
+def _set_shard_failure_position(
+    context: dict[str, Any] | None,
+    *,
+    target: Mapping[str, Any],
+    profile: str,
+    labels: Sequence[str],
+    requested_lengths: Mapping[str, int],
+    current_resolver_ordinal: int,
+    next_resolver_ordinal: int,
+) -> None:
+    if context is None:
+        return
+    context.update(
+        {
+            "target": dict(target),
+            "profile": profile,
+            "labels": list(labels),
+            "requested_lengths": dict(requested_lengths),
+            "current_resolver_ordinal": current_resolver_ordinal,
+            "next_resolver_ordinal": next_resolver_ordinal,
+        }
+    )
+
+
+def run_shard(
+    state: AdmissionState,
+    shard_id: int,
+    output_directory: Path,
+    *,
+    resolver_api: Any | None = None,
+    failure_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    _ensure_admitted(state)
+    _validate_output_path(output_directory, directory=True)
+    if shard_id not in range(SHARD_COUNT):
+        raise ContractError(f"shard id must be in 0..{SHARD_COUNT - 1}")
+    global_identity = _admission_identity(state.summary)
+    if failure_context is not None:
+        failure_context.update(_initial_shard_failure_context(state, shard_id))
+    resolver_api = _load_strategy_resolver(state) if resolver_api is None else resolver_api
+    resolver_config = _strategy_config(state)
+    guard = FreshResolverGuard()
+    records: list[dict[str, Any]] = []
+    comparisons = 0
+    primary = state.primary_frame
+    positions = {
+        _timestamp_ns(value): position for position, value in enumerate(primary["date"])
+    }
+
+    for ordinal in range(shard_id, TARGET_COUNT, SHARD_COUNT):
+        target = _target_descriptor(ordinal)
+        if failure_context is not None:
+            failure_context.update(
+                {
+                    "target": dict(target),
+                    "profile": None,
+                    "labels": None,
+                    "requested_lengths": None,
+                    "current_resolver_ordinal": guard.calls + 1,
+                    "next_resolver_ordinal": guard.calls + 1,
+                }
+            )
+        target_position = positions.get(target["timestamp_ns"])
+        if target_position is None:
+            raise SemanticMismatch(f"target timestamp is absent: {target['timestamp_ns']}")
+        through_target = primary.iloc[: target_position + 1].copy(deep=True).reset_index(drop=True)
+        if _timestamp_ns(through_target.iloc[-1]["date"]) != target["timestamp_ns"]:
+            raise SemanticMismatch("a full reference received later or missing rows")
+        full_lengths = {"full-reference": len(through_target)}
+        _set_shard_failure_position(
+            failure_context,
+            target=target,
+            profile="full",
+            labels=PROFILE_LABELS["full"],
+            requested_lengths=full_lengths,
+            current_resolver_ordinal=guard.calls + 1,
+            next_resolver_ordinal=guard.calls + 1,
+        )
+        full_result, full_resolver = _resolve_and_run(
+            through_target,
+            resolver_api=resolver_api,
+            resolver_config=resolver_config,
+            source_path=state.paths["strategy"],
+            guard=guard,
+        )
+        full_signature = signature_from_row(full_result.iloc[-1])
+        _require_finite_signature(full_signature, "full target")
+        full_source = _source_identity(through_target, full_signature)
+        full_record = _make_record(
+            shard_id=shard_id,
+            target=target,
+            profile="full",
+            labels=PROFILE_LABELS["full"],
+            requested_lengths=full_lengths,
+            resolver=full_resolver,
+            input_identity=_input_identity(through_target),
+            signature=full_signature,
+            source_identity=full_source,
+            comparison=None,
+            boundaries=None,
+        )
+        records.append(full_record)
+        _set_shard_failure_position(
+            failure_context,
+            target=target,
+            profile="full",
+            labels=PROFILE_LABELS["full"],
+            requested_lengths=full_lengths,
+            current_resolver_ordinal=full_resolver["ordinal"],
+            next_resolver_ordinal=guard.calls + 1,
+        )
+
+        for group in _suffix_groups(through_target):
+            suffix = group["frame"]
+            if _timestamp_ns(suffix.iloc[-1]["date"]) != target["timestamp_ns"]:
+                raise SemanticMismatch("a suffix received later or missing rows")
+            profile = f"suffix-{group['executed_rows']}"
+            _set_shard_failure_position(
+                failure_context,
+                target=target,
+                profile=profile,
+                labels=group["labels"],
+                requested_lengths=group["requested_lengths"],
+                current_resolver_ordinal=guard.calls + 1,
+                next_resolver_ordinal=guard.calls + 1,
+            )
+            suffix_result, suffix_resolver = _resolve_and_run(
+                suffix,
+                resolver_api=resolver_api,
+                resolver_config=resolver_config,
+                source_path=state.paths["strategy"],
+                guard=guard,
+            )
+            suffix_signature = signature_from_row(suffix_result.iloc[-1])
+            _require_finite_signature(suffix_signature, "suffix target")
+            suffix_source = _source_identity(suffix, suffix_signature)
+            compare_signatures(full_signature, suffix_signature)
+            if full_source != suffix_source:
+                raise SemanticMismatch(
+                    "source constituent row identities differ",
+                    {"reference": full_source, "actual": suffix_source},
+                )
+            boundaries = derive_and_verify_boundaries(suffix, suffix_result, full_result)
+            payload = _comparison_payload(
+                full_signature, suffix_signature, full_source, suffix_source
+            )
+            comparison = {
+                **payload,
+                "reference_resolver_ordinal": full_resolver["ordinal"],
+                "equal": True,
+                "sha256": _json_sha256(payload),
+            }
+            records.append(
+                _make_record(
+                    shard_id=shard_id,
+                    target=target,
+                    profile=profile,
+                    labels=group["labels"],
+                    requested_lengths=group["requested_lengths"],
+                    resolver=suffix_resolver,
+                    input_identity=_input_identity(suffix),
+                    signature=suffix_signature,
+                    source_identity=suffix_source,
+                    comparison=comparison,
+                    boundaries=boundaries,
+                )
+            )
+            comparisons += 1
+            _set_shard_failure_position(
+                failure_context,
+                target=target,
+                profile=profile,
+                labels=group["labels"],
+                requested_lengths=group["requested_lengths"],
+                current_resolver_ordinal=suffix_resolver["ordinal"],
+                next_resolver_ordinal=guard.calls + 1,
+            )
+
+    expected_targets = len(range(shard_id, TARGET_COUNT, SHARD_COUNT))
+    if guard.calls != expected_targets * 5 or len(records) != expected_targets * 5:
+        raise ContractError("shard resolver-call count differs")
+    if comparisons != expected_targets * 4:
+        raise ContractError("shard comparison count differs")
+    end_rehashes = _end_rehashes(state, failure_context)
+    records.sort(
+        key=lambda record: (
+            record["target"]["ordinal"],
+            PROFILE_ORDER.index(record["profile"]),
+        )
+    )
+    return _write_shard_success(
+        output_directory,
+        shard_id=shard_id,
+        records=records,
+        resolver_calls=guard.calls,
+        comparisons=comparisons,
+        global_identity=global_identity,
+        end_rehashes=end_rehashes,
+    )
+
+
+def _write_bytes_fsynced(path: Path, data: bytes) -> None:
+    with path.open("xb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _atomic_create_directory(target: Path, files: Mapping[str, bytes]) -> None:
+    _validate_output_path(target, directory=True)
+    stage = target.parent / f".{target.name}.tmp-{uuid.uuid4().hex}"
+    stage.mkdir(mode=0o700)
+    try:
+        for name, content in files.items():
+            if Path(name).name != name:
+                raise ContractError(f"invalid atomic output filename: {name}")
+            _write_bytes_fsynced(stage / name, content)
+        stage.rename(target)
+    except Exception:
+        if stage.exists():
+            shutil.rmtree(stage)
+        raise
+
+
+def _atomic_write_new_file(target: Path, content: bytes) -> None:
+    _validate_output_path(target, directory=False)
+    temporary = target.parent / f".{target.name}.tmp-{uuid.uuid4().hex}"
+    try:
+        _write_bytes_fsynced(temporary, content)
+        os.link(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _write_shard_success(
+    output_directory: Path,
+    *,
+    shard_id: int,
+    records: Sequence[Mapping[str, Any]],
+    resolver_calls: int,
+    comparisons: int,
+    global_identity: Mapping[str, Any],
+    end_rehashes: Mapping[str, str],
+) -> dict[str, Any]:
+    records_bytes = b"".join(_canonical_json_bytes(record) for record in records)
+    profile_counts = Counter(record["profile"] for record in records)
+    label_counts = Counter(label for record in records for label in record["labels"])
+    target_ordinals = sorted({record["target"]["ordinal"] for record in records})
+    done = {
+        "protocol": PROTOCOL,
+        "shard_id": shard_id,
+        "shard_count": SHARD_COUNT,
+        "target_count": len(target_ordinals),
+        "target_ordinals_sha256": _json_sha256(target_ordinals),
+        "record_count": len(records),
+        "resolver_calls": resolver_calls,
+        "comparison_count": comparisons,
+        "mismatch_count": 0,
+        "profile_counts": dict(sorted(profile_counts.items())),
+        "label_counts": dict(sorted(label_counts.items())),
+        "witness_ordinals": [value for value in target_ordinals if value in WITNESS_ORDINALS],
+        "records_sha256": hashlib.sha256(records_bytes).hexdigest(),
+        "records_bytes": len(records_bytes),
+        "global_identity": dict(global_identity),
+        "end_rehashes": dict(end_rehashes),
+        "complete": True,
+    }
+    _atomic_create_directory(
+        output_directory,
+        {"records.jsonl": records_bytes, "done.json": _canonical_json_bytes(done)},
+    )
+    return done
+
+
+def write_failure_evidence(output_directory: Path, evidence: Mapping[str, Any]) -> None:
+    failure = {
+        "protocol": PROTOCOL,
+        "complete": False,
+        "failure": dict(evidence),
+    }
+    _atomic_create_directory(
+        output_directory, {"failure.json": _canonical_json_bytes(failure)}
+    )
+
+
+def _shard_failure_evidence(
+    exception: Exception,
+    *,
+    state: AdmissionState,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    end_identities = context.setdefault(
+        "end_identities",
+        {"expected": _expected_end_rehashes(state), "actual": None},
+    )
+    end_identities["actual"] = _capture_end_rehashes(state)
+    if isinstance(exception, ContractError):
+        evidence = {
+            "kind": type(exception).__name__,
+            "message": str(exception),
+            "context": dict(context),
+        }
+        if isinstance(exception, SemanticMismatch) and exception.details:
+            evidence["details"] = exception.details
+        return evidence
+    return {
+        "kind": type(exception).__name__,
+        "message": "unexpected runtime failure after successful admission",
+        "context": dict(context),
+    }
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ContractError(f"non-standard JSON constant is prohibited: {value}")
+
+
+def _read_canonical_json(path: Path) -> tuple[dict[str, Any], bytes]:
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_DONE_JSON_BYTES + 1)
+    if len(raw) > MAX_DONE_JSON_BYTES:
+        raise ContractError(f"done JSON exceeds {MAX_DONE_JSON_BYTES} bytes: {path}")
+    if not raw.endswith(b"\n") or b"\r" in raw or raw.count(b"\n") != 1:
+        raise ContractError(f"canonical JSON must be one UTF-8 LF line: {path}")
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError(f"invalid JSON: {path}") from exc
+    if not isinstance(value, dict) or _canonical_json_bytes(value) != raw:
+        raise ContractError(f"JSON is not canonical sorted-key form: {path}")
+    return value, raw
+
+
+def _decode_canonical_record_line(
+    line: bytes, path: Path, line_number: int
+) -> dict[str, Any]:
+    if not line.endswith(b"\n") or b"\r" in line or line == b"\n":
+        raise ContractError(f"records JSONL is not canonical LF form: {path}:{line_number}")
+    try:
+        value = json.loads(line.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError(f"invalid records JSON at {path}:{line_number}") from exc
+    if not isinstance(value, dict) or _canonical_json_bytes(value) != line:
+        raise ContractError(f"noncanonical record at {path}:{line_number}")
+    return value
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _verify_signature_json(signature: Any, label: str) -> None:  # noqa: C901
+    if not isinstance(signature, dict):
+        raise ContractError(f"{label} signature is not an object")
+    expected_keys = {
+        "float_nan_mask",
+        "float_hex",
+        "booleans",
+        "signals",
+        "source_bucket_start_ns",
+        "sha256",
+    }
+    if set(signature) != expected_keys:
+        raise ContractError(f"{label} signature fields differ")
+    mask = signature["float_nan_mask"]
+    values = signature["float_hex"]
+    if not isinstance(mask, str) or len(mask) != len(FLOAT_COLUMNS) or set(mask) - {"0", "1"}:
+        raise ContractError(f"{label} NaN mask differs")
+    if not isinstance(values, dict) or tuple(values) != tuple(sorted(FLOAT_COLUMNS)):
+        # Canonical JSON sorts keys, so compare sets separately and reject extras.
+        if not isinstance(values, dict) or set(values) != set(FLOAT_COLUMNS):
+            raise ContractError(f"{label} float fields differ")
+    for index, column in enumerate(FLOAT_COLUMNS):
+        token = values[column]
+        if mask[index] == "1":
+            if token is not None:
+                raise ContractError(f"{label} {column} contradicts its NaN mask")
+            continue
+        if not isinstance(token, str):
+            raise ContractError(f"{label} {column} float-hex is absent")
+        try:
+            number = float.fromhex(token)
+        except ValueError as exc:
+            raise ContractError(f"{label} {column} float-hex is invalid") from exc
+        if not math.isfinite(number) or number.hex() != token:
+            raise ContractError(f"{label} {column} float-hex is noncanonical")
+    booleans = signature["booleans"]
+    if not isinstance(booleans, dict) or set(booleans) != set(BOOL_COLUMNS):
+        raise ContractError(f"{label} boolean fields differ")
+    if any(type(booleans[column]) is not bool for column in BOOL_COLUMNS):
+        raise ContractError(f"{label} boolean value is not exact")
+    signals = signature["signals"]
+    if not isinstance(signals, dict) or set(signals) != set(SIGNAL_COLUMNS):
+        raise ContractError(f"{label} signal fields differ")
+    if any(
+        type(signals[column]) is not int or signals[column] not in (0, 1)
+        for column in SIGNAL_COLUMNS
+    ):
+        raise ContractError(f"{label} signal is not exact 0/1")
+    source = signature["source_bucket_start_ns"]
+    if source is not None and (type(source) is not int or source % HOUR_NS != 0):
+        raise ContractError(f"{label} source bucket timestamp differs")
+    unsigned = dict(signature)
+    digest = unsigned.pop("sha256")
+    if not _is_sha256(digest) or digest != _json_sha256(unsigned):
+        raise ContractError(f"{label} signature hash differs")
+
+
+def _verify_source_identity(source: Any, signature: Mapping[str, Any], label: str) -> None:
+    if not isinstance(source, dict) or set(source) != {
+        "source_bucket_start_ns",
+        "constituents",
+        "bucket_rows_sha256",
+    }:
+        raise ContractError(f"{label} source identity fields differ")
+    source_start = source["source_bucket_start_ns"]
+    if source_start != signature["source_bucket_start_ns"] or type(source_start) is not int:
+        raise ContractError(f"{label} source start differs from its signature")
+    members = source["constituents"]
+    if not isinstance(members, list) or len(members) != 3:
+        raise ContractError(f"{label} source members differ")
+    for index, member in enumerate(members):
+        if not isinstance(member, dict) or set(member) != {"timestamp_ns", "row_sha256"}:
+            raise ContractError(f"{label} source member fields differ")
+        if member["timestamp_ns"] != source_start + index * HOUR_NS:
+            raise ContractError(f"{label} source member timestamp differs")
+        if not _is_sha256(member["row_sha256"]):
+            raise ContractError(f"{label} source member hash differs")
+    if not _is_sha256(source["bucket_rows_sha256"]):
+        raise ContractError(f"{label} source bucket hash differs")
+
+
+def _verify_boundaries_json(  # noqa: C901
+    boundaries: Any, profile: str, input_start_ns: int
+) -> None:
+    if not isinstance(boundaries, dict) or set(boundaries) != {
+        "start_offset",
+        "indicator",
+        "edge",
+    }:
+        raise ContractError(f"{profile} boundary fields differ")
+    offset = boundaries["start_offset"]
+    if type(offset) is not int or offset not in BOUNDARY_ROWS:
+        raise ContractError(f"{profile} boundary offset differs")
+    if offset != (input_start_ns // HOUR_NS) % 3:
+        raise ContractError(f"{profile} boundary offset differs from input start")
+    for kind in ("indicator", "edge"):
+        details = boundaries[kind]
+        if not isinstance(details, dict) or set(details) != {
+            "expected_raw_rows",
+            "actual_raw_rows",
+            "timestamp_ns",
+            "earlier_fail_closed",
+            "signature",
+            "reference_signature",
+            "compared_fields",
+            "equal",
+        }:
+            raise ContractError(f"{profile} {kind} boundary fields differ")
+        expected_rows = BOUNDARY_ROWS[offset][kind]
+        if details["expected_raw_rows"] != expected_rows:
+            raise ContractError(f"{profile} {kind} expected boundary differs")
+        if details["actual_raw_rows"] != expected_rows:
+            raise ContractError(f"{profile} {kind} actual boundary differs")
+        if type(details["timestamp_ns"]) is not int:
+            raise ContractError(f"{profile} {kind} boundary timestamp differs")
+        if details["timestamp_ns"] != input_start_ns + (expected_rows - 1) * HOUR_NS:
+            raise ContractError(f"{profile} {kind} boundary timestamp differs from raw count")
+        if details["earlier_fail_closed"] is not True or details["equal"] is not True:
+            raise ContractError(f"{profile} {kind} did not pass fail-closed comparison")
+        _verify_signature_json(details["signature"], f"{profile} {kind}")
+        _verify_signature_json(
+            details["reference_signature"], f"{profile} {kind} reference"
+        )
+        if details["signature"]["float_nan_mask"] != "0" * len(FLOAT_COLUMNS):
+            raise ContractError(f"{profile} {kind} boundary contains unexpected NaN")
+        expected_fields = (
+            INDICATOR_BOUNDARY_FIELDS if kind == "indicator" else EDGE_BOUNDARY_FIELDS
+        )
+        if details["compared_fields"] != list(expected_fields):
+            raise ContractError(f"{profile} {kind} compared fields differ")
+        for field in expected_fields:
+            if _boundary_field(details["signature"], field) != _boundary_field(
+                details["reference_signature"], field
+            ):
+                raise ContractError(f"{profile} {kind} boundary signatures differ")
+
+
+def _expected_labels(profile: str) -> list[str]:
+    try:
+        return list(PROFILE_LABELS[profile])
+    except KeyError as exc:
+        raise ContractError(f"unknown run profile: {profile}") from exc
+
+
+def _verify_record_shape(  # noqa: C901
+    record: dict[str, Any],
+    *,
+    shard_id: int,
+    contract: MergeContract,
+) -> None:
+    required = {
+        "protocol",
+        "shard_id",
+        "shard_count",
+        "target",
+        "profile",
+        "labels",
+        "requested_lengths",
+        "resolver",
+        "input",
+        "signature",
+        "source_identity",
+        "comparison",
+        "boundaries",
+        "mismatch_count",
+    }
+    if set(record) != required:
+        raise ContractError("run record fields differ")
+    if record["protocol"] != PROTOCOL:
+        raise ContractError("run record protocol differs")
+    if record["shard_id"] != shard_id or record["shard_count"] != contract.shard_count:
+        raise ContractError("run record shard identity differs")
+    if record["mismatch_count"] != 0:
+        raise ContractError("run record reports a mismatch")
+    target = record["target"]
+    if not isinstance(target, dict) or set(target) != {
+        "ordinal",
+        "timestamp_ns",
+        "utc_offset",
+        "witness",
+    }:
+        raise ContractError("target descriptor fields differ")
+    ordinal = target["ordinal"]
+    if type(ordinal) is not int or ordinal not in range(contract.target_count):
+        raise ContractError("target ordinal is out of range")
+    if ordinal % contract.shard_count != shard_id:
+        raise ContractError("target is assigned to the wrong shard")
+    if target["timestamp_ns"] != contract.target_start_ns + ordinal * HOUR_NS:
+        raise ContractError("target timestamp differs from its ordinal")
+    if target["utc_offset"] != ordinal % 3:
+        raise ContractError("target UTC offset differs")
+    if target["witness"] is not (ordinal in contract.witness_ordinals):
+        raise ContractError("target witness marker differs")
+    profile = record["profile"]
+    if profile not in PROFILE_ORDER or record["labels"] != _expected_labels(profile):
+        raise ContractError("profile labels differ")
+    lengths = record["requested_lengths"]
+    if not isinstance(lengths, dict) or set(lengths) != set(record["labels"]):
+        raise ContractError("profile requested-length labels differ")
+    if profile == "full":
+        if type(lengths["full-reference"]) is not int or lengths["full-reference"] < 799:
+            raise ContractError("full reference length is insufficient")
+        if record["comparison"] is not None or record["boundaries"] is not None:
+            raise ContractError("full reference contains suffix comparison evidence")
+    else:
+        expected_length = int(profile.removeprefix("suffix-"))
+        if any(lengths[label] != expected_length for label in record["labels"]):
+            raise ContractError("suffix requested lengths differ")
+        if not isinstance(record["comparison"], dict):
+            raise ContractError("suffix comparison evidence is absent")
+    resolver = record["resolver"]
+    if not isinstance(resolver, dict) or set(resolver) != {
+        "ordinal",
+        "path",
+        "source_sha256",
+        "source_size",
+        "startup_candle_count",
+        "fresh_instance",
+        "fresh_dynamic_class",
+    }:
+        raise ContractError("resolver evidence fields differ")
+    if (
+        type(resolver["ordinal"]) is not int
+        or os.path.normcase(resolver["path"]) != os.path.normcase(str(EXPECTED_STRATEGY))
+        or resolver["source_sha256"] != STRATEGY_SHA256
+        or type(resolver["source_size"]) is not int
+        or resolver["source_size"] != 14_447
+        or resolver["startup_candle_count"] != 499
+        or resolver["fresh_instance"] is not True
+        or resolver["fresh_dynamic_class"] is not True
+    ):
+        raise ContractError("resolver evidence differs")
+    input_identity = record["input"]
+    if not isinstance(input_identity, dict) or set(input_identity) != {
+        "row_count",
+        "start_ns",
+        "end_ns",
+        "inventory_sha256",
+        "inventory_bytes",
+    }:
+        raise ContractError("run input identity fields differ")
+    if input_identity["end_ns"] != target["timestamp_ns"]:
+        raise ContractError("run input passed later or missing target rows")
+    if not _is_sha256(input_identity["inventory_sha256"]):
+        raise ContractError("run input inventory hash differs")
+    if type(input_identity["inventory_bytes"]) is not int or input_identity["inventory_bytes"] <= 0:
+        raise ContractError("run input inventory size differs")
+    expected_rows = (
+        lengths["full-reference"] if profile == "full" else int(profile.removeprefix("suffix-"))
+    )
+    if (
+        contract == DEFAULT_MERGE_CONTRACT
+        and profile == "full"
+        and expected_rows != 4_369 + ordinal
+    ):
+        raise ContractError("full reference is not the complete admitted history")
+    if input_identity["row_count"] != expected_rows:
+        raise ContractError("run input row count differs")
+    if input_identity["start_ns"] != target["timestamp_ns"] - (expected_rows - 1) * HOUR_NS:
+        raise ContractError("run input bounds differ")
+    if profile != "full":
+        _verify_boundaries_json(
+            record["boundaries"], profile, input_identity["start_ns"]
+        )
+    _verify_signature_json(record["signature"], profile)
+    if record["signature"]["float_nan_mask"] != "0" * len(FLOAT_COLUMNS):
+        raise ContractError(f"{profile} target contains unexpected NaN")
+    _verify_source_identity(record["source_identity"], record["signature"], profile)
+    source_lag_hours = {0: 3, 1: 4, 2: 2}[target["utc_offset"]]
+    expected_source_start = target["timestamp_ns"] - source_lag_hours * HOUR_NS
+    if record["signature"]["source_bucket_start_ns"] != expected_source_start:
+        raise ContractError("target source bucket mapping differs")
+
+
+def _ordinal_sequence_sha256(values: range) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    for index, value in enumerate(values):
+        if index:
+            digest.update(b",")
+        digest.update(str(value).encode("ascii"))
+    digest.update(b"]\n")
+    return digest.hexdigest()
+
+
+def _verify_done_metadata(  # noqa: C901
+    done: dict[str, Any], *, contract: MergeContract
+) -> int:
+    required = {
+        "protocol",
+        "shard_id",
+        "shard_count",
+        "target_count",
+        "target_ordinals_sha256",
+        "record_count",
+        "resolver_calls",
+        "comparison_count",
+        "mismatch_count",
+        "profile_counts",
+        "label_counts",
+        "witness_ordinals",
+        "records_sha256",
+        "records_bytes",
+        "global_identity",
+        "end_rehashes",
+        "complete",
+    }
+    if set(done) != required or done["protocol"] != PROTOCOL or done["complete"] is not True:
+        raise ContractError("done.json fields or protocol differ")
+    shard_id = done["shard_id"]
+    if type(shard_id) is not int or shard_id not in range(contract.shard_count):
+        raise ContractError("done shard id is out of range")
+    if done["shard_count"] != contract.shard_count or done["mismatch_count"] != 0:
+        raise ContractError("done shard count or mismatch count differs")
+    expected_ordinals = range(shard_id, contract.target_count, contract.shard_count)
+    expected_targets = len(expected_ordinals)
+    if done["target_count"] != expected_targets:
+        raise ContractError("done target count differs")
+    if done["target_ordinals_sha256"] != _ordinal_sequence_sha256(expected_ordinals):
+        raise ContractError("done target ordinal hash differs")
+    if done["record_count"] != expected_targets * 5:
+        raise ContractError("done record count differs")
+    if done["resolver_calls"] != done["record_count"]:
+        raise ContractError("done resolver-call count differs")
+    if done["comparison_count"] != expected_targets * 4:
+        raise ContractError("done comparison count differs")
+    expected_profiles = {profile: expected_targets for profile in PROFILE_ORDER}
+    if done["profile_counts"] != expected_profiles:
+        raise ContractError("done profile counts differ")
+    expected_labels = {
+        "499": expected_targets,
+        "600": expected_targets,
+        "799": expected_targets,
+        "cold599": expected_targets,
+        "explicit599": expected_targets,
+        "full-reference": expected_targets,
+        "warm599": expected_targets,
+    }
+    if done["label_counts"] != expected_labels:
+        raise ContractError("done label counts differ")
+    expected_witnesses = [
+        value for value in expected_ordinals if value in contract.witness_ordinals
+    ]
+    if done["witness_ordinals"] != expected_witnesses:
+        raise ContractError("done witness ordinals differ")
+    if not _is_sha256(done["records_sha256"]):
+        raise ContractError("records.jsonl hash differs")
+    if type(done["records_bytes"]) is not int or done["records_bytes"] <= 0:
+        raise ContractError("records.jsonl byte count differs")
+    if not isinstance(done["global_identity"], dict) or not isinstance(
+        done["end_rehashes"], dict
+    ):
+        raise ContractError("done global identity evidence differs")
+    return shard_id
+
+
+@dataclass
+class _ShardStream:
+    shard_id: int
+    directory: str
+    done: dict[str, Any]
+    done_sha256: str
+    path: Path
+    handle: Any
+    records_digest: Any
+    record_count: int = 0
+    records_bytes: int = 0
+    next_resolver_ordinal: int = 1
+
+
+def _read_stream_record(
+    stream: _ShardStream,
+    *,
+    target_ordinal: int,
+    profile: str,
+    contract: MergeContract,
+) -> tuple[dict[str, Any], bytes]:
+    line_number = stream.record_count + 1
+    line = stream.handle.readline(MAX_RECORD_LINE_BYTES + 1)
+    if len(line) > MAX_RECORD_LINE_BYTES:
+        raise ContractError(
+            f"record line exceeds {MAX_RECORD_LINE_BYTES} bytes: "
+            f"{stream.path}:{line_number}"
+        )
+    if not line:
+        raise ContractError(
+            f"shard {stream.shard_id} records are truncated at line {line_number}"
+        )
+    record = _decode_canonical_record_line(line, stream.path, line_number)
+    stream.records_digest.update(line)
+    stream.records_bytes += len(line)
+    stream.record_count += 1
+    _verify_record_shape(record, shard_id=stream.shard_id, contract=contract)
+    if record["target"]["ordinal"] != target_ordinal or record["profile"] != profile:
+        raise ContractError(
+            f"shard {stream.shard_id} record order differs at line {line_number}"
+        )
+    if record["resolver"]["ordinal"] != stream.next_resolver_ordinal:
+        raise ContractError("resolver ordinals are missing, duplicate, or non-contiguous")
+    stream.next_resolver_ordinal += 1
+    return record, line
+
+
+def _verify_done_stream(stream: _ShardStream) -> None:
+    if stream.handle.read(1):
+        raise ContractError(f"shard {stream.shard_id} records contain extra data")
+    if stream.record_count != stream.done["record_count"]:
+        raise ContractError("done record count differs")
+    if stream.records_digest.hexdigest() != stream.done["records_sha256"]:
+        raise ContractError("records.jsonl hash differs")
+    if stream.records_bytes != stream.done["records_bytes"]:
+        raise ContractError("records.jsonl byte count differs")
+
+
+def _verify_default_global_identity(
+    identity: Mapping[str, Any], end_rehashes: Mapping[str, str]
+) -> None:
+    required = {
+        "protocol",
+        "root_head",
+        "backend_head",
+        "candidate_sha256",
+        "test_sha256",
+        "baseline_sha256",
+        "freqtrade_version",
+        "freqtrade_init_sha256",
+        "inputs",
+        "windows",
+        "admission_sha256",
+    }
+    if set(identity) != required:
+        raise ContractError("global identity fields differ")
+    expected_scalars = {
+        "protocol": PROTOCOL,
+        "root_head": ROOT_HEAD,
+        "backend_head": BACKEND_HEAD,
+        "candidate_sha256": STRATEGY_SHA256,
+        "test_sha256": TEST_SHA256,
+        "baseline_sha256": BASELINE_SHA256,
+        "freqtrade_version": FREQTRADE_VERSION,
+        "freqtrade_init_sha256": FREQTRADE_INIT_SHA256,
+    }
+    if any(identity[key] != value for key, value in expected_scalars.items()):
+        raise ContractError("global code identity differs")
+    expected_inputs: dict[str, dict[str, Any]] = {}
+    for name in ("futures", "mark", "funding"):
+        spec = RAW_SPECS[name]
+        expected_inputs[name] = {
+            "raw_sha256": spec["sha256"],
+            "raw_size": spec["size"],
+            "raw_inventory_sha256": spec["raw_inventory_sha256"],
+            "loaded_inventory_sha256": spec["loaded_inventory_sha256"],
+            "row_count": spec["rows"],
+            "start_ns": spec["start_ns"],
+            "end_ns": spec["end_ns"],
+        }
+    expected_inputs["leverage"] = {
+        "raw_sha256": RAW_SPECS["leverage"]["sha256"],
+        "raw_size": RAW_SPECS["leverage"]["size"],
+    }
+    if identity["inputs"] != expected_inputs:
+        raise ContractError("global admitted input identity differs")
+    expected_windows = {
+        "primary": {
+            "row_count": 13_128,
+            "start_ns": PRIMARY_START_NS,
+            "end_ns": PRIMARY_END_NS - HOUR_NS,
+        },
+        "scored": {
+            "row_count": TARGET_COUNT,
+            "start_ns": SCORED_START_NS,
+            "end_ns": SCORED_END_NS - HOUR_NS,
+            "offset_counts": {"0": 2_920, "1": 2_920, "2": 2_920},
+            "witness_ordinals": list(WITNESS_ORDINALS),
+        },
+        "performance": {
+            "row_count": 9_260,
+            "start_ns": PERFORMANCE_START_NS,
+            "end_ns": SCORED_END_NS,
+            "prefix_rows": 499,
+            "sentinel_rows": 1,
+        },
+        "audit_through_first_target": {
+            "row_count": 799,
+            "start_ns": AUDIT_START_NS,
+            "end_ns": SCORED_START_NS,
+        },
+    }
+    if identity["windows"] != expected_windows:
+        raise ContractError("global admitted window identity differs")
+    if identity["admission_sha256"] != ADMISSION_SUMMARY_SHA256:
+        raise ContractError("global admission summary hash differs")
+    expected_end = {
+        "strategy": STRATEGY_SHA256,
+        "test": TEST_SHA256,
+        "baseline_a": BASELINE_SHA256,
+        "baseline_b": BASELINE_SHA256,
+        **{f"raw_{name}": spec["sha256"] for name, spec in RAW_SPECS.items()},
+    }
+    if end_rehashes != expected_end:
+        raise ContractError("global end rehash identity differs")
+
+
+def _verify_default_completion_contract(
+    *,
+    record_count: int,
+    resolver_calls: int,
+    comparison_count: int,
+    offset_counts: Mapping[int, int],
+    witnesses: Sequence[int],
+    witness_timestamps: Mapping[int, int],
+) -> None:
+    if record_count != EXPECTED_CALLS or resolver_calls != EXPECTED_CALLS:
+        raise ContractError("frozen global resolver-call count differs")
+    if comparison_count != EXPECTED_COMPARISONS:
+        raise ContractError("frozen global comparison count differs")
+    if dict(offset_counts) != {0: 2_920, 1: 2_920, 2: 2_920}:
+        raise ContractError("global UTC offset counts differ")
+    if list(witnesses) != list(WITNESS_ORDINALS):
+        raise ContractError("global restart witnesses differ")
+    expected_timestamps = dict(zip(WITNESS_ORDINALS, WITNESS_TIMESTAMPS_NS, strict=True))
+    if dict(witness_timestamps) != expected_timestamps:
+        raise ContractError("global restart witness timestamps differ")
+
+
+def verify_merge(  # noqa: C901
+    shards_root: Path,
+    output_file: Path,
+    *,
+    contract: MergeContract = DEFAULT_MERGE_CONTRACT,
+) -> dict[str, Any]:
+    if contract.shard_count != SHARD_COUNT:
+        raise ContractError(f"merge shard count is fixed at {SHARD_COUNT}")
+    if not shards_root.is_absolute():
+        raise ContractError("shards root must be absolute")
+    root = _directory_no_links(shards_root, "shards root")
+    _validate_output_path(output_file, directory=False)
+    children = sorted(root.iterdir(), key=lambda item: item.name)
+    if len(children) != contract.shard_count:
+        raise ContractError(
+            f"merge requires exactly {contract.shard_count} shard directories"
+        )
+
+    global_identity: dict[str, Any] | None = None
+    end_rehashes: dict[str, str] | None = None
+    shard_hashes: list[dict[str, Any]] = []
+    merged_records_digest = hashlib.sha256()
+    merged_records_bytes = 0
+    record_count = 0
+    comparison_count = 0
+    profile_counts: Counter[str] = Counter()
+    label_counts: Counter[str] = Counter()
+    offset_counts: Counter[int] = Counter()
+    witnesses: list[int] = []
+    witness_timestamps: dict[int, int] = {}
+    resolver_calls = 0
+
+    with ExitStack() as stack:
+        streams: dict[int, _ShardStream] = {}
+        for supplied_child in children:
+            child = _directory_no_links(supplied_child, "shard directory")
+            if (
+                child.parent != root
+                or os.path.normcase(str(child))
+                != os.path.normcase(str(supplied_child))
+            ):
+                raise ContractError(
+                    f"shard directory escapes its validated root: {child}"
+                )
+            if {item.name for item in child.iterdir()} != {"done.json", "records.jsonl"}:
+                raise ContractError(f"shard directory inventory differs: {child}")
+            done_path = _regular_file_no_links(child / "done.json", "done.json")
+            records_path = _regular_file_no_links(
+                child / "records.jsonl", "records.jsonl"
+            )
+            if done_path.parent != child or records_path.parent != child:
+                raise ContractError(
+                    f"shard evidence escapes its validated directory: {child}"
+                )
+            done, done_bytes = _read_canonical_json(done_path)
+            shard_id = _verify_done_metadata(done, contract=contract)
+            if shard_id in streams:
+                raise ContractError(f"duplicate shard id: {shard_id}")
+            if global_identity is None:
+                global_identity = done["global_identity"]
+                end_rehashes = done["end_rehashes"]
+            elif (
+                done["global_identity"] != global_identity
+                or done["end_rehashes"] != end_rehashes
+            ):
+                raise ContractError("shard global identities differ")
+            streams[shard_id] = _ShardStream(
+                shard_id=shard_id,
+                directory=child.name,
+                done=done,
+                done_sha256=hashlib.sha256(done_bytes).hexdigest(),
+                path=records_path,
+                handle=stack.enter_context(records_path.open("rb")),
+                records_digest=hashlib.sha256(),
+            )
+
+        if set(streams) != set(range(contract.shard_count)):
+            raise ContractError("shard ids are missing or out of range")
+        if global_identity is None or end_rehashes is None:
+            raise ContractError("merge has no global identity")
+        if contract == DEFAULT_MERGE_CONTRACT:
+            _verify_default_global_identity(global_identity, end_rehashes)
+
+        resolver_calls = sum(stream.done["resolver_calls"] for stream in streams.values())
+        for ordinal in range(contract.target_count):
+            stream = streams[ordinal % contract.shard_count]
+            target_group: list[dict[str, Any]] = []
+            for profile in PROFILE_ORDER:
+                record, line = _read_stream_record(
+                    stream,
+                    target_ordinal=ordinal,
+                    profile=profile,
+                    contract=contract,
+                )
+                target_group.append(record)
+                merged_records_digest.update(line)
+                merged_records_bytes += len(line)
+                record_count += 1
+                profile_counts[profile] += 1
+                label_counts.update(record["labels"])
+
+            reference = target_group[0]
+            offset_counts[reference["target"]["utc_offset"]] += 1
+            if reference["target"]["witness"]:
+                witnesses.append(ordinal)
+                witness_timestamps[ordinal] = reference["target"]["timestamp_ns"]
+            for actual in target_group[1:]:
+                profile = actual["profile"]
+                for key in (
+                    "float_nan_mask",
+                    "float_hex",
+                    "booleans",
+                    "signals",
+                    "source_bucket_start_ns",
+                    "sha256",
+                ):
+                    if reference["signature"][key] != actual["signature"][key]:
+                        raise ContractError(
+                            f"merged target signature differs: {ordinal}/{profile}"
+                        )
+                if reference["source_identity"] != actual["source_identity"]:
+                    raise ContractError(
+                        f"merged source identity differs: {ordinal}/{profile}"
+                    )
+                payload = _comparison_payload(
+                    reference["signature"],
+                    actual["signature"],
+                    reference["source_identity"],
+                    actual["source_identity"],
+                )
+                expected_comparison = {
+                    **payload,
+                    "reference_resolver_ordinal": reference["resolver"]["ordinal"],
+                    "equal": True,
+                    "sha256": _json_sha256(payload),
+                }
+                if actual["comparison"] != expected_comparison:
+                    raise ContractError(
+                        f"merged comparison evidence differs: {ordinal}/{profile}"
+                    )
+                comparison_count += 1
+
+        for stream in streams.values():
+            _verify_done_stream(stream)
+            shard_hashes.append(
+                {
+                    "shard_id": stream.shard_id,
+                    "directory": stream.directory,
+                    "done_sha256": stream.done_sha256,
+                    "records_sha256": stream.records_digest.hexdigest(),
+                    "record_count": stream.record_count,
+                }
+            )
+
+    if record_count != contract.target_count * 5 or resolver_calls != record_count:
+        raise ContractError("global run/resolver count differs")
+    if comparison_count != contract.target_count * 4:
+        raise ContractError("global comparison count differs")
+    if profile_counts != Counter({profile: contract.target_count for profile in PROFILE_ORDER}):
+        raise ContractError("global per-profile counts differ")
+    expected_label_counts = Counter(
+        {
+            "full-reference": contract.target_count,
+            "499": contract.target_count,
+            "cold599": contract.target_count,
+            "explicit599": contract.target_count,
+            "warm599": contract.target_count,
+            "600": contract.target_count,
+            "799": contract.target_count,
+        }
+    )
+    if label_counts != expected_label_counts:
+        raise ContractError("global label-collapse counts differ")
+    if witnesses != sorted(contract.witness_ordinals):
+        raise ContractError("global restart witnesses are missing or extra")
+    if contract == DEFAULT_MERGE_CONTRACT:
+        _verify_default_completion_contract(
+            record_count=record_count,
+            resolver_calls=resolver_calls,
+            comparison_count=comparison_count,
+            offset_counts=offset_counts,
+            witnesses=witnesses,
+            witness_timestamps=witness_timestamps,
+        )
+
+    summary = {
+        "protocol": PROTOCOL,
+        "command": "verify-merge",
+        "complete": True,
+        "shard_count": contract.shard_count,
+        "target_count": contract.target_count,
+        "target_start_ns": contract.target_start_ns,
+        "unique_targets": contract.target_count,
+        "record_count": record_count,
+        "resolver_calls": resolver_calls,
+        "comparison_count": comparison_count,
+        "mismatch_count": 0,
+        "profile_counts": dict(sorted(profile_counts.items())),
+        "label_counts": dict(sorted(label_counts.items())),
+        "offset_counts": {str(key): value for key, value in sorted(offset_counts.items())},
+        "witness_ordinals": witnesses,
+        "global_identity": global_identity,
+        "end_rehashes": end_rehashes,
+        "shards": sorted(shard_hashes, key=lambda item: item["shard_id"]),
+        "merged_records_sha256": merged_records_digest.hexdigest(),
+        "merged_records_bytes": merged_records_bytes,
+    }
+    summary["summary_sha256"] = _json_sha256(summary)
+    _atomic_write_new_file(output_file, _canonical_json_bytes(summary))
+    return summary
+
+
+def _command_admit(arguments: argparse.Namespace) -> int:
+    state = admit()
+    content = _canonical_json_bytes(state.summary)
+    if arguments.output is None:
+        sys.stdout.buffer.write(content)
+    else:
+        _atomic_write_new_file(Path(arguments.output), content)
+        sys.stdout.write(f"admission written: {arguments.output}\n")
+    return 0
+
+
+def _command_run_shard(arguments: argparse.Namespace) -> int:
+    output = Path(arguments.output_dir)
+    _validate_output_path(output, directory=True)
+    state = admit()
+    context: dict[str, Any] = {"shard_id": arguments.shard_id}
+    try:
+        context.update(_initial_shard_failure_context(state, arguments.shard_id))
+        done = run_shard(
+            state,
+            arguments.shard_id,
+            output,
+            failure_context=context,
+        )
+    except Exception as exc:
+        evidence = _shard_failure_evidence(exc, state=state, context=context)
+        write_failure_evidence(output, evidence)
+        if isinstance(exc, ContractError):
+            sys.stderr.write(f"shard contract failure: {exc}\n")
+            return 1 if isinstance(exc, SemanticMismatch) else 2
+        sys.stderr.write(
+            f"shard runtime failure: {type(exc).__name__}: "
+            "unexpected runtime failure after successful admission\n"
+        )
+        return 3
+    sys.stdout.buffer.write(_canonical_json_bytes(done))
+    return 0
+
+
+def _command_verify_merge(arguments: argparse.Namespace) -> int:
+    summary = verify_merge(
+        Path(arguments.shards_root),
+        Path(arguments.output),
+    )
+    sys.stdout.buffer.write(_canonical_json_bytes(summary))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Frozen admitted-data restart-matrix harness"
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    admit_parser = subcommands.add_parser("admit", help="admit and identify all frozen inputs")
+    admit_parser.add_argument("--output", help="new absolute canonical JSON output file")
+    admit_parser.set_defaults(handler=_command_admit)
+
+    shard_parser = subcommands.add_parser("run-shard", help="execute one fixed modulo-8 shard")
+    shard_parser.add_argument("--shard-id", type=int, required=True)
+    shard_parser.add_argument("--output-dir", required=True)
+    shard_parser.set_defaults(handler=_command_run_shard)
+
+    merge_parser = subcommands.add_parser(
+        "verify-merge", help="stdlib-only verification of all eight shard directories"
+    )
+    merge_parser.add_argument("--shards-root", required=True)
+    merge_parser.add_argument("--output", required=True)
+    merge_parser.set_defaults(handler=_command_verify_merge)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    arguments = parser.parse_args(argv)
+    try:
+        return int(arguments.handler(arguments))
+    except ContractError as exc:
+        sys.stderr.write(f"contract failure: {exc}\n")
+        return 2
+    except (FileNotFoundError, OSError) as exc:
+        sys.stderr.write(f"I/O failure: {exc}\n")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

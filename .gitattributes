@@ -1,2 +1,4 @@
 ops/runtime-policies/*.json text eol=lf
 ops/adapter-templates/*.json text eol=lf
+docs/superpowers/receipts/2026-08-01-volatility-bounded-true-range/runtime-receipt.json binary
+docs/superpowers/receipts/2026-08-01-volatility-bounded-true-range/bytes/* binary

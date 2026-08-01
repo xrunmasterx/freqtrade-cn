@@ -1,0 +1,493 @@
+import copy
+import json
+import math
+import sys
+import unittest
+from pathlib import Path
+
+import contract
+
+
+HERE = Path(__file__).resolve().parent
+REPOSITORY_ROOT = Path(
+    r"C:\Users\dezhengu\orca\workspaces\freqtrade-cn\phase1-complete-development"
+)
+API_SCHEMAS = REPOSITORY_ROOT / "freqtrade/freqtrade/rpc/api_server/api_schemas.py"
+API_BACKTEST = REPOSITORY_ROOT / "freqtrade/freqtrade/rpc/api_server/api_backtest.py"
+BT_STORAGE = (
+    REPOSITORY_ROOT
+    / "freqtrade/freqtrade/optimize/optimize_reports/bt_storage.py"
+)
+
+EXPECTED_B_REQUEST = {
+    "backtest_cache": "none",
+    "capture_data_snapshot": True,
+    "capture_execution_context_evidence": True,
+    "capture_strategy_evidence": True,
+    "dry_run_wallet": 1000,
+    "enable_protections": False,
+    "experiment_id": "volatility-bounded-tr-development-b",
+    "max_open_trades": 1,
+    "retain_data_snapshot": True,
+    "stake_amount": 100,
+    "strategy": "VolatilitySystem",
+    "timeframe": "1h",
+    "timerange": "20240701-20250701",
+}
+
+EXPECTED_C_TEMPLATE = {
+    "backtest_cache": "none",
+    "capture_data_snapshot": True,
+    "capture_execution_context_evidence": True,
+    "capture_strategy_evidence": True,
+    "dry_run_wallet": 1000,
+    "enable_protections": False,
+    "experiment_id": "volatility-bounded-tr-development-c",
+    "max_open_trades": 1,
+    "replay_data_snapshot": {
+        "filename": "__B_RESULT_STEM__",
+        "strategy": "VolatilitySystem",
+    },
+    "stake_amount": 100,
+    "strategy": "VolatilitySystem",
+    "timeframe": "1h",
+    "timerange": "20240701-20250701",
+}
+
+EXPECTED_JSON_HASHES = {
+    "effective-config.json": "0685d9f364b9fd208c437b1c5511c20b4ee9d28780a220f24059225cb5a5b37e",
+    "b-request.json": "48f9256adec70f0afc666a7acd7e6eadc05306eaeae58669d999f0af620b87fc",
+    "c-request-template.json": "fd5e4cf0027e89db1d839eb80e61b9dca8f1e4df9d7a0859719fbd81ace54868",
+}
+
+
+def _load(name: str):
+    return contract.load_canonical_json_bytes((HERE / name).read_bytes())
+
+
+def _canonical(value: object) -> bytes:
+    return contract.canonical_json_bytes(value)
+
+
+def _walk_strings(value: object):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield key
+            yield from _walk_strings(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _walk_strings(nested)
+    elif isinstance(value, str):
+        yield value
+
+
+def _shannon_entropy(value: str) -> float:
+    if not value:
+        return 0.0
+    return -sum(
+        (value.count(character) / len(value))
+        * math.log2(value.count(character) / len(value))
+        for character in set(value)
+    )
+
+
+class CanonicalJsonTests(unittest.TestCase):
+    def test_owned_inventory_is_exact(self):
+        self.assertEqual(
+            {path.name for path in HERE.iterdir()},
+            {
+                "contract.py",
+                "test_contract.py",
+                "effective-config.json",
+                "b-request.json",
+                "c-request-template.json",
+            },
+        )
+
+    def test_json_files_are_canonical_utf8_with_one_lf(self):
+        for name in EXPECTED_JSON_HASHES:
+            with self.subTest(name=name):
+                raw = (HERE / name).read_bytes()
+                self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+                self.assertTrue(raw.endswith(b"\n"))
+                self.assertFalse(raw.endswith(b"\n\n"))
+                self.assertNotIn(b"\r", raw)
+                self.assertEqual(raw, _canonical(contract.load_canonical_json_bytes(raw)))
+
+    def test_noncanonical_and_ambiguous_json_is_rejected(self):
+        raw = (HERE / "b-request.json").read_bytes()
+        value = json.loads(raw)
+        variants = [
+            raw[:-1],
+            raw + b"\n",
+            b"\xef\xbb\xbf" + raw,
+            raw[:-1] + b"\r\n",
+            json.dumps(value, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+            raw.replace(b":", b": ", 1),
+            b'{"strategy":"VolatilitySystem","strategy":"VolatilitySystem"}\n',
+            b'{"value":NaN}\n',
+        ]
+        for candidate in variants:
+            with self.subTest(candidate=candidate[:40]):
+                with self.assertRaises(contract.ContractError):
+                    contract.load_canonical_json_bytes(candidate)
+
+    def test_sha256_and_size_helpers_are_deterministic(self):
+        first = {
+            path.name: contract.file_sha256_size(path)
+            for path in sorted(HERE.iterdir())
+            if path.is_file()
+        }
+        second = {
+            path.name: contract.file_sha256_size(path)
+            for path in sorted(HERE.iterdir())
+            if path.is_file()
+        }
+        self.assertEqual(first, second)
+        for name, expected_sha256 in EXPECTED_JSON_HASHES.items():
+            with self.subTest(name=name):
+                sha256, size = first[name]
+                self.assertEqual(sha256, expected_sha256)
+                self.assertEqual((sha256, size), contract.sha256_size((HERE / name).read_bytes()))
+
+
+class EffectiveConfigTests(unittest.TestCase):
+    def test_effective_config_has_exact_frozen_semantics(self):
+        value = _load("effective-config.json")
+        contract.validate_effective_config(value)
+        self.assertEqual(
+            set(value),
+            {
+                "amend_last_stake_amount",
+                "amount_reserve_percent",
+                "api_server",
+                "cancel_open_orders_on_exit",
+                "dataformat_ohlcv",
+                "dataformat_trades",
+                "datadir",
+                "dry_run",
+                "dry_run_wallet",
+                "enable_dynamic_pairlist",
+                "entry_pricing",
+                "exchange",
+                "export",
+                "exportdirectory",
+                "exit_pricing",
+                "fee",
+                "force_entry_enable",
+                "last_stake_amount_min_ratio",
+                "liquidation_buffer",
+                "margin_mode",
+                "max_open_trades",
+                "order_time_in_force",
+                "order_types",
+                "pairlists",
+                "position_stacking",
+                "stake_amount",
+                "stake_currency",
+                "strategy_path",
+                "timeframe",
+                "tradable_balance_ratio",
+                "trading_mode",
+                "unfilledtimeout",
+                "user_data_dir",
+            },
+        )
+        self.assertEqual(value["datadir"], "/research/data/okx")
+        self.assertEqual(value["strategy_path"], "/research/strategy")
+        self.assertEqual(value["user_data_dir"], "/research/state")
+        self.assertEqual(value["exportdirectory"], "/research/state/backtest_results")
+        self.assertEqual(value["dataformat_ohlcv"], "feather")
+        self.assertEqual(value["dataformat_trades"], "feather")
+        self.assertEqual(value["fee"], 0.0005)
+        self.assertEqual(value["max_open_trades"], 1)
+        self.assertEqual(value["stake_amount"], 100)
+        self.assertEqual(value["stake_currency"], "USDT")
+        self.assertEqual(value["dry_run_wallet"], 1000)
+        self.assertEqual(value["tradable_balance_ratio"], 1)
+        self.assertIs(value["dry_run"], True)
+        self.assertEqual(value["trading_mode"], "futures")
+        self.assertEqual(value["margin_mode"], "isolated")
+        self.assertEqual(value["timeframe"], "1h")
+        self.assertEqual(value["pairlists"], [{"method": "StaticPairList"}])
+        self.assertEqual(
+            value["unfilledtimeout"],
+            {"entry": 10, "exit": 10, "exit_timeout_count": 0, "unit": "minutes"},
+        )
+        self.assertEqual(value["order_time_in_force"], {"entry": "GTC", "exit": "GTC"})
+        self.assertEqual(value["order_types"]["entry"], "limit")
+        self.assertEqual(value["order_types"]["exit"], "limit")
+        self.assertIs(value["cancel_open_orders_on_exit"], False)
+        self.assertIs(value["force_entry_enable"], False)
+        self.assertIs(value["amend_last_stake_amount"], False)
+        self.assertEqual(value["last_stake_amount_min_ratio"], 0.5)
+        self.assertEqual(value["amount_reserve_percent"], 0.05)
+        self.assertEqual(value["liquidation_buffer"], 0.05)
+        self.assertIs(value["position_stacking"], False)
+        self.assertIs(value["enable_dynamic_pairlist"], False)
+        self.assertEqual(
+            value["entry_pricing"],
+            {
+                "check_depth_of_market": {"bids_to_ask_delta": 1, "enabled": False},
+                "order_book_top": 1,
+                "price_last_balance": 0,
+                "price_side": "same",
+                "use_order_book": True,
+            },
+        )
+        self.assertEqual(
+            value["exit_pricing"],
+            {
+                "order_book_top": 1,
+                "price_last_balance": 0,
+                "price_side": "same",
+                "use_order_book": True,
+            },
+        )
+
+    def test_config_is_local_static_and_credential_free(self):
+        value = _load("effective-config.json")
+        api = value["api_server"]
+        self.assertEqual(api["listen_ip_address"], "127.0.0.1")
+        self.assertEqual(api["listen_port"], 8080)
+        self.assertEqual(api["username"], "research")
+        self.assertIs(api["enable_openapi"], False)
+        self.assertEqual(api["verbosity"], "error")
+        self.assertEqual(
+            {api["jwt_secret_key"], api["password"], api["ws_token"]},
+            {"__SET_VIA_SECRET_FILE__"},
+        )
+        self.assertEqual(api["CORS_origins"], [])
+        exchange = value["exchange"]
+        self.assertEqual(exchange["name"], "okx")
+        self.assertEqual(exchange["pair_whitelist"], ["BTC/USDT:USDT"])
+        self.assertEqual(exchange["pair_blacklist"], [])
+        self.assertEqual(exchange["key"], "")
+        self.assertEqual(exchange["secret"], "")
+        self.assertEqual(exchange["password"], "")
+        self.assertEqual(
+            exchange["ccxt_config"],
+            {"options": {"defaultType": "swap", "fetchMarkets": {"types": ["swap"]}}},
+        )
+        self.assertEqual(exchange["ccxt_async_config"], {})
+
+        forbidden = {
+            "bot_name",
+            "db_url",
+            "freqai",
+            "freqaimodel",
+            "futures_funding_rate",
+            "initial_state",
+            "internals",
+            "protections",
+            "telegram",
+        }
+        self.assertTrue(forbidden.isdisjoint(value))
+        self.assertNotIn("proxy", json.dumps(value).lower())
+
+    def test_config_rejects_unknown_forbidden_or_changed_values(self):
+        original = _load("effective-config.json")
+        mutations = []
+        for key, value in (
+            ("freqai", {"enabled": False}),
+            ("freqaimodel", "Model"),
+            ("futures_funding_rate", 0),
+            ("protections", []),
+            ("telegram", {"enabled": False}),
+            ("db_url", "sqlite:///state.sqlite"),
+            ("bot_name", "research"),
+        ):
+            changed = copy.deepcopy(original)
+            changed[key] = value
+            mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["exchange"]["key"] = "not-empty"
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["exchange"]["ccxt_config"]["httpsProxy"] = "http://127.0.0.1:1"
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["api_server"]["listen_ip_address"] = "0.0.0.0"
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["api_server"]["unknown"] = False
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["entry_pricing"]["unknown"] = False
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["entry_pricing"]["check_depth_of_market"]["unknown"] = False
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["exit_pricing"]["unknown"] = False
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["unknown"] = False
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        del changed["fee"]
+        mutations.append(changed)
+        for value in mutations:
+            with self.subTest(keys=sorted(value)):
+                with self.assertRaises(contract.ContractError):
+                    contract.validate_effective_config(value)
+
+
+class RequestTests(unittest.TestCase):
+    def test_b_request_is_exact(self):
+        value = _load("b-request.json")
+        contract.validate_b_request(value)
+        self.assertEqual(value, EXPECTED_B_REQUEST)
+
+    def test_c_template_is_exact_and_contains_one_json_value_placeholder(self):
+        raw = (HERE / "c-request-template.json").read_bytes()
+        value = contract.load_canonical_json_bytes(raw)
+        contract.validate_c_request_template(value)
+        self.assertEqual(value, EXPECTED_C_TEMPLATE)
+        self.assertEqual(raw.count(b'"__B_RESULT_STEM__"'), 1)
+        self.assertEqual(raw.count(b"__B_RESULT_STEM__"), 1)
+
+    def test_binder_accepts_only_api_generated_result_stems(self):
+        raw = (HERE / "c-request-template.json").read_bytes()
+        valid = (
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            "backtest-result-2028-02-29_23-59-59_999999-"
+            "ffffffffffffffffffffffffffffffff",
+        )
+        for stem in valid:
+            with self.subTest(stem=stem):
+                self.assertEqual(contract.validate_result_stem(stem), stem)
+                bound = contract.bind_c_request(raw, stem)
+                self.assertEqual(bound, _canonical(contract.load_canonical_json_bytes(bound)))
+                value = contract.load_canonical_json_bytes(bound)
+                contract.validate_bound_c_request(value)
+                self.assertEqual(value["replay_data_snapshot"]["filename"], stem)
+                self.assertEqual(value["replay_data_snapshot"]["strategy"], value["strategy"])
+
+        invalid = (
+            "backtest-result-2026-08-01_00-00-00_000001",
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789ABCDEF0123456789ABCDEF",
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdeg",
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcde",
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef0",
+            "backtest-result-2026-02-29_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            "backtest-result-2026-8-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            "backtest-result-2026-08-01_24-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            "../backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            r"..\backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            "directory/backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            r"C:\backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef",
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef.zip",
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef-extra",
+            "backtest-result-2026-08-01_00-00-00_000001.zip",
+            "backtest-result-2026_08_01_00_00_00",
+            "backtest-result-2026-08-01_00-00-00",
+            "backtest-result-2026-02-29_00-00-00_000001",
+            "backtest-result-2026-13-01_00-00-00_000001",
+            "backtest-result-2026-08-01_24-00-00_000001",
+            "../backtest-result-2026-08-01_00-00-00_000001",
+            r"..\backtest-result-2026-08-01_00-00-00_000001",
+            "directory/backtest-result-2026-08-01_00-00-00_000001",
+            r"C:\backtest-result-2026-08-01_00-00-00_000001",
+            "__B_RESULT_STEM__",
+            "backtest-result-invalid",
+            "",
+        )
+        for stem in invalid:
+            with self.subTest(stem=stem):
+                with self.assertRaises(contract.ContractError):
+                    contract.validate_result_stem(stem)
+                with self.assertRaises(contract.ContractError):
+                    contract.bind_c_request(raw, stem)
+
+    def test_binder_rejects_second_substitution_and_noncanonical_template(self):
+        raw = (HERE / "c-request-template.json").read_bytes()
+        stem = (
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef"
+        )
+        bound = contract.bind_c_request(raw, stem)
+        with self.assertRaises(contract.ContractError):
+            contract.bind_c_request(bound, stem)
+        with self.assertRaises(contract.ContractError):
+            contract.bind_c_request(raw[:-1], stem)
+        with self.assertRaises(contract.ContractError):
+            contract.bind_c_request(raw.replace(b":", b": ", 1), stem)
+
+    def test_binder_rejects_unknown_missing_role_or_forbidden_fields(self):
+        original = _load("c-request-template.json")
+        mutations = []
+
+        changed = copy.deepcopy(original)
+        changed["unknown"] = 1
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        del changed["timerange"]
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["strategy"] = "OtherStrategy"
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["replay_data_snapshot"]["strategy"] = "OtherStrategy"
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["experiment_id"] = EXPECTED_B_REQUEST["experiment_id"]
+        mutations.append(changed)
+        changed = copy.deepcopy(original)
+        changed["enable_protections"] = True
+        mutations.append(changed)
+        for key, value in (
+            ("freqai", {"identifier": "x"}),
+            ("freqaimodel", "Model"),
+            ("futures_funding_rate", 0),
+            ("protections", []),
+            ("httpsProxy", "http://127.0.0.1:1"),
+        ):
+            changed = copy.deepcopy(original)
+            changed[key] = value
+            mutations.append(changed)
+
+        stem = (
+            "backtest-result-2026-08-01_00-00-00_000001-"
+            "0123456789abcdef0123456789abcdef"
+        )
+        for value in mutations:
+            with self.subTest(keys=sorted(value)):
+                with self.assertRaises(contract.ContractError):
+                    contract.bind_c_request(_canonical(value), stem)
+
+    def test_requests_have_no_credentials_or_high_entropy_placeholders(self):
+        values = [_load(name) for name in EXPECTED_JSON_HASHES]
+        for value in values:
+            serialized = json.dumps(value, sort_keys=True)
+            self.assertNotRegex(serialized, r"[0-9a-fA-F]{32,}")
+            for item in _walk_strings(value):
+                if item in {"__SET_VIA_SECRET_FILE__", "__B_RESULT_STEM__"}:
+                    continue
+                self.assertNotIn("PLACEHOLDER", item.upper())
+                self.assertFalse(len(item) >= 48 and _shannon_entropy(item) >= 4.8, item)
+
+
+class StaticSourceCompatibilityTests(unittest.TestCase):
+    def test_schema_api_and_storage_are_inspected_without_importing_freqtrade(self):
+        contract.validate_source_compatibility(API_SCHEMAS, API_BACKTEST, BT_STORAGE)
+        self.assertFalse(any(name == "freqtrade" or name.startswith("freqtrade.") for name in sys.modules))
+        self.assertFalse(any(name == "pandas" or name.startswith("pandas.") for name in sys.modules))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

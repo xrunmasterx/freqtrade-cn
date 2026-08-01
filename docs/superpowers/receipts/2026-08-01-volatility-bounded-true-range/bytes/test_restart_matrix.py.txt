@@ -1,0 +1,2011 @@
+from __future__ import annotations
+
+# ruff: noqa: S101
+import ast
+import builtins
+import hashlib
+import json
+import math
+import py_compile
+import shutil
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pytest
+import restart_matrix as matrix
+
+
+def make_ohlcv(
+    rows: int,
+    *,
+    start: str = "2026-01-01T00:00:00Z",
+    volume: float = 10.0,
+) -> pd.DataFrame:
+    dates = pd.date_range(start, periods=rows, freq="1h", tz="UTC")
+    values = np.arange(rows, dtype=float)
+    opens = 100.0 + values
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": opens,
+            "high": opens + 2.0,
+            "low": opens - 2.0,
+            "close": opens + 1.0,
+            "volume": np.full(rows, volume, dtype=float),
+        }
+    )
+
+
+def route_spec(frame: pd.DataFrame, route: str = "futures") -> dict[str, Any]:
+    step = matrix.HOUR_NS if route != "funding" else 8 * matrix.HOUR_NS
+    return {
+        "route": route,
+        "rows": len(frame),
+        "start_ns": matrix._timestamp_ns(frame.iloc[0]["date"]),
+        "end_ns": matrix._timestamp_ns(frame.iloc[-1]["date"]),
+        "step_ns": step,
+    }
+
+
+def output_row(date: pd.Timestamp, source: pd.Timestamp | pd.NaT) -> dict[str, Any]:
+    row: dict[str, Any] = {column: math.nan for column in matrix.FLOAT_COLUMNS}
+    row.update({column: False for column in matrix.BOOL_COLUMNS})
+    row.update({column: 0 for column in matrix.SIGNAL_COLUMNS})
+    row["date"] = date
+    row["source_bucket_start"] = source
+    return row
+
+
+def make_boundary_frames(offset: int, rows: int = 64) -> tuple[pd.DataFrame, pd.DataFrame]:
+    suffix = make_ohlcv(rows, start=f"2026-01-01T{offset:02d}:00:00Z")
+    indicator_position = matrix.BOUNDARY_ROWS[offset]["indicator"] - 1
+    output = pd.DataFrame(
+        [output_row(date, pd.NaT) for date in suffix["date"]], index=suffix.index
+    )
+    output["source_bucket_start"] = pd.Series(
+        pd.NaT, index=output.index, dtype="datetime64[ns, UTC]"
+    )
+    for position in range(indicator_position, rows):
+        completion = indicator_position + 3 * ((position - indicator_position) // 3)
+        source = suffix.iloc[completion]["date"] - pd.Timedelta(hours=2)
+        output.at[position, "source_bucket_start"] = source
+        for column_index, column in enumerate(matrix.FLOAT_COLUMNS, start=1):
+            output.at[position, column] = float(column_index)
+        output.at[position, "bucket_ok"] = True
+        output.at[position, "valid"] = True
+    return suffix, output
+
+
+def make_signature(source_ns: int) -> dict[str, Any]:
+    unsigned = {
+        "float_nan_mask": "0" * len(matrix.FLOAT_COLUMNS),
+        "float_hex": {
+            column: float(index + 1).hex()
+            for index, column in enumerate(matrix.FLOAT_COLUMNS)
+        },
+        "booleans": {column: False for column in matrix.BOOL_COLUMNS},
+        "signals": {column: 0 for column in matrix.SIGNAL_COLUMNS},
+        "source_bucket_start_ns": source_ns,
+    }
+    return {**unsigned, "sha256": matrix._json_sha256(unsigned)}
+
+
+def make_source_identity(source_ns: int) -> dict[str, Any]:
+    members = [
+        {
+            "timestamp_ns": source_ns + index * matrix.HOUR_NS,
+            "row_sha256": hashlib.sha256(f"member-{index}".encode()).hexdigest(),
+        }
+        for index in range(3)
+    ]
+    return {
+        "source_bucket_start_ns": source_ns,
+        "constituents": members,
+        "bucket_rows_sha256": hashlib.sha256(b"three-members").hexdigest(),
+    }
+
+
+def make_boundary_evidence(
+    start_offset: int, input_start_ns: int, source_ns: int
+) -> dict[str, Any]:
+    signature = make_signature(source_ns)
+    evidence: dict[str, Any] = {"start_offset": start_offset}
+    for kind in ("indicator", "edge"):
+        rows = matrix.BOUNDARY_ROWS[start_offset][kind]
+        evidence[kind] = {
+            "expected_raw_rows": rows,
+            "actual_raw_rows": rows,
+            "timestamp_ns": input_start_ns + (rows - 1) * matrix.HOUR_NS,
+            "earlier_fail_closed": True,
+            "signature": signature,
+            "reference_signature": signature,
+            "compared_fields": list(
+                matrix.INDICATOR_BOUNDARY_FIELDS
+                if kind == "indicator"
+                else matrix.EDGE_BOUNDARY_FIELDS
+            ),
+            "equal": True,
+        }
+    return evidence
+
+
+def make_default_global_identity() -> tuple[dict[str, Any], dict[str, str]]:
+    inputs: dict[str, dict[str, Any]] = {}
+    for name in ("futures", "mark", "funding"):
+        spec = matrix.RAW_SPECS[name]
+        inputs[name] = {
+            "raw_sha256": spec["sha256"],
+            "raw_size": spec["size"],
+            "raw_inventory_sha256": spec["raw_inventory_sha256"],
+            "loaded_inventory_sha256": spec["loaded_inventory_sha256"],
+            "row_count": spec["rows"],
+            "start_ns": spec["start_ns"],
+            "end_ns": spec["end_ns"],
+        }
+    inputs["leverage"] = {
+        "raw_sha256": matrix.RAW_SPECS["leverage"]["sha256"],
+        "raw_size": matrix.RAW_SPECS["leverage"]["size"],
+    }
+    identity = {
+        "protocol": matrix.PROTOCOL,
+        "root_head": matrix.ROOT_HEAD,
+        "backend_head": matrix.BACKEND_HEAD,
+        "candidate_sha256": matrix.STRATEGY_SHA256,
+        "test_sha256": matrix.TEST_SHA256,
+        "baseline_sha256": matrix.BASELINE_SHA256,
+        "freqtrade_version": matrix.FREQTRADE_VERSION,
+        "freqtrade_init_sha256": matrix.FREQTRADE_INIT_SHA256,
+        "inputs": inputs,
+        "windows": {
+            "primary": {
+                "row_count": 13_128,
+                "start_ns": matrix.PRIMARY_START_NS,
+                "end_ns": matrix.PRIMARY_END_NS - matrix.HOUR_NS,
+            },
+            "scored": {
+                "row_count": matrix.TARGET_COUNT,
+                "start_ns": matrix.SCORED_START_NS,
+                "end_ns": matrix.SCORED_END_NS - matrix.HOUR_NS,
+                "offset_counts": {"0": 2_920, "1": 2_920, "2": 2_920},
+                "witness_ordinals": list(matrix.WITNESS_ORDINALS),
+            },
+            "performance": {
+                "row_count": 9_260,
+                "start_ns": matrix.PERFORMANCE_START_NS,
+                "end_ns": matrix.SCORED_END_NS,
+                "prefix_rows": 499,
+                "sentinel_rows": 1,
+            },
+            "audit_through_first_target": {
+                "row_count": 799,
+                "start_ns": matrix.AUDIT_START_NS,
+                "end_ns": matrix.SCORED_START_NS,
+            },
+        },
+        "admission_sha256": matrix.ADMISSION_SUMMARY_SHA256,
+    }
+    end_rehashes = {
+        "strategy": matrix.STRATEGY_SHA256,
+        "test": matrix.TEST_SHA256,
+        "baseline_a": matrix.BASELINE_SHA256,
+        "baseline_b": matrix.BASELINE_SHA256,
+        **{
+            f"raw_{name}": spec["sha256"]
+            for name, spec in matrix.RAW_SPECS.items()
+        },
+    }
+    return identity, end_rehashes
+
+
+def write_small_shards(root: Path, contract: matrix.MergeContract) -> None:
+    global_identity = {"admission_sha256": "a" * 64, "test": "synthetic"}
+    end_rehashes = {"strategy": matrix.STRATEGY_SHA256, "raw": "b" * 64}
+    for shard_id in range(contract.shard_count):
+        directory = root / f"shard-{shard_id}"
+        directory.mkdir()
+        records: list[dict[str, Any]] = []
+        resolver_ordinal = 0
+        for ordinal in range(shard_id, contract.target_count, contract.shard_count):
+            target_ns = contract.target_start_ns + ordinal * matrix.HOUR_NS
+            target = {
+                "ordinal": ordinal,
+                "timestamp_ns": target_ns,
+                "utc_offset": ordinal % 3,
+                "witness": ordinal in contract.witness_ordinals,
+            }
+            source_lag_hours = {0: 3, 1: 4, 2: 2}[ordinal % 3]
+            source_ns = target_ns - source_lag_hours * matrix.HOUR_NS
+            signature = make_signature(source_ns)
+            source_identity = make_source_identity(source_ns)
+            reference_ordinal = resolver_ordinal + 1
+            for profile in matrix.PROFILE_ORDER:
+                resolver_ordinal += 1
+                labels = list(matrix.PROFILE_LABELS[profile])
+                if profile == "full":
+                    row_count = 1_000 + ordinal
+                    requested = {"full-reference": row_count}
+                    comparison = None
+                    boundaries = None
+                else:
+                    row_count = int(profile.removeprefix("suffix-"))
+                    requested = {label: row_count for label in labels}
+                    payload = matrix._comparison_payload(
+                        signature, signature, source_identity, source_identity
+                    )
+                    comparison = {
+                        **payload,
+                        "reference_resolver_ordinal": reference_ordinal,
+                        "equal": True,
+                        "sha256": matrix._json_sha256(payload),
+                    }
+                    input_start_ns = target_ns - (row_count - 1) * matrix.HOUR_NS
+                    start_hour = (input_start_ns // matrix.HOUR_NS) % 3
+                    boundaries = make_boundary_evidence(
+                        start_hour, input_start_ns, source_ns
+                    )
+                records.append(
+                    {
+                        "protocol": matrix.PROTOCOL,
+                        "shard_id": shard_id,
+                        "shard_count": contract.shard_count,
+                        "target": target,
+                        "profile": profile,
+                        "labels": labels,
+                        "requested_lengths": requested,
+                        "resolver": {
+                            "ordinal": resolver_ordinal,
+                            "path": str(matrix.EXPECTED_STRATEGY),
+                            "source_sha256": matrix.STRATEGY_SHA256,
+                            "source_size": matrix.STRATEGY_SIZE,
+                            "startup_candle_count": 499,
+                            "fresh_instance": True,
+                            "fresh_dynamic_class": True,
+                        },
+                        "input": {
+                            "row_count": row_count,
+                            "start_ns": target_ns - (row_count - 1) * matrix.HOUR_NS,
+                            "end_ns": target_ns,
+                            "inventory_sha256": hashlib.sha256(
+                                f"{ordinal}/{profile}".encode()
+                            ).hexdigest(),
+                            "inventory_bytes": row_count * 10,
+                        },
+                        "signature": signature,
+                        "source_identity": source_identity,
+                        "comparison": comparison,
+                        "boundaries": boundaries,
+                        "mismatch_count": 0,
+                    }
+                )
+        records_bytes = b"".join(matrix._canonical_json_bytes(record) for record in records)
+        ordinals = list(range(shard_id, contract.target_count, contract.shard_count))
+        target_count = len(ordinals)
+        done = {
+            "protocol": matrix.PROTOCOL,
+            "shard_id": shard_id,
+            "shard_count": contract.shard_count,
+            "target_count": target_count,
+            "target_ordinals_sha256": matrix._json_sha256(ordinals),
+            "record_count": len(records),
+            "resolver_calls": len(records),
+            "comparison_count": target_count * 4,
+            "mismatch_count": 0,
+            "profile_counts": {profile: target_count for profile in matrix.PROFILE_ORDER},
+            "label_counts": {
+                "499": target_count,
+                "600": target_count,
+                "799": target_count,
+                "cold599": target_count,
+                "explicit599": target_count,
+                "full-reference": target_count,
+                "warm599": target_count,
+            },
+            "witness_ordinals": [
+                value for value in ordinals if value in contract.witness_ordinals
+            ],
+            "records_sha256": hashlib.sha256(records_bytes).hexdigest(),
+            "records_bytes": len(records_bytes),
+            "global_identity": global_identity,
+            "end_rehashes": end_rehashes,
+            "complete": True,
+        }
+        (directory / "records.jsonl").write_bytes(records_bytes)
+        (directory / "done.json").write_bytes(matrix._canonical_json_bytes(done))
+
+
+def read_small_records(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_bytes().splitlines()]
+
+
+def write_small_records(shard: Path, records: list[dict[str, Any]]) -> None:
+    records_bytes = b"".join(matrix._canonical_json_bytes(record) for record in records)
+    done, _ = matrix._read_canonical_json(shard / "done.json")
+    done["records_sha256"] = hashlib.sha256(records_bytes).hexdigest()
+    done["records_bytes"] = len(records_bytes)
+    (shard / "records.jsonl").write_bytes(records_bytes)
+    (shard / "done.json").write_bytes(matrix._canonical_json_bytes(done))
+
+
+def make_repository_tree(worktree: Path) -> None:
+    for relative in ("freqtrade", "frequi", "freqtrade-strategies"):
+        (worktree / relative).mkdir(exist_ok=True)
+    (worktree / "freqtrade/freqtrade").mkdir(exist_ok=True)
+
+
+@pytest.fixture
+def small_contract() -> matrix.MergeContract:
+    return matrix.MergeContract(target_count=24, witness_ordinals=(2, 3, 4))
+
+
+def test_required_env_path_rejects_missing_relative_and_substituted(tmp_path: Path) -> None:
+    expected = tmp_path / "expected.txt"
+    expected.write_text("identity", encoding="utf-8")
+    with pytest.raises(matrix.ContractError, match="required"):
+        matrix._validate_exact_path(
+            None, environment_name="TEST_PATH", expected=expected, kind="file"
+        )
+    with pytest.raises(matrix.ContractError, match="absolute"):
+        matrix._validate_exact_path(
+            "expected.txt", environment_name="TEST_PATH", expected=expected, kind="file"
+        )
+    substitute = tmp_path / "substitute.txt"
+    substitute.write_text("identity", encoding="utf-8")
+    with pytest.raises(matrix.ContractError, match="substituted"):
+        matrix._validate_exact_path(
+            substitute, environment_name="TEST_PATH", expected=expected, kind="file"
+        )
+    assert (
+        matrix._validate_exact_path(
+            expected, environment_name="TEST_PATH", expected=expected, kind="file"
+        )
+        == expected
+    )
+
+
+def test_required_env_path_rejects_symlink(tmp_path: Path) -> None:
+    expected = tmp_path / "expected.txt"
+    expected.write_text("identity", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    try:
+        link.symlink_to(expected)
+    except OSError:
+        pytest.skip("this Windows account cannot create symbolic links")
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix._validate_exact_path(
+            link, environment_name="TEST_PATH", expected=link, kind="file"
+        )
+
+
+def test_file_identity_rejects_mocked_windows_reparse_attribute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "identity.txt"
+    target.write_bytes(b"identity")
+    expected = hashlib.sha256(target.read_bytes()).hexdigest()
+    real_lstat = matrix.os.lstat
+
+    def fake_lstat(path: str | bytes | Path) -> Any:
+        details = real_lstat(path)
+        if Path(path).absolute() == target.absolute():
+            return type(
+                "ReparseStat",
+                (),
+                {
+                    "st_mode": details.st_mode,
+                    "st_file_attributes": getattr(
+                        matrix.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                    ),
+                },
+            )()
+        return details
+
+    monkeypatch.setattr(matrix.os, "lstat", fake_lstat)
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix._file_identity(target, expected)
+
+
+def test_file_identity_rejects_real_symlink_when_available(tmp_path: Path) -> None:
+    target = tmp_path / "identity.txt"
+    target.write_bytes(b"identity")
+    link = tmp_path / "identity-link.txt"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this Windows account cannot create symbolic links")
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix._file_identity(link, hashlib.sha256(target.read_bytes()).hexdigest())
+
+
+@pytest.mark.parametrize(
+    ("repository_name", "relative"),
+    [
+        ("root", "."),
+        ("backend", "freqtrade"),
+        ("frontend", "frequi"),
+        ("strategies", "freqtrade-strategies"),
+    ],
+)
+def test_checkout_rejects_mocked_repository_reparse_before_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repository_name: str,
+    relative: str,
+) -> None:
+    make_repository_tree(tmp_path)
+    target = (tmp_path / relative).absolute()
+    real_lstat = matrix.os.lstat
+    git_calls: list[Path] = []
+
+    def fake_lstat(path: str | bytes | Path) -> Any:
+        details = real_lstat(path)
+        if Path(path).absolute() == target:
+            return type(
+                "ReparseStat",
+                (),
+                {
+                    "st_mode": details.st_mode,
+                    "st_file_attributes": getattr(
+                        matrix.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                    ),
+                },
+            )()
+        return details
+
+    def unreachable_git(repository: Path, *arguments: str) -> str:
+        git_calls.append(repository)
+        raise AssertionError(f"Git reached {repository}: {arguments}")
+
+    monkeypatch.setattr(matrix.os, "lstat", fake_lstat)
+    monkeypatch.setattr(matrix, "_run_git", unreachable_git)
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix._validate_repository_checkout(tmp_path)
+    assert git_calls == [], repository_name
+
+
+def test_checkout_rejects_real_symlinked_backend_before_git_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "frequi").mkdir()
+    (worktree / "freqtrade-strategies").mkdir()
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    try:
+        (worktree / "freqtrade").symlink_to(backend, target_is_directory=True)
+    except OSError:
+        pytest.skip("this Windows account cannot create directory symbolic links")
+
+    def unreachable_git(repository: Path, *arguments: str) -> str:
+        raise AssertionError(f"Git reached {repository}: {arguments}")
+
+    monkeypatch.setattr(matrix, "_run_git", unreachable_git)
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix._validate_repository_checkout(worktree)
+
+
+def test_repository_escape_blocks_git_and_freqtrade_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_repository_tree(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-backend"
+    outside.mkdir()
+    real_directory = matrix._directory_no_links
+    git_calls: list[Path] = []
+    import_calls: list[str] = []
+
+    def escaped_backend(path: Path, label: str) -> Path:
+        resolved = real_directory(path, label)
+        return outside.resolve(strict=True) if label == "backend repository" else resolved
+
+    def unreachable_git(repository: Path, *arguments: str) -> str:
+        git_calls.append(repository)
+        raise AssertionError(f"Git reached {repository}: {arguments}")
+
+    def unreachable_import(name: str) -> Any:
+        import_calls.append(name)
+        raise AssertionError(f"import reached {name}")
+
+    monkeypatch.setattr(matrix, "_directory_no_links", escaped_backend)
+    monkeypatch.setattr(matrix, "_run_git", unreachable_git)
+    monkeypatch.setattr(matrix.importlib, "import_module", unreachable_import)
+    with pytest.raises(matrix.ContractError, match="escapes the validated worktree"):
+        matrix._validate_repository_checkout(tmp_path)
+    with pytest.raises(matrix.ContractError, match="escapes the validated worktree"):
+        matrix._import_freqtrade_core(tmp_path)
+    assert git_calls == []
+    assert import_calls == []
+
+
+def test_execution_tree_rejects_descendant_mocked_reparse_before_git_or_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_repository_tree(tmp_path)
+    target = (tmp_path / "freqtrade/freqtrade/nested").absolute()
+    target.mkdir()
+    real_lstat = matrix.os.lstat
+    git_calls: list[Path] = []
+    import_calls: list[str] = []
+
+    def fake_lstat(path: str | bytes | Path) -> Any:
+        details = real_lstat(path)
+        if Path(path).absolute() == target:
+            return type(
+                "ReparseStat",
+                (),
+                {
+                    "st_mode": details.st_mode,
+                    "st_file_attributes": getattr(
+                        matrix.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                    ),
+                },
+            )()
+        return details
+
+    def unreachable_git(repository: Path, *arguments: str) -> str:
+        git_calls.append(repository)
+        raise AssertionError(f"Git reached {repository}: {arguments}")
+
+    def unreachable_import(name: str) -> Any:
+        import_calls.append(name)
+        raise AssertionError(f"import reached {name}")
+
+    monkeypatch.setattr(matrix.os, "lstat", fake_lstat)
+    monkeypatch.setattr(matrix, "_run_git", unreachable_git)
+    monkeypatch.setattr(matrix.importlib, "import_module", unreachable_import)
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix._import_freqtrade_core(tmp_path)
+    assert git_calls == []
+    assert import_calls == []
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["__pycache__", "cached.pyc", "optimized.pyo"],
+)
+def test_execution_tree_rejects_cache_directories_and_bytecode_files(
+    tmp_path: Path, relative: str
+) -> None:
+    backend = tmp_path / "backend"
+    package = backend / "freqtrade"
+    package.mkdir(parents=True)
+    artifact = package / relative
+    if relative == "__pycache__":
+        artifact.mkdir()
+    else:
+        artifact.write_bytes(b"cached bytecode")
+    with pytest.raises(matrix.ContractError, match=r"__pycache__|cached bytecode"):
+        matrix._validate_executable_backend_tree(backend.resolve(strict=True))
+
+
+def test_timestamp_matching_explicit_pyc_is_rejected_before_git_or_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_repository_tree(tmp_path)
+    source = tmp_path / "freqtrade/freqtrade/compiled_probe.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    cached = Path(
+        py_compile.compile(
+            str(source),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+        )
+    )
+    assert cached.is_file()
+    assert cached.parent.name == "__pycache__"
+    header = cached.read_bytes()[:16]
+    source_details = source.stat()
+    assert int.from_bytes(header[4:8], "little") == 0
+    assert int.from_bytes(header[8:12], "little") == int(source_details.st_mtime)
+    assert int.from_bytes(header[12:16], "little") == source_details.st_size
+    git_calls: list[Path] = []
+    import_calls: list[str] = []
+
+    def unreachable_git(repository: Path, *arguments: str) -> str:
+        git_calls.append(repository)
+        raise AssertionError(f"Git reached {repository}: {arguments}")
+
+    def unreachable_import(name: str) -> Any:
+        import_calls.append(name)
+        raise AssertionError(f"import reached {name}")
+
+    monkeypatch.setattr(matrix, "_run_git", unreachable_git)
+    monkeypatch.setattr(matrix.importlib, "import_module", unreachable_import)
+    with pytest.raises(matrix.ContractError, match=r"__pycache__|cached bytecode"):
+        matrix._import_freqtrade_core(tmp_path)
+    assert git_calls == []
+    assert import_calls == []
+
+
+def test_external_pycache_prefix_is_rejected_before_git_or_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_repository_tree(tmp_path)
+    git_calls: list[Path] = []
+    import_calls: list[str] = []
+
+    def unreachable_git(repository: Path, *arguments: str) -> str:
+        git_calls.append(repository)
+        raise AssertionError(f"Git reached {repository}: {arguments}")
+
+    def unreachable_import(name: str) -> Any:
+        import_calls.append(name)
+        raise AssertionError(f"import reached {name}")
+
+    monkeypatch.setattr(matrix.sys, "pycache_prefix", str(tmp_path / "external-cache"))
+    monkeypatch.setattr(matrix, "_run_git", unreachable_git)
+    monkeypatch.setattr(matrix.importlib, "import_module", unreachable_import)
+    with pytest.raises(matrix.ContractError, match="external Python bytecode cache"):
+        matrix._import_freqtrade_core(tmp_path)
+    assert git_calls == []
+    assert import_calls == []
+
+
+def test_critical_backend_source_hash_mismatch_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = tmp_path / "backend"
+    source = backend / "freqtrade/synthetic.py"
+    source.parent.mkdir(parents=True)
+    original = b"PINNED = True\n"
+    source.write_bytes(original)
+    monkeypatch.setattr(
+        matrix,
+        "CRITICAL_BACKEND_SOURCES",
+        {
+            "freqtrade.synthetic": (
+                Path("freqtrade/synthetic.py"),
+                hashlib.sha256(original).hexdigest(),
+            )
+        },
+    )
+    assert matrix._validate_critical_backend_sources(backend.resolve(strict=True)) == {
+        "freqtrade.synthetic": source.resolve(strict=True)
+    }
+    source.write_bytes(b"PINNED = False\n")
+    with pytest.raises(matrix.ContractError, match="critical source hash differs"):
+        matrix._validate_critical_backend_sources(backend.resolve(strict=True))
+
+
+@pytest.mark.parametrize(
+    ("placement", "message"),
+    [
+        ("outside", "outside"),
+        ("cached", r"\.py source"),
+        ("wrong-origin", "origin differs"),
+    ],
+)
+def test_loaded_freqtrade_modules_reject_outside_cached_and_wrong_origins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    placement: str,
+    message: str,
+) -> None:
+    backend = tmp_path / "backend"
+    package = backend / "freqtrade"
+    package.mkdir(parents=True)
+    inside = package / "synthetic.py"
+    inside.write_bytes(b"VALUE = 1\n")
+    other = package / "other.py"
+    other.write_bytes(b"VALUE = 2\n")
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"VALUE = 3\n")
+    cached = package / "synthetic.pyc"
+    cached.write_bytes(b"cached")
+    if placement == "outside":
+        module_file, origin = outside, outside
+    elif placement == "cached":
+        module_file, origin = cached, cached
+    else:
+        module_file, origin = inside, other
+    module = type("LoadedModule", (), {})()
+    module.__file__ = str(module_file.resolve(strict=True))
+    module.__spec__ = type(
+        "LoadedSpec", (), {"origin": str(origin.resolve(strict=True))}
+    )()
+    module_name = "freqtrade.synthetic_loaded_path_test"
+    monkeypatch.setitem(sys.modules, module_name, module)
+    with pytest.raises(matrix.ContractError, match=message):
+        matrix._validate_loaded_freqtrade_modules(
+            backend.resolve(strict=True), {}, required_modules=()
+        )
+
+
+def test_loaded_critical_module_must_match_its_exact_source_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = tmp_path / "backend"
+    package = backend / "freqtrade"
+    package.mkdir(parents=True)
+    expected = package / "expected.py"
+    expected.write_bytes(b"EXPECTED = True\n")
+    wrong = package / "wrong.py"
+    wrong.write_bytes(b"EXPECTED = False\n")
+    module = type("LoadedModule", (), {})()
+    module.__file__ = str(wrong.resolve(strict=True))
+    module.__spec__ = type(
+        "LoadedSpec", (), {"origin": str(wrong.resolve(strict=True))}
+    )()
+    module_name = "freqtrade.critical_exact_path_test"
+    monkeypatch.setitem(sys.modules, module_name, module)
+    with pytest.raises(matrix.ContractError, match="critical loaded module path differs"):
+        matrix._validate_loaded_freqtrade_modules(
+            backend.resolve(strict=True),
+            {module_name: expected.resolve(strict=True)},
+            required_modules=(module_name,),
+        )
+
+
+def test_resolver_import_is_unreachable_with_static_invalid_execution_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_repository_tree(tmp_path)
+    (tmp_path / "freqtrade/freqtrade/__pycache__").mkdir()
+    state = matrix.AdmissionState(
+        guard=matrix._ADMISSION_GUARD,
+        summary={},
+        primary_frame=None,
+        paths={"worktree": tmp_path},
+        raw_hashes={},
+        trading_mode=None,
+        margin_mode=None,
+    )
+    git_calls: list[Path] = []
+    import_calls: list[str] = []
+
+    def unreachable_git(repository: Path, *arguments: str) -> str:
+        git_calls.append(repository)
+        raise AssertionError(f"Git reached {repository}: {arguments}")
+
+    def unreachable_import(name: str) -> Any:
+        import_calls.append(name)
+        raise AssertionError(f"import reached {name}")
+
+    monkeypatch.setattr(matrix, "_ensure_admitted", lambda _state: None)
+    monkeypatch.setattr(matrix, "_run_git", unreachable_git)
+    monkeypatch.setattr(matrix.importlib, "import_module", unreachable_import)
+    with pytest.raises(matrix.ContractError, match="__pycache__"):
+        matrix._load_strategy_resolver(state)
+    assert git_calls == []
+    assert import_calls == []
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "freqtrade/__init__.py",
+        "freqtrade/data/history/history_utils.py",
+        "freqtrade/enums/__init__.py",
+    ],
+)
+def test_freqtrade_import_rejects_mocked_module_reparse_before_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative: str,
+) -> None:
+    make_repository_tree(tmp_path)
+    backend = tmp_path / "freqtrade"
+    module_paths = [
+        backend / "freqtrade/__init__.py",
+        backend / "freqtrade/data/history/history_utils.py",
+        backend / "freqtrade/enums/__init__.py",
+    ]
+    for path in module_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic module\n")
+    target = (backend / relative).absolute()
+    real_lstat = matrix.os.lstat
+    import_calls: list[str] = []
+
+    def fake_lstat(path: str | bytes | Path) -> Any:
+        details = real_lstat(path)
+        if Path(path).absolute() == target:
+            return type(
+                "ReparseStat",
+                (),
+                {
+                    "st_mode": details.st_mode,
+                    "st_file_attributes": getattr(
+                        matrix.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                    ),
+                },
+            )()
+        return details
+
+    def unreachable_import(name: str) -> Any:
+        import_calls.append(name)
+        raise AssertionError(f"import reached {name}")
+
+    monkeypatch.setattr(matrix.os, "lstat", fake_lstat)
+    monkeypatch.setattr(matrix.importlib, "import_module", unreachable_import)
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix._import_freqtrade_core(tmp_path)
+    assert import_calls == []
+
+
+def test_imported_module_file_must_be_exactly_inside_backend(tmp_path: Path) -> None:
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    expected = backend / "expected.py"
+    expected.write_bytes(b"expected\n")
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"outside\n")
+    module = type("ImportedModule", (), {"__file__": str(outside)})()
+    with pytest.raises(matrix.ContractError, match="unexpected source path"):
+        matrix._require_imported_module_file(
+            module, expected.resolve(strict=True), backend.resolve(strict=True), "module"
+        )
+
+
+@pytest.mark.parametrize(
+    ("dirty_repository", "porcelain"),
+    [
+        ("root", " M tracked.txt"),
+        ("backend", " M freqtrade/resolvers/iresolver.py"),
+        ("frontend", "?? untracked.txt"),
+    ],
+)
+def test_checkout_identity_rejects_dirty_root_backend_and_untracked_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dirty_repository: str,
+    porcelain: str,
+) -> None:
+    make_repository_tree(tmp_path)
+    repositories = {
+        tmp_path: ("root", matrix.ROOT_HEAD),
+        tmp_path / "freqtrade": ("backend", matrix.BACKEND_HEAD),
+        tmp_path / "frequi": ("frontend", matrix.FRONTEND_HEAD),
+        tmp_path / "freqtrade-strategies": ("strategies", matrix.STRATEGIES_HEAD),
+    }
+    status_arguments: list[tuple[str, ...]] = []
+
+    def fake_git(repository: Path, *arguments: str) -> str:
+        name, head = repositories[repository]
+        if arguments == ("rev-parse", "HEAD"):
+            return head
+        status_arguments.append(arguments)
+        assert arguments == ("status", "--porcelain=v1", "--untracked-files=all")
+        return porcelain if name == dirty_repository else ""
+
+    monkeypatch.setattr(matrix, "_run_git", fake_git)
+    with pytest.raises(matrix.ContractError, match=f"{dirty_repository} checkout"):
+        matrix._validate_repository_checkout(tmp_path)
+    assert status_arguments
+
+
+def test_end_rehash_rechecks_fixed_heads_and_clean_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_repository_tree(tmp_path)
+    state = matrix.AdmissionState(
+        guard=matrix._ADMISSION_GUARD,
+        summary={},
+        primary_frame=None,
+        paths={"worktree": tmp_path},
+        raw_hashes={},
+        trading_mode=None,
+        margin_mode=None,
+    )
+    expected = matrix._expected_end_rehashes(state)
+    repositories = {
+        tmp_path: ("root", matrix.ROOT_HEAD),
+        tmp_path / "freqtrade": ("backend", matrix.BACKEND_HEAD),
+        tmp_path / "frequi": ("frontend", matrix.FRONTEND_HEAD),
+        tmp_path / "freqtrade-strategies": ("strategies", matrix.STRATEGIES_HEAD),
+    }
+
+    def fake_git(repository: Path, *arguments: str) -> str:
+        name, head = repositories[repository]
+        if arguments == ("rev-parse", "HEAD"):
+            return head
+        assert arguments == ("status", "--porcelain=v1", "--untracked-files=all")
+        return " M freqtrade/strategy/interface.py" if name == "backend" else ""
+
+    monkeypatch.setattr(matrix, "_capture_end_rehashes", lambda _state: expected)
+    monkeypatch.setattr(matrix, "_run_git", fake_git)
+    context: dict[str, Any] = {}
+    with pytest.raises(matrix.ContractError, match="backend checkout"):
+        matrix._end_rehashes(state, context)
+    assert context["end_identities"] == {"expected": expected, "actual": expected}
+
+
+def test_candidate_resolver_is_unreachable_before_successful_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imports: list[str] = []
+
+    def fake_import(name: str) -> Any:
+        imports.append(name)
+        raise AssertionError("resolver import was reachable")
+
+    monkeypatch.setattr(matrix.importlib, "import_module", fake_import)
+    invalid = matrix.AdmissionState(
+        guard=object(),
+        summary={},
+        primary_frame=None,
+        paths={},
+        raw_hashes={},
+        trading_mode=None,
+        margin_mode=None,
+    )
+    with pytest.raises(matrix.ContractError, match="unreachable"):
+        matrix._load_strategy_resolver(invalid)
+    assert imports == []
+
+
+@pytest.mark.parametrize("self_consistent", [True, False])
+def test_resolver_rejects_arbitrary_or_inconsistent_admission_summary_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+    self_consistent: bool,
+) -> None:
+    unsigned = {"protocol": "synthetic-admission"}
+    stored = (
+        matrix._json_sha256(unsigned)
+        if self_consistent
+        else matrix.ADMISSION_SUMMARY_SHA256
+    )
+    state = matrix.AdmissionState(
+        guard=matrix._ADMISSION_GUARD,
+        summary={**unsigned, "summary_sha256": stored},
+        primary_frame=None,
+        paths={},
+        raw_hashes={name: spec["sha256"] for name, spec in matrix.RAW_SPECS.items()},
+        trading_mode=None,
+        margin_mode=None,
+    )
+
+    def unreachable_import(name: str) -> Any:
+        raise AssertionError(f"resolver import was reachable: {name}")
+
+    monkeypatch.setattr(matrix.importlib, "import_module", unreachable_import)
+    with pytest.raises(matrix.ContractError, match="authoritative identity"):
+        matrix._load_strategy_resolver(state)
+
+
+def test_module_top_level_is_stdlib_only() -> None:
+    source = Path(matrix.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    imported_roots = {
+        alias.name.split(".")[0]
+        for node in imports
+        for alias in node.names
+        if alias.name != "annotations"
+    }
+    assert "pandas" not in imported_roots
+    assert "pyarrow" not in imported_roots
+    assert "freqtrade" not in imported_roots
+    assert ".astype(int)" not in source
+    assert "sys.dont_write_bytecode = True" in source
+    assert matrix.sys.dont_write_bytecode is True
+
+
+def test_canonical_inventory_has_explicit_nan_and_signed_zero_masks() -> None:
+    frame = make_ohlcv(1)
+    frame.loc[0, "open"] = 0.0
+    frame.loc[0, "high"] = -0.0
+    frame.loc[0, "low"] = 1.0
+    frame.loc[0, "close"] = -1.0
+    frame.loc[0, "volume"] = math.nan
+    inventory = matrix.canonical_ohlcv_inventory(frame, allow_nan_columns=("volume",))
+    fields = inventory.decode("ascii").rstrip("\n").split("|")
+    assert fields[1] == "00001"
+    assert fields[2] == "pnxxx"
+    assert fields[3] == 0.0.hex()
+    assert fields[4] == (-0.0).hex()
+    assert fields[-1] == "nan"
+    assert inventory.endswith(b"\n")
+
+
+def test_canonical_inventory_rejects_naive_timestamp_and_unexpected_nan() -> None:
+    frame = make_ohlcv(1)
+    frame["date"] = frame["date"].dt.tz_localize(None)
+    with pytest.raises(matrix.ContractError, match="explicit UTC"):
+        matrix.canonical_ohlcv_inventory(frame)
+    frame = make_ohlcv(1)
+    frame.loc[0, "volume"] = math.nan
+    with pytest.raises(matrix.ContractError, match="finite"):
+        matrix.canonical_ohlcv_inventory(frame)
+
+
+@pytest.mark.parametrize("mutation", ["gap", "duplicate", "order", "geometry"])
+def test_route_validation_rejects_gap_duplicate_order_and_geometry(mutation: str) -> None:
+    frame = make_ohlcv(4)
+    if mutation == "gap":
+        frame.loc[2:, "date"] += pd.Timedelta(hours=1)
+    elif mutation == "duplicate":
+        frame.loc[2, "date"] = frame.loc[1, "date"]
+    elif mutation == "order":
+        first = frame.loc[1, "date"]
+        frame.loc[1, "date"] = frame.loc[2, "date"]
+        frame.loc[2, "date"] = first
+    elif mutation == "geometry":
+        frame.loc[2, "low"] = frame.loc[2, "high"] + 1.0
+    message = "geometry" if mutation == "geometry" else "timestamp|duplicate|order"
+    with pytest.raises(matrix.ContractError, match=message):
+        matrix.validate_ohlcv_route(frame, route_spec(frame))
+
+
+def test_neutral_arrow_schema_is_exact() -> None:
+    correct = pa.table(
+        {
+            "date": pa.array(
+                [pd.Timestamp("2026-01-01T00:00:00Z")],
+                type=pa.timestamp("ms", tz="UTC"),
+            ),
+            **{
+                column: pa.array([1.0], type=pa.float64())
+                for column in matrix.RAW_COLUMNS[1:]
+            },
+        }
+    )
+    assert matrix._validate_arrow_schema(correct, "synthetic")["values"] == "double"
+    wrong_date = correct.set_column(
+        0,
+        "date",
+        pa.array(
+            [pd.Timestamp("2026-01-01T00:00:00Z")],
+            type=pa.timestamp("ns", tz="UTC"),
+        ),
+    )
+    with pytest.raises(matrix.ContractError, match=r"timestamp\[ms"):
+        matrix._validate_arrow_schema(wrong_date, "synthetic")
+    with pytest.raises(matrix.ContractError, match="physical columns"):
+        matrix._validate_arrow_schema(correct.drop(["volume"]), "synthetic")
+
+
+def test_leverage_json_rejects_duplicate_keys_and_wrong_structure() -> None:
+    with pytest.raises(matrix.ContractError, match="duplicate JSON key"):
+        matrix.validate_leverage_json(b'{"updated":"x","data":{},"data":{}}')
+    with pytest.raises(matrix.ContractError, match="top-level structure"):
+        matrix.validate_leverage_json(b"[]")
+
+
+def test_mark_route_requires_nan_volume() -> None:
+    frame = make_ohlcv(3)
+    frame["volume"] = math.nan
+    assert matrix.validate_ohlcv_route(frame, route_spec(frame, "mark"))["row_count"] == 3
+    frame.loc[1, "volume"] = 0.0
+    with pytest.raises(matrix.ContractError, match=r"Mark raw volume|mark raw volume"):
+        matrix.validate_ohlcv_route(frame, route_spec(frame, "mark"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["timestamp", "open", "negative-zero-volume", "positive-volume", "extra-row"],
+)
+def test_only_permitted_mark_loader_normalization_is_accepted(mutation: str) -> None:
+    raw = make_ohlcv(3)
+    raw["volume"] = math.nan
+    loaded = raw.copy(deep=True)
+    loaded["volume"] = 0.0
+    if mutation == "timestamp":
+        loaded.loc[1, "date"] += pd.Timedelta(hours=1)
+    elif mutation == "open":
+        loaded.loc[1, "open"] = np.nextafter(loaded.loc[1, "open"], math.inf)
+    elif mutation == "negative-zero-volume":
+        loaded.loc[1, "volume"] = -0.0
+    elif mutation == "positive-volume":
+        loaded.loc[1, "volume"] = 1.0
+    elif mutation == "extra-row":
+        loaded = pd.concat([loaded, loaded.iloc[[-1]]], ignore_index=True)
+    with pytest.raises(matrix.ContractError, match="Mark normalization"):
+        matrix.assert_mark_normalization(raw, loaded)
+    assert matrix.assert_mark_normalization(raw, raw.assign(volume=0.0)) == 3
+
+
+def test_funding_inventory_must_be_exact_without_fill() -> None:
+    dates = pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="8h", tz="UTC")
+    raw = pd.DataFrame(
+        {
+            "date": dates,
+            "open": [0.001, -0.001, 0.0],
+            "high": [0.0, 0.0, 0.0],
+            "low": [0.0, 0.0, 0.0],
+            "close": [0.0, 0.0, 0.0],
+            "volume": [0.0, 0.0, 0.0],
+        }
+    )
+    assert matrix.validate_ohlcv_route(raw, route_spec(raw, "funding"))["row_count"] == 3
+    changed = raw.copy(deep=True)
+    changed.loc[1, "open"] = np.nextafter(changed.loc[1, "open"], math.inf)
+    with pytest.raises(matrix.ContractError, match="Funding loaded inventory"):
+        matrix._assert_inventory_equal(raw, changed, label="Funding")
+
+
+def test_timestamp_windows_counts_shards_offsets_and_witnesses() -> None:
+    primary_with_sentinel = make_ohlcv(
+        13_129, start="2024-01-01T00:00:00Z"
+    )
+    primary = matrix._select_window(
+        primary_with_sentinel,
+        matrix.PRIMARY_START_NS,
+        matrix.PRIMARY_END_NS,
+        include_end=False,
+    )
+    scored = matrix._select_window(
+        primary_with_sentinel,
+        matrix.SCORED_START_NS,
+        matrix.SCORED_END_NS,
+        include_end=False,
+    )
+    performance = matrix._select_window(
+        primary_with_sentinel,
+        matrix.PERFORMANCE_START_NS,
+        matrix.SCORED_END_NS,
+        include_end=True,
+    )
+    audit = matrix._select_window(
+        primary_with_sentinel,
+        matrix.AUDIT_START_NS,
+        matrix.SCORED_START_NS,
+        include_end=True,
+    )
+    assert (len(primary), len(scored), len(performance), len(audit)) == (
+        13_128,
+        8_760,
+        9_260,
+        799,
+    )
+    assert all(
+        len(range(shard, matrix.TARGET_COUNT, matrix.SHARD_COUNT)) == 1_095
+        for shard in range(8)
+    )
+    assert {
+        offset: sum(index % 3 == offset for index in range(matrix.TARGET_COUNT))
+        for offset in range(3)
+    } == {
+        0: 2_920,
+        1: 2_920,
+        2: 2_920,
+    }
+    for ordinal, timestamp_ns in zip(
+        matrix.WITNESS_ORDINALS, matrix.WITNESS_TIMESTAMPS_NS, strict=True
+    ):
+        assert matrix._target_descriptor(ordinal)["timestamp_ns"] == timestamp_ns
+        assert matrix._timestamp_ns(scored.iloc[ordinal]["date"]) == timestamp_ns
+
+
+def test_suffix_deduplication_is_by_bytes_and_collapses_all_599_labels() -> None:
+    groups = matrix.deduplicate_suffix_bytes(
+        [
+            ("499", 499, b"a"),
+            ("cold599", 599, b"same-599"),
+            ("warm599", 599, b"same-599"),
+            ("explicit599", 599, b"same-599"),
+            ("600", 600, b"c"),
+            ("799", 799, b"d"),
+        ]
+    )
+    assert len(groups) == 4
+    assert groups[1]["labels"] == ["cold599", "explicit599", "warm599"]
+    assert groups[1]["requested_lengths"] == {
+        "cold599": 599,
+        "warm599": 599,
+        "explicit599": 599,
+    }
+
+
+def test_signature_comparison_is_exact_for_float_nan_boolean_signal_and_source() -> None:
+    row = output_row(pd.Timestamp("2026-01-01T00:00:00Z"), pd.Timestamp("2025-12-31T21:00:00Z"))
+    for index, column in enumerate(matrix.FLOAT_COLUMNS):
+        row[column] = math.nan if index == 0 else (-0.0 if index == 1 else float(index))
+    row["valid"] = np.bool_(True)
+    row["enter_long"] = np.int64(1)
+    signature = matrix.signature_from_row(pd.Series(row))
+    assert signature["float_nan_mask"].startswith("10")
+    assert signature["float_hex"][matrix.FLOAT_COLUMNS[1]] == (-0.0).hex()
+    matrix.compare_signatures(signature, dict(signature))
+    changed = json.loads(json.dumps(signature))
+    changed["float_hex"][matrix.FLOAT_COLUMNS[2]] = np.nextafter(2.0, math.inf).hex()
+    with pytest.raises(matrix.SemanticMismatch, match="float_hex"):
+        matrix.compare_signatures(signature, changed)
+    changed = json.loads(json.dumps(signature))
+    changed["source_bucket_start_ns"] += matrix.HOUR_NS
+    with pytest.raises(matrix.SemanticMismatch, match="source_bucket"):
+        matrix.compare_signatures(signature, changed)
+
+
+def test_source_constituent_identity_uses_exact_timestamp_and_row_bytes() -> None:
+    frame = make_ohlcv(3)
+    row = output_row(frame.iloc[-1]["date"], frame.iloc[0]["date"])
+    for index, column in enumerate(matrix.FLOAT_COLUMNS, start=1):
+        row[column] = float(index)
+    signature = matrix.signature_from_row(pd.Series(row))
+    identity = matrix._source_identity(frame, signature)
+    assert [member["timestamp_ns"] for member in identity["constituents"]] == [
+        matrix._timestamp_ns(value) for value in frame["date"]
+    ]
+    changed = frame.copy(deep=True)
+    changed.loc[1, "close"] = np.nextafter(changed.loc[1, "close"], math.inf)
+    assert matrix._source_identity(changed, signature) != identity
+
+
+def test_fresh_instance_and_dynamic_class_are_both_enforced() -> None:
+    guard = matrix.FreshResolverGuard()
+    first_class = type("FakeStrategy", (), {})
+    first = first_class()
+    assert guard.accept(first) == 1
+    with pytest.raises(matrix.SemanticMismatch, match="instance"):
+        guard.accept(first)
+    guard = matrix.FreshResolverGuard()
+    guard.accept(first_class())
+    with pytest.raises(matrix.SemanticMismatch, match="dynamic strategy class"):
+        guard.accept(first_class())
+    guard = matrix.FreshResolverGuard()
+    for ordinal in range(1, 4):
+        dynamic = type("FakeStrategy", (), {})()
+        assert guard.accept(dynamic) == ordinal
+
+
+def test_fresh_guard_rejects_nonadjacent_live_instance_and_class_reuse() -> None:
+    first_class = type("FirstStrategy", (), {})
+    second_class = type("SecondStrategy", (), {})
+    first = first_class()
+    second = second_class()
+    guard = matrix.FreshResolverGuard()
+    assert guard.accept(first) == 1
+    assert guard.accept(second) == 2
+    with pytest.raises(matrix.SemanticMismatch, match="strategy instance"):
+        guard.accept(first)
+
+    guard = matrix.FreshResolverGuard()
+    first_instance = first_class()
+    second_instance = second_class()
+    third_instance = first_class()
+    assert guard.accept(first_instance) == 1
+    assert guard.accept(second_instance) == 2
+    with pytest.raises(matrix.SemanticMismatch, match="dynamic strategy class"):
+        guard.accept(third_instance)
+
+
+def test_fake_resolver_runs_fresh_dynamic_strategy_objects_without_importing_candidate() -> None:
+    class FakeResolver:
+        @staticmethod
+        def load_strategy(config: dict[str, Any]) -> Any:
+            assert config["strategy"] == "VolatilitySystem"
+
+            def indicators(
+                self: Any, dataframe: pd.DataFrame, metadata: dict[str, str]
+            ) -> pd.DataFrame:
+                assert metadata == matrix.META
+                result = dataframe.copy(deep=True)
+                for column in matrix.FLOAT_COLUMNS:
+                    result[column] = 1.0
+                for column in matrix.BOOL_COLUMNS:
+                    result[column] = False
+                result["source_bucket_start"] = result["date"] - pd.Timedelta(hours=2)
+                return result
+
+            def signals(
+                self: Any, dataframe: pd.DataFrame, metadata: dict[str, str]
+            ) -> pd.DataFrame:
+                assert metadata == matrix.META
+                result = dataframe.copy(deep=True)
+                for column in matrix.SIGNAL_COLUMNS:
+                    result[column] = 0
+                return result
+
+            dynamic_class = type(
+                "VolatilitySystem",
+                (),
+                {
+                    "startup_candle_count": 499,
+                    "advise_indicators": indicators,
+                    "ft_advise_signals": signals,
+                },
+            )
+            strategy = dynamic_class()
+            strategy.__file__ = str(matrix.EXPECTED_STRATEGY)
+            strategy.__source_bytes__ = matrix.EXPECTED_STRATEGY.read_bytes()
+            return strategy
+
+    frame = make_ohlcv(60)
+    guard = matrix.FreshResolverGuard()
+    config = {
+        "strategy": "VolatilitySystem",
+        "strategy_path": str(matrix.EXPECTED_STRATEGY.parent),
+    }
+    first, first_resolver = matrix._resolve_and_run(
+        frame,
+        resolver_api=FakeResolver,
+        resolver_config=config,
+        source_path=matrix.EXPECTED_STRATEGY,
+        guard=guard,
+    )
+    second, second_resolver = matrix._resolve_and_run(
+        frame,
+        resolver_api=FakeResolver,
+        resolver_config=config,
+        source_path=matrix.EXPECTED_STRATEGY,
+        guard=guard,
+    )
+    assert first.index.equals(frame.index)
+    assert first["date"].equals(frame["date"])
+    assert second.index.equals(frame.index)
+    assert first_resolver["ordinal"] == 1
+    assert second_resolver["ordinal"] == 2
+    assert guard.calls == 2
+
+
+def test_resolver_captured_bytes_must_equal_unchanged_frozen_file() -> None:
+    frozen_before = matrix.EXPECTED_STRATEGY.read_bytes()
+
+    class DivergentResolver:
+        @staticmethod
+        def load_strategy(config: dict[str, Any]) -> Any:
+            assert config["strategy"] == "VolatilitySystem"
+            strategy = type("VolatilitySystem", (), {})()
+            strategy.__file__ = str(matrix.EXPECTED_STRATEGY)
+            strategy.__source_bytes__ = frozen_before[:-1] + bytes([frozen_before[-1] ^ 1])
+            return strategy
+
+    with pytest.raises(matrix.SemanticMismatch, match="captured source bytes differ"):
+        matrix._resolve_and_run(
+            make_ohlcv(60),
+            resolver_api=DivergentResolver,
+            resolver_config={"strategy": "VolatilitySystem"},
+            source_path=matrix.EXPECTED_STRATEGY,
+            guard=matrix.FreshResolverGuard(),
+        )
+    assert matrix.EXPECTED_STRATEGY.read_bytes() == frozen_before
+
+
+@pytest.mark.parametrize("offset", [0, 1, 2])
+def test_boundary_counts_earlier_masks_and_reference_signatures(offset: int) -> None:
+    suffix, result = make_boundary_frames(offset)
+    evidence = matrix.derive_and_verify_boundaries(suffix, result, result.copy(deep=True))
+    assert evidence["indicator"]["actual_raw_rows"] == matrix.BOUNDARY_ROWS[offset]["indicator"]
+    assert evidence["edge"]["actual_raw_rows"] == matrix.BOUNDARY_ROWS[offset]["edge"]
+    assert evidence["indicator"]["earlier_fail_closed"] is True
+    assert evidence["edge"]["earlier_fail_closed"] is True
+
+
+def test_boundary_masks_fail_closed_before_indicator_and_edge() -> None:
+    suffix, result = make_boundary_frames(0)
+    result.loc[1, "volatility_threshold"] = 1.0
+    with pytest.raises(matrix.SemanticMismatch, match="pre-indicator floats"):
+        matrix.derive_and_verify_boundaries(suffix, result, result.copy(deep=True))
+    suffix, result = make_boundary_frames(0)
+    result.loc[3, "enter_long"] = 1
+    with pytest.raises(matrix.SemanticMismatch, match="pre-edge entry"):
+        matrix.derive_and_verify_boundaries(suffix, result, result.copy(deep=True))
+    suffix, result = make_boundary_frames(0)
+    result.loc[2, "exit_short"] = 1
+    with pytest.raises(matrix.SemanticMismatch, match="pre-indicator exit"):
+        matrix.derive_and_verify_boundaries(suffix, result, result.copy(deep=True))
+
+
+def test_boundary_signature_mismatch_is_exact() -> None:
+    suffix, result = make_boundary_frames(1)
+    full = result.copy(deep=True)
+    position = matrix.BOUNDARY_ROWS[1]["indicator"] - 1
+    full.loc[position, "delta"] = np.nextafter(full.loc[position, "delta"], math.inf)
+    with pytest.raises(matrix.SemanticMismatch, match="delta"):
+        matrix.derive_and_verify_boundaries(suffix, result, full)
+
+
+def test_indicator_boundary_is_scoped_before_edge_becomes_computable() -> None:
+    suffix, result = make_boundary_frames(0)
+    full = result.copy(deep=True)
+    indicator_position = matrix.BOUNDARY_ROWS[0]["indicator"] - 1
+    full.loc[indicator_position, "long_edge"] = True
+    full.loc[indicator_position, "enter_long"] = 1
+    evidence = matrix.derive_and_verify_boundaries(suffix, result, full)
+    assert "long_edge" not in evidence["indicator"]["compared_fields"]
+    assert "long_edge" in evidence["edge"]["compared_fields"]
+
+
+def test_mature_target_signature_rejects_unexpected_nan() -> None:
+    signature = make_signature(matrix.SCORED_START_NS - 2 * matrix.HOUR_NS)
+    signature["float_nan_mask"] = "1" + signature["float_nan_mask"][1:]
+    with pytest.raises(matrix.SemanticMismatch, match="unexpectedly contains a NaN"):
+        matrix._require_finite_signature(signature, "target")
+
+
+def test_atomic_directory_file_refusal_and_no_resume(tmp_path: Path) -> None:
+    directory = tmp_path / "shard"
+    matrix._atomic_create_directory(directory, {"done.json": b"{}\n"})
+    assert (directory / "done.json").read_bytes() == b"{}\n"
+    assert not list(tmp_path.glob(".shard.tmp-*"))
+    with pytest.raises(matrix.ContractError, match="resume is prohibited"):
+        matrix._atomic_create_directory(directory, {"done.json": b"changed\n"})
+    output = tmp_path / "summary.json"
+    matrix._atomic_write_new_file(output, b"{}\n")
+    with pytest.raises(matrix.ContractError, match="resume is prohibited"):
+        matrix._atomic_write_new_file(output, b"changed\n")
+
+
+def test_semantic_failure_writes_forensic_evidence_only_once(tmp_path: Path) -> None:
+    output = tmp_path / "failed-shard"
+    matrix.write_failure_evidence(
+        output, {"kind": "SemanticMismatch", "message": "float hex differs"}
+    )
+    assert {item.name for item in output.iterdir()} == {"failure.json"}
+    failure = json.loads((output / "failure.json").read_text(encoding="utf-8"))
+    assert failure["complete"] is False
+    assert failure["failure"]["kind"] == "SemanticMismatch"
+    with pytest.raises(matrix.ContractError, match="resume is prohibited"):
+        matrix.write_failure_evidence(output, {"kind": "retry"})
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_exit", "expected_kind"),
+    [
+        (matrix.ContractError("synthetic end contract failed"), 2, "ContractError"),
+        (RuntimeError("SECRET_PAYLOAD_MUST_NOT_APPEAR"), 3, "RuntimeError"),
+    ],
+)
+def test_run_shard_command_writes_safe_failure_once_and_cannot_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected_exit: int,
+    expected_kind: str,
+) -> None:
+    state = matrix.AdmissionState(
+        guard=matrix._ADMISSION_GUARD,
+        summary={},
+        primary_frame=None,
+        paths={},
+        raw_hashes={},
+        trading_mode=None,
+        margin_mode=None,
+    )
+    admit_calls = 0
+
+    def fake_admit() -> matrix.AdmissionState:
+        nonlocal admit_calls
+        admit_calls += 1
+        return state
+
+    def fail_run_shard(
+        _state: matrix.AdmissionState,
+        shard_id: int,
+        _output: Path,
+        *,
+        failure_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        failure_context.update(
+            {
+                "target": matrix._target_descriptor(shard_id),
+                "profile": "suffix-599",
+                "labels": ["cold599", "explicit599", "warm599"],
+                "requested_lengths": {
+                    "cold599": 599,
+                    "explicit599": 599,
+                    "warm599": 599,
+                },
+                "current_resolver_ordinal": 7,
+                "next_resolver_ordinal": 8,
+            }
+        )
+        raise failure
+
+    monkeypatch.setattr(matrix, "admit", fake_admit)
+    monkeypatch.setattr(
+        matrix,
+        "_admission_identity",
+        lambda _summary: {"admission_sha256": matrix.ADMISSION_SUMMARY_SHA256},
+    )
+    monkeypatch.setattr(matrix, "run_shard", fail_run_shard)
+    output = tmp_path / "failed-shard"
+    command = ["run-shard", "--shard-id", "3", "--output-dir", str(output)]
+    assert matrix.main(command) == expected_exit
+    assert {item.name for item in output.iterdir()} == {"failure.json"}
+    original = (output / "failure.json").read_bytes()
+    evidence = json.loads(original)["failure"]
+    assert evidence["kind"] == expected_kind
+    assert evidence["context"]["target"]["ordinal"] == 3
+    assert evidence["context"]["profile"] == "suffix-599"
+    assert evidence["context"]["current_resolver_ordinal"] == 7
+    assert evidence["context"]["next_resolver_ordinal"] == 8
+    assert evidence["context"]["admitted_global_identity"] == {
+        "admission_sha256": matrix.ADMISSION_SUMMARY_SHA256
+    }
+    assert set(evidence["context"]["end_identities"]) == {"expected", "actual"}
+    assert b"SECRET_PAYLOAD_MUST_NOT_APPEAR" not in original
+
+    assert matrix.main(command) == 2
+    assert (output / "failure.json").read_bytes() == original
+    assert {item.name for item in output.iterdir()} == {"failure.json"}
+    assert admit_calls == 1
+
+
+def test_default_identity_requires_exact_authoritative_admission_hash() -> None:
+    identity, end_rehashes = make_default_global_identity()
+    matrix._verify_default_global_identity(identity, end_rehashes)
+    arbitrary = dict(identity)
+    arbitrary["admission_sha256"] = "0" * 64
+    with pytest.raises(matrix.ContractError, match="admission summary hash"):
+        matrix._verify_default_global_identity(arbitrary, end_rehashes)
+
+
+def test_default_completion_counts_and_witnesses_without_materializing_records() -> None:
+    expected = {
+        "record_count": matrix.EXPECTED_CALLS,
+        "resolver_calls": matrix.EXPECTED_CALLS,
+        "comparison_count": matrix.EXPECTED_COMPARISONS,
+        "offset_counts": {0: 2_920, 1: 2_920, 2: 2_920},
+        "witnesses": matrix.WITNESS_ORDINALS,
+        "witness_timestamps": dict(
+            zip(matrix.WITNESS_ORDINALS, matrix.WITNESS_TIMESTAMPS_NS, strict=True)
+        ),
+    }
+    matrix._verify_default_completion_contract(**expected)
+    mutations = [
+        {"record_count": matrix.EXPECTED_CALLS - 1},
+        {"resolver_calls": matrix.EXPECTED_CALLS - 1},
+        {"comparison_count": matrix.EXPECTED_COMPARISONS - 1},
+        {"offset_counts": {0: 2_919, 1: 2_920, 2: 2_921}},
+        {"witnesses": matrix.WITNESS_ORDINALS[:-1]},
+        {
+            "witness_timestamps": {
+                **expected["witness_timestamps"],
+                matrix.WITNESS_ORDINALS[0]: matrix.WITNESS_TIMESTAMPS_NS[0]
+                + matrix.HOUR_NS,
+            }
+        },
+    ]
+    for mutation in mutations:
+        arguments = {**expected, **mutation}
+        with pytest.raises(matrix.ContractError):
+            matrix._verify_default_completion_contract(**arguments)
+
+
+def test_stdlib_only_merge_completeness(
+    tmp_path: Path,
+    small_contract: matrix.MergeContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    output = tmp_path / "summary.json"
+    real_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "pandas" or name.startswith("pandas."):
+            raise AssertionError("verify-merge imported pandas")
+        if name == "freqtrade" or name.startswith("freqtrade."):
+            raise AssertionError("verify-merge imported Freqtrade")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    summary = matrix.verify_merge(shards, output, contract=small_contract)
+    assert summary["complete"] is True
+    assert summary["target_count"] == 24
+    assert summary["record_count"] == 120
+    assert summary["resolver_calls"] == 120
+    assert summary["comparison_count"] == 96
+    assert summary["witness_ordinals"] == [2, 3, 4]
+    assert output.read_bytes() == matrix._canonical_json_bytes(summary)
+
+
+def test_verify_merge_streams_records_and_done_without_bulk_file_reads(
+    tmp_path: Path,
+    small_contract: matrix.MergeContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    original_read_bytes = Path.read_bytes
+
+    def reject_evidence_read_bytes(path: Path) -> bytes:
+        if path.name in {"records.jsonl", "done.json"}:
+            raise AssertionError(f"verify-merge bulk-read {path.name}")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_evidence_read_bytes)
+    summary = matrix.verify_merge(
+        shards, tmp_path / "summary.json", contract=small_contract
+    )
+    assert summary["record_count"] == small_contract.target_count * 5
+
+
+def test_canonical_evidence_limits_have_generous_fixed_schema_margin(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    record_sizes = [
+        len(line)
+        for shard_id in range(small_contract.shard_count)
+        for line in (shards / f"shard-{shard_id}/records.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    ]
+    done_sizes = [
+        (shards / f"shard-{shard_id}/done.json").stat().st_size
+        for shard_id in range(small_contract.shard_count)
+    ]
+    assert max(record_sizes) < matrix.MAX_RECORD_LINE_BYTES // 4
+    assert max(done_sizes) < matrix.MAX_DONE_JSON_BYTES // 4
+
+
+def test_stream_record_requests_exact_bound_and_retains_no_oversized_bytes(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    class OversizedHandle:
+        def __init__(self) -> None:
+            self.requests: list[int] = []
+
+        def readline(self, size: int) -> bytes:
+            self.requests.append(size)
+            return b"x" * size
+
+    handle = OversizedHandle()
+    stream = matrix._ShardStream(
+        shard_id=0,
+        directory="synthetic",
+        done={},
+        done_sha256="0" * 64,
+        path=tmp_path / "records.jsonl",
+        handle=handle,
+        records_digest=hashlib.sha256(),
+    )
+    with pytest.raises(matrix.ContractError, match="record line exceeds"):
+        matrix._read_stream_record(
+            stream,
+            target_ordinal=0,
+            profile="full",
+            contract=small_contract,
+        )
+    assert handle.requests == [matrix.MAX_RECORD_LINE_BYTES + 1]
+    assert stream.record_count == 0
+    assert stream.records_bytes == 0
+    assert stream.records_digest.hexdigest() == hashlib.sha256().hexdigest()
+
+
+def test_stream_record_rejects_missing_lf_without_a_followup_read(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    class MissingLfHandle:
+        def __init__(self) -> None:
+            self.requests: list[int] = []
+
+        def readline(self, size: int) -> bytes:
+            self.requests.append(size)
+            return b"{}"
+
+        def read(self, _size: int = -1) -> bytes:
+            raise AssertionError("missing-LF validation performed a followup read")
+
+    handle = MissingLfHandle()
+    stream = matrix._ShardStream(
+        shard_id=0,
+        directory="synthetic",
+        done={},
+        done_sha256="0" * 64,
+        path=tmp_path / "records.jsonl",
+        handle=handle,
+        records_digest=hashlib.sha256(),
+    )
+    with pytest.raises(matrix.ContractError, match="canonical LF form"):
+        matrix._read_stream_record(
+            stream,
+            target_ordinal=0,
+            profile="full",
+            contract=small_contract,
+        )
+    assert handle.requests == [matrix.MAX_RECORD_LINE_BYTES + 1]
+    assert stream.record_count == 0
+    assert stream.records_bytes == 0
+
+
+def test_done_reader_requests_exact_bound_and_rejects_before_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class OversizedHandle:
+        def __init__(self) -> None:
+            self.requests: list[int] = []
+
+        def __enter__(self) -> OversizedHandle:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self, size: int) -> bytes:
+            self.requests.append(size)
+            return b"x" * size
+
+    handle = OversizedHandle()
+
+    def fake_open(
+        _path: Path, mode: str = "r", *_args: Any, **_kwargs: Any
+    ) -> OversizedHandle:
+        assert mode == "rb"
+        return handle
+
+    monkeypatch.setattr(Path, "open", fake_open)
+    with pytest.raises(matrix.ContractError, match="done JSON exceeds"):
+        matrix._read_canonical_json(tmp_path / "done.json")
+    assert handle.requests == [matrix.MAX_DONE_JSON_BYTES + 1]
+
+
+def test_streaming_merge_rejects_oversized_newline_free_record(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    (shards / "shard-0/records.jsonl").write_bytes(
+        b"x" * (matrix.MAX_RECORD_LINE_BYTES + 1)
+    )
+    with pytest.raises(matrix.ContractError, match="record line exceeds"):
+        matrix.verify_merge(
+            shards, tmp_path / "summary.json", contract=small_contract
+        )
+
+
+def test_streaming_merge_rejects_oversized_done_json(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    (shards / "shard-0/done.json").write_bytes(
+        b"x" * (matrix.MAX_DONE_JSON_BYTES + 1)
+    )
+    with pytest.raises(matrix.ContractError, match="done JSON exceeds"):
+        matrix.verify_merge(
+            shards, tmp_path / "summary.json", contract=small_contract
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("tamper", "records.jsonl hash differs"),
+        ("truncate", "records are truncated"),
+        ("extra", "records contain extra data"),
+        ("order", "record order differs"),
+    ],
+)
+def test_streaming_merge_rejects_per_shard_tamper_truncation_extra_and_order(
+    tmp_path: Path,
+    small_contract: matrix.MergeContract,
+    mutation: str,
+    message: str,
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    shard = shards / "shard-3"
+    records_path = shard / "records.jsonl"
+    lines = records_path.read_bytes().splitlines(keepends=True)
+    if mutation == "tamper":
+        record = json.loads(lines[0])
+        record["input"]["inventory_sha256"] = "c" * 64
+        lines[0] = matrix._canonical_json_bytes(record)
+        records_path.write_bytes(b"".join(lines))
+    elif mutation == "truncate":
+        records_path.write_bytes(b"".join(lines[:-1]))
+    elif mutation == "extra":
+        records_path.write_bytes(b"".join([*lines, lines[-1]]))
+    elif mutation == "order":
+        lines[0], lines[1] = lines[1], lines[0]
+        records_path.write_bytes(b"".join(lines))
+        done, _ = matrix._read_canonical_json(shard / "done.json")
+        done["records_sha256"] = hashlib.sha256(records_path.read_bytes()).hexdigest()
+        (shard / "done.json").write_bytes(matrix._canonical_json_bytes(done))
+    with pytest.raises(matrix.ContractError, match=message):
+        matrix.verify_merge(
+            shards, tmp_path / "summary.json", contract=small_contract
+        )
+
+
+def test_streaming_merge_rejects_done_witness_tamper(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    done_path = shards / "shard-2/done.json"
+    done, _ = matrix._read_canonical_json(done_path)
+    done["witness_ordinals"] = []
+    done_path.write_bytes(matrix._canonical_json_bytes(done))
+    with pytest.raises(matrix.ContractError, match="witness ordinals"):
+        matrix.verify_merge(
+            shards, tmp_path / "summary.json", contract=small_contract
+        )
+
+
+def test_streaming_merge_digest_is_global_target_profile_order(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    shard_lines = {
+        shard_id: (shards / f"shard-{shard_id}/records.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+        for shard_id in range(small_contract.shard_count)
+    }
+    positions = {shard_id: 0 for shard_id in range(small_contract.shard_count)}
+    expected_digest = hashlib.sha256()
+    expected_bytes = 0
+    for ordinal in range(small_contract.target_count):
+        shard_id = ordinal % small_contract.shard_count
+        start = positions[shard_id]
+        for line in shard_lines[shard_id][start : start + len(matrix.PROFILE_ORDER)]:
+            expected_digest.update(line)
+            expected_bytes += len(line)
+        positions[shard_id] += len(matrix.PROFILE_ORDER)
+
+    summary = matrix.verify_merge(
+        shards, tmp_path / "summary.json", contract=small_contract
+    )
+    assert summary["merged_records_sha256"] == expected_digest.hexdigest()
+    assert summary["merged_records_bytes"] == expected_bytes
+
+
+def test_verify_merge_command_never_reaches_git_pandas_or_freqtrade(
+    tmp_path: Path,
+    small_contract: matrix.MergeContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    output = tmp_path / "summary.json"
+    original_verify_merge = matrix.verify_merge
+    original_import_module = matrix.importlib.import_module
+
+    def small_verify_merge(shards_root: Path, output_file: Path) -> dict[str, Any]:
+        return original_verify_merge(
+            shards_root, output_file, contract=small_contract
+        )
+
+    def forbidden_subprocess(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("verify-merge command reached subprocess/Git")
+
+    def guarded_import_module(name: str, package: str | None = None) -> Any:
+        if name == "pandas" or name.startswith("pandas."):
+            raise AssertionError("verify-merge command reached pandas")
+        if name == "freqtrade" or name.startswith("freqtrade."):
+            raise AssertionError("verify-merge command reached Freqtrade")
+        return original_import_module(name, package)
+
+    monkeypatch.setattr(matrix, "verify_merge", small_verify_merge)
+    monkeypatch.setattr(matrix.subprocess, "run", forbidden_subprocess)
+    monkeypatch.setattr(matrix.importlib, "import_module", guarded_import_module)
+    assert (
+        matrix.main(
+            [
+                "verify-merge",
+                "--shards-root",
+                str(shards),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(output.read_text(encoding="utf-8"))["complete"] is True
+
+
+def test_merge_rejects_mocked_reparse_evidence_file(
+    tmp_path: Path,
+    small_contract: matrix.MergeContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    target = (shards / "shard-0" / "done.json").absolute()
+    real_lstat = matrix.os.lstat
+
+    def fake_lstat(path: str | bytes | Path) -> Any:
+        details = real_lstat(path)
+        if Path(path).absolute() == target:
+            return type(
+                "ReparseStat",
+                (),
+                {
+                    "st_mode": details.st_mode,
+                    "st_file_attributes": getattr(
+                        matrix.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                    ),
+                },
+            )()
+        return details
+
+    monkeypatch.setattr(matrix.os, "lstat", fake_lstat)
+    with pytest.raises(matrix.ContractError, match="symbolic/reparse"):
+        matrix.verify_merge(
+            shards, tmp_path / "summary.json", contract=small_contract
+        )
+
+
+def test_merge_rejects_missing_shard(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    shutil.rmtree(shards / "shard-7")
+    with pytest.raises(matrix.ContractError, match="exactly 8 shard"):
+        matrix.verify_merge(shards, tmp_path / "summary.json", contract=small_contract)
+
+
+def test_merge_rejects_configurable_shard_topology(tmp_path: Path) -> None:
+    contract = matrix.MergeContract(shard_count=4, target_count=8)
+    with pytest.raises(matrix.ContractError, match="fixed at 8"):
+        matrix.verify_merge(
+            tmp_path / "unused-shards",
+            tmp_path / "summary.json",
+            contract=contract,
+        )
+
+
+def test_merge_rejects_duplicate_shard_id(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    shutil.rmtree(shards / "shard-1")
+    shutil.copytree(shards / "shard-0", shards / "shard-1")
+    with pytest.raises(matrix.ContractError, match="duplicate shard id"):
+        matrix.verify_merge(shards, tmp_path / "summary.json", contract=small_contract)
+
+
+def test_done_binds_shared_identities_without_repeating_them_in_records(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    shard = shards / "shard-3"
+    records = read_small_records(shard / "records.jsonl")
+    assert "global_identity" not in records[0]
+    assert "end_rehashes" not in records[0]
+    done, _ = matrix._read_canonical_json(shard / "done.json")
+    assert "global_identity" in done
+    assert "end_rehashes" in done
+    done["global_identity"] = {"admission_sha256": "c" * 64, "test": "mixed"}
+    (shard / "done.json").write_bytes(matrix._canonical_json_bytes(done))
+    with pytest.raises(matrix.ContractError, match="shard global identities differ"):
+        matrix.verify_merge(shards, tmp_path / "summary.json", contract=small_contract)
+
+
+def test_merge_rejects_tampered_records(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    records = shards / "shard-3/records.jsonl"
+    records.write_bytes(records.read_bytes() + b" \n")
+    with pytest.raises(
+        matrix.ContractError,
+        match=r"noncanonical record|hash differs|invalid records JSON|extra data",
+    ):
+        matrix.verify_merge(shards, tmp_path / "summary.json", contract=small_contract)
+
+
+def test_merge_recomputes_comparison_instead_of_trusting_equal_flag(
+    tmp_path: Path, small_contract: matrix.MergeContract
+) -> None:
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    write_small_shards(shards, small_contract)
+    shard = shards / "shard-0"
+    records = read_small_records(shard / "records.jsonl")
+    records[1]["signature"]["float_hex"][matrix.FLOAT_COLUMNS[0]] = 99.0.hex()
+    unsigned = dict(records[1]["signature"])
+    unsigned.pop("sha256")
+    records[1]["signature"]["sha256"] = matrix._json_sha256(unsigned)
+    write_small_records(shard, records)
+    with pytest.raises(matrix.ContractError, match="merged target signature differs"):
+        matrix.verify_merge(shards, tmp_path / "summary.json", contract=small_contract)

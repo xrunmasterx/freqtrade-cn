@@ -1,0 +1,388 @@
+from __future__ import annotations
+
+import hashlib
+import math
+from datetime import datetime, timedelta
+from numbers import Real
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+from pandas import DataFrame
+
+from freqtrade.strategy import IStrategy
+
+
+RAW_COLUMNS = ("date", "open", "high", "low", "close", "volume")
+OHLC_COLUMNS = ("open", "high", "low", "close")
+FLOAT_STATE_COLUMNS = (
+    "three_hour_open",
+    "three_hour_high",
+    "three_hour_low",
+    "three_hour_close",
+    "true_range",
+    "rolling_mean_true_range",
+    "volatility_threshold",
+    "delta",
+    "abs_delta",
+)
+BOOL_STATE_COLUMNS = (
+    "bucket_ok",
+    "valid",
+    "long_eligible",
+    "short_eligible",
+    "long_edge",
+    "short_edge",
+)
+
+
+def _numeric_float(value: object) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise ValueError("OHLCV values must be numeric")
+    return float(value)
+
+
+def _strict_utc_timestamps(values: pd.Series, label: str) -> pd.Series:
+    timestamps: list[pd.Timestamp] = []
+    for value in values:
+        try:
+            timestamp = pd.Timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} timestamps must be valid UTC timestamps") from exc
+        if (
+            pd.isna(timestamp)
+            or timestamp.tzinfo is None
+            or timestamp.utcoffset() != timedelta(0)
+        ):
+            raise ValueError(f"{label} timestamps must be valid UTC timestamps")
+        timestamps.append(timestamp.tz_convert("UTC"))
+    return pd.Series(timestamps, index=values.index)
+
+
+def canonical_raw_ohlcv_inventory(dataframe: DataFrame) -> bytes:
+    """Return the byte-exact pre-loader UTC-hour and float-hex inventory."""
+    missing = [column for column in RAW_COLUMNS if column not in dataframe.columns]
+    if missing:
+        raise ValueError(f"raw OHLCV is missing columns: {missing}")
+
+    timestamps = _strict_utc_timestamps(dataframe["date"], "raw")
+    if any(
+        timestamp.minute != 0
+        or timestamp.second != 0
+        or timestamp.microsecond != 0
+        or timestamp.nanosecond != 0
+        for timestamp in timestamps
+    ):
+        raise ValueError("raw timestamps must be on exact hour boundaries")
+    if timestamps.duplicated().any():
+        raise ValueError("raw timestamps must be unique")
+    if any(
+        current - previous != pd.Timedelta(hours=1)
+        for previous, current in zip(timestamps.iloc[:-1], timestamps.iloc[1:], strict=True)
+    ):
+        raise ValueError("raw timestamps must have exact one-hour continuity")
+
+    rows: list[str] = []
+    for position, timestamp in enumerate(timestamps):
+        values = [
+            _numeric_float(dataframe.iloc[position][column]).hex()
+            for column in RAW_COLUMNS[1:]
+        ]
+        rows.append("|".join((str(timestamp.value), *values)))
+    return ("\n".join(rows) + ("\n" if rows else "")).encode("ascii")
+
+
+def raw_ohlcv_inventory_sha256(dataframe: DataFrame) -> str:
+    return hashlib.sha256(canonical_raw_ohlcv_inventory(dataframe)).hexdigest()
+
+
+def assert_loaded_matches_raw_inventory(expected_inventory: bytes, dataframe: DataFrame) -> None:
+    actual_inventory = canonical_raw_ohlcv_inventory(dataframe)
+    if actual_inventory != expected_inventory:
+        raise ValueError("loaded canonical OHLCV does not match the pre-normalization inventory")
+
+
+def _is_finite_real(value: object) -> bool:
+    return (
+        not isinstance(value, (bool, np.bool_))
+        and isinstance(value, Real)
+        and math.isfinite(float(value))
+    )
+
+
+class VolatilitySystem(IStrategy):
+    can_short = True
+
+    startup_candle_count = 499
+
+    minimal_roi = {"0": 100}
+
+    stoploss = -0.10
+
+    timeframe = "1h"
+
+    plot_config = {
+        "main_plot": {},
+        "subplots": {
+            "Volatility system": {
+                "rolling_mean_true_range": {"color": "white"},
+                "volatility_threshold": {"color": "orange"},
+                "abs_delta": {"color": "red"},
+            }
+        },
+    }
+
+    position_adjustment_enable = False
+
+    @staticmethod
+    def _empty_state(dataframe: DataFrame) -> DataFrame:
+        for column in FLOAT_STATE_COLUMNS:
+            dataframe[column] = np.nan
+        for column in BOOL_STATE_COLUMNS:
+            dataframe[column] = False
+        dataframe["source_bucket_start"] = pd.Series(
+            pd.NaT, index=dataframe.index, dtype="datetime64[ns, UTC]"
+        )
+        return dataframe
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        result = dataframe.copy(deep=True)
+        self._empty_state(result)
+        if result.empty:
+            return result
+
+        timestamps = _strict_utc_timestamps(result["date"], "strategy input")
+        if any(
+            timestamp.minute != 0
+            or timestamp.second != 0
+            or timestamp.microsecond != 0
+            or timestamp.nanosecond != 0
+            for timestamp in timestamps
+        ):
+            raise ValueError("strategy input timestamps must be on exact hour boundaries")
+
+        first_slot = timestamps.min().floor("3h")
+        last_slot = timestamps.max().floor("3h")
+        slot_starts = pd.date_range(first_slot, last_slot, freq="3h", tz="UTC")
+        records: list[dict[str, object]] = []
+        positions_by_slot: dict[pd.Timestamp, list[int]] = {}
+        for position, timestamp in enumerate(timestamps):
+            positions_by_slot.setdefault(timestamp.floor("3h"), []).append(position)
+
+        for slot_start in slot_starts:
+            expected_timestamps = [
+                slot_start,
+                slot_start + pd.Timedelta(hours=1),
+                slot_start + pd.Timedelta(hours=2),
+            ]
+            positions = positions_by_slot.get(slot_start, [])
+            ordered_positions = sorted(positions, key=lambda position: timestamps.iloc[position])
+            exact_members = (
+                len(ordered_positions) == 3
+                and [timestamps.iloc[position] for position in ordered_positions]
+                == expected_timestamps
+            )
+
+            bucket_ok = exact_members
+            bucket_open = math.nan
+            bucket_high = math.nan
+            bucket_low = math.nan
+            bucket_close = math.nan
+            if bucket_ok:
+                candles: list[dict[str, float]] = []
+                for position in ordered_positions:
+                    source_row = result.iloc[position]
+                    if not all(_is_finite_real(source_row[column]) for column in OHLC_COLUMNS):
+                        bucket_ok = False
+                        break
+                    candle = {
+                        column: float(source_row[column]) for column in OHLC_COLUMNS
+                    }
+                    if not (
+                        candle["low"]
+                        <= min(candle["open"], candle["close"])
+                        <= max(candle["open"], candle["close"])
+                        <= candle["high"]
+                    ):
+                        bucket_ok = False
+                        break
+                    candles.append(candle)
+
+                if bucket_ok:
+                    bucket_open = candles[0]["open"]
+                    bucket_high = max(candle["high"] for candle in candles)
+                    bucket_low = min(candle["low"] for candle in candles)
+                    bucket_close = candles[-1]["close"]
+
+            records.append(
+                {
+                    "source_bucket_start": slot_start,
+                    "bucket_ok": bucket_ok,
+                    "three_hour_open": bucket_open,
+                    "three_hour_high": bucket_high,
+                    "three_hour_low": bucket_low,
+                    "three_hour_close": bucket_close,
+                    "true_range": math.nan,
+                    "rolling_mean_true_range": math.nan,
+                    "volatility_threshold": math.nan,
+                    "delta": math.nan,
+                    "abs_delta": math.nan,
+                    "valid": False,
+                    "long_eligible": False,
+                    "short_eligible": False,
+                    "long_edge": False,
+                    "short_edge": False,
+                }
+            )
+
+        for index, current in enumerate(records):
+            if index == 0:
+                continue
+            previous = records[index - 1]
+            contiguous = (
+                current["source_bucket_start"] - previous["source_bucket_start"]
+                == pd.Timedelta(hours=3)
+            )
+            if not (contiguous and previous["bucket_ok"] and current["bucket_ok"]):
+                continue
+
+            previous_close = float(previous["three_hour_close"])
+            current_high = float(current["three_hour_high"])
+            current_low = float(current["three_hour_low"])
+            current_close = float(current["three_hour_close"])
+            current["true_range"] = max(
+                current_high - current_low,
+                abs(current_high - previous_close),
+                abs(current_low - previous_close),
+            )
+            current["delta"] = current_close - previous_close
+            current["abs_delta"] = abs(float(current["delta"]))
+
+        for index, current in enumerate(records):
+            if index >= 14:
+                prior_true_ranges = [
+                    float(record["true_range"]) for record in records[index - 14 : index]
+                ]
+                prior_slots_are_contiguous = all(
+                    records[position]["source_bucket_start"]
+                    - records[position - 1]["source_bucket_start"]
+                    == pd.Timedelta(hours=3)
+                    for position in range(index - 13, index + 1)
+                )
+                if prior_slots_are_contiguous and all(
+                    math.isfinite(value) for value in prior_true_ranges
+                ):
+                    try:
+                        rolling_mean = math.fsum(prior_true_ranges) / 14.0
+                    except OverflowError:
+                        rolling_mean = math.nan
+                    current["rolling_mean_true_range"] = rolling_mean
+                    current["volatility_threshold"] = 2.0 * rolling_mean
+
+            current["valid"] = bool(
+                current["bucket_ok"]
+                and math.isfinite(float(current["delta"]))
+                and math.isfinite(float(current["volatility_threshold"]))
+            )
+            if current["valid"]:
+                current["long_eligible"] = bool(
+                    float(current["delta"]) > float(current["volatility_threshold"])
+                )
+                current["short_eligible"] = bool(
+                    -float(current["delta"]) > float(current["volatility_threshold"])
+                )
+
+        for index in range(1, len(records)):
+            previous = records[index - 1]
+            current = records[index]
+            current["long_edge"] = bool(
+                previous["valid"]
+                and current["valid"]
+                and not previous["long_eligible"]
+                and current["long_eligible"]
+            )
+            current["short_edge"] = bool(
+                previous["valid"]
+                and current["valid"]
+                and not previous["short_eligible"]
+                and current["short_eligible"]
+            )
+
+        state_by_timestamp: dict[pd.Timestamp, tuple[dict[str, object], bool]] = {}
+        for record in records:
+            completion = record["source_bucket_start"] + pd.Timedelta(hours=2)
+            for mapped_hour in range(3):
+                state_by_timestamp[completion + pd.Timedelta(hours=mapped_hour)] = (
+                    record,
+                    mapped_hour == 0,
+                )
+
+        mapped_float: dict[str, list[float]] = {
+            column: [] for column in FLOAT_STATE_COLUMNS
+        }
+        mapped_bool: dict[str, list[bool]] = {column: [] for column in BOOL_STATE_COLUMNS}
+        mapped_sources: list[pd.Timestamp | pd.NaT] = []
+        for timestamp in timestamps:
+            mapped = state_by_timestamp.get(timestamp)
+            if mapped is None:
+                mapped_sources.append(pd.NaT)
+                for column in FLOAT_STATE_COLUMNS:
+                    mapped_float[column].append(math.nan)
+                for column in BOOL_STATE_COLUMNS:
+                    mapped_bool[column].append(False)
+                continue
+
+            record, is_completion = mapped
+            mapped_sources.append(record["source_bucket_start"])
+            for column in FLOAT_STATE_COLUMNS:
+                mapped_float[column].append(float(record[column]))
+            for column in BOOL_STATE_COLUMNS:
+                mapped_bool[column].append(
+                    bool(record[column])
+                    if column not in ("long_edge", "short_edge") or is_completion
+                    else False
+                )
+
+        for column, values in mapped_float.items():
+            result[column] = values
+        for column, values in mapped_bool.items():
+            result[column] = values
+        result["source_bucket_start"] = pd.to_datetime(mapped_sources, utc=True)
+        return result
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["enter_long"] = dataframe["long_edge"].fillna(False).astype(int)
+        dataframe["enter_short"] = dataframe["short_edge"].fillna(False).astype(int)
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_short"] = dataframe["long_eligible"].fillna(False).astype(int)
+        dataframe["exit_long"] = dataframe["short_eligible"].fillna(False).astype(int)
+        return dataframe
+
+    def custom_stake_amount(
+        self,
+        pair: str,
+        current_time: datetime,
+        current_rate: float,
+        proposed_stake: float,
+        min_stake: Optional[float],
+        max_stake: float,
+        leverage: float,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs,
+    ) -> float:
+        return proposed_stake / 2
+
+    def leverage(
+        self,
+        pair: str,
+        current_time: datetime,
+        current_rate: float,
+        proposed_leverage: float,
+        max_leverage: float,
+        side: str,
+        **kwargs,
+    ) -> float:
+        return 2.0

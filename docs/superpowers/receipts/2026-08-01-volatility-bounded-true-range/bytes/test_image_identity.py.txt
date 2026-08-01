@@ -1,0 +1,345 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import unittest
+from pathlib import Path
+
+import generate_identity as subject
+
+
+HERE = Path(__file__).resolve().parent
+IMAGE_ID = "sha256:fb7bc20017bae79af1f7533c8b2018098bb627306d9c2286fb9b1501551fe03c"
+IMAGE_TAG = "freqtrade-cn:p0-788d2256cc77-382320523928-820bcc81d866"
+HEADS = {
+    "root": "788d2256cc772f51e9442e3d3f25e4649aa5b4a9",
+    "backend": "3823205239281af56c34f4ff07f1674edddbe6db",
+    "frontend": "820bcc81d8665f22969aa0f888fa1d3c548bac4d",
+    "strategies": "dec5adb77f03b0c33ccfbc036ff0a3e57f7d571d",
+}
+
+
+class ImageIdentityArtifactContractTests(unittest.TestCase):
+    def test_frozen_reproducible_generator_exists(self) -> None:
+        self.assertTrue(
+            (HERE / "generate_identity.py").is_file(),
+            "the one-file descriptor has no frozen reproducible generator",
+        )
+
+    def test_raw_local_docker_metadata_is_separate(self) -> None:
+        expected = {
+            "docker-image-inspect.redacted.json",
+            "docker-image-history.redacted.json",
+        }
+        missing = sorted(name for name in expected if not (HERE / name).is_file())
+        self.assertEqual([], missing, "raw content-addressed Docker metadata is missing")
+
+    def test_source_package_ui_entrypoint_and_build_evidence_is_separate(self) -> None:
+        expected = {
+            "backend-source-manifest.json",
+            "package-inventory.json",
+            "ui-evidence.json",
+            "entrypoint-evidence.json",
+            "build-input-manifest.json",
+        }
+        missing = sorted(name for name in expected if not (HERE / name).is_file())
+        self.assertEqual([], missing, "separately verifiable evidence manifests are missing")
+
+    def test_probe_records_and_v2_identity_are_present(self) -> None:
+        self.assertTrue(
+            (HERE / "probe-records.json").is_file(),
+            "exact probe invocation/output evidence is missing",
+        )
+        identity = json.loads((HERE / "identity.json.txt").read_text(encoding="utf-8"))
+        self.assertEqual("freqtrade-cn.execution-image-identity.v2", identity.get("schema"))
+
+    def test_exact_inventory_has_no_cache_or_staging_artifact(self) -> None:
+        expected = {
+            "generate_identity.py",
+            "identity.json.txt",
+            "test_image_identity.py",
+            *subject.GENERATED_ARTIFACTS,
+        }
+        actual = {path.name for path in HERE.iterdir() if path.is_file()}
+        self.assertEqual(expected, actual)
+        self.assertFalse(any(path.name == "__pycache__" for path in HERE.iterdir()))
+
+    def test_every_generated_json_is_canonical(self) -> None:
+        for name in (*subject.GENERATED_ARTIFACTS, "identity.json.txt"):
+            with self.subTest(name=name):
+                payload = (HERE / name).read_bytes()
+                parsed = json.loads(payload)
+                self.assertEqual(subject.canonical_json_bytes(parsed), payload)
+
+    def test_identity_binds_every_artifact_and_tool(self) -> None:
+        identity = json.loads((HERE / "identity.json.txt").read_bytes())
+        self.assertEqual(set(subject.GENERATED_ARTIFACTS), set(identity["artifacts"]))
+        for name, record in identity["artifacts"].items():
+            with self.subTest(name=name):
+                payload = (HERE / name).read_bytes()
+                self.assertEqual(len(payload), record["bytes"])
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), record["sha256"])
+        for key, name in (("file", "generate_identity.py"), ("tests", "test_image_identity.py")):
+            payload = (HERE / name).read_bytes()
+            self.assertEqual(len(payload), identity["generator"][key]["bytes"])
+            self.assertEqual(
+                hashlib.sha256(payload).hexdigest(), identity["generator"][key]["sha256"]
+            )
+
+    def test_backend_manifest_is_complete_and_calls_out_required_paths(self) -> None:
+        manifest = json.loads((HERE / "backend-source-manifest.json").read_bytes())
+        files = manifest["files"]
+        paths = {item["path"] for item in files}
+        self.assertEqual(438, len(files))
+        self.assertTrue(set(subject.REQUIRED_BACKEND_PATHS).issubset(paths))
+        self.assertEqual(list(subject.REQUIRED_BACKEND_PATHS), manifest["required_paths"])
+        self.assertTrue(manifest["verified_equal"]["expected_git_head_files"])
+        self.assertTrue(manifest["verified_equal"]["observed_immutable_image_files"])
+        self.assertNotIn("freqtrade/rpc/api_server/ui/installed/.uiversion", paths)
+
+    def test_package_ui_entrypoint_and_build_inputs_are_independent(self) -> None:
+        packages = json.loads((HERE / "package-inventory.json").read_bytes())
+        versions = {item["name"].casefold(): item["version"] for item in packages["distributions"]}
+        self.assertEqual("2026.7.dev0", versions["freqtrade"])
+        self.assertEqual("4.5.61", versions["ccxt"])
+        self.assertEqual("1.6.0", versions["technical"])
+        self.assertEqual("3.0.3", versions["pandas"])
+        self.assertEqual("2.4.6", versions["numpy"])
+        self.assertEqual("24.0.0", versions["pyarrow"])
+        self.assertEqual("0.6.8", versions["ta-lib"])
+
+        ui = json.loads((HERE / "ui-evidence.json").read_bytes())
+        self.assertEqual(HEADS["frontend"], ui["frontend_commit"])
+        self.assertEqual(f"local-frequi-{HEADS['frontend']}", ui["marker"]["utf8"])
+        self.assertEqual(138, len(ui["files"]))
+
+        entrypoint = json.loads((HERE / "entrypoint-evidence.json").read_bytes())
+        self.assertTrue(entrypoint["match"])
+        self.assertEqual(
+            entrypoint["expected_from_root_commit"]["sha256"],
+            entrypoint["observed_in_immutable_image"]["sha256"],
+        )
+        self.assertEqual({"cwd": "/freqtrade", "gid": 1000, "uid": 1000}, entrypoint["runtime"])
+
+        build = json.loads((HERE / "build-input-manifest.json").read_bytes())
+        controls = {item["path"] for item in build["root_control_files"]["files"]}
+        self.assertEqual(set(subject.ROOT_CONTROL_PATHS), controls)
+        self.assertFalse(build["scope"]["strategy_repository_packaged"])
+        self.assertFalse(
+            build["scope"]["registry_base_object_bytes_available_from_allowed_local_engine_reads"]
+        )
+
+    def test_redacted_engine_metadata_distinguishes_descriptor_without_raw_oci_claim(self) -> None:
+        inspect = json.loads((HERE / "docker-image-inspect.redacted.json").read_bytes())
+        fields = inspect["engine_fields"]
+        classification = inspect["identity_classification"]
+        self.assertEqual(IMAGE_ID, fields["id"])
+        self.assertEqual(IMAGE_ID, fields["tag_resolved_id"])
+        self.assertEqual("application/vnd.oci.image.index.v1+json", fields["descriptor"]["media_type"])
+        self.assertTrue(classification["oci_index_claim"])
+        self.assertTrue(classification["descriptor_digest_matches_engine_id"])
+        self.assertEqual(
+            {
+                "image_config_bytes": False,
+                "oci_index_bytes": False,
+                "platform_manifest_bytes": False,
+            },
+            classification["raw_content_objects_exposed"],
+        )
+        self.assertNotIn("environment", fields["config_projection"])
+        self.assertIn("omitted", inspect["redactions"]["config_environment"])
+
+        history = json.loads((HERE / "docker-image-history.redacted.json").read_bytes())
+        self.assertGreater(len(history["rows"]), 0)
+        environment_rows = [
+            row for row in history["rows"] if row["created_by"]["sanitized"].startswith("ENV ")
+        ]
+        self.assertGreater(len(environment_rows), 0)
+        self.assertTrue(all(row["created_by"]["redacted"] for row in environment_rows))
+
+    def test_probe_records_preserve_exact_isolated_invocations_and_outputs(self) -> None:
+        document = json.loads((HERE / "probe-records.json").read_bytes())
+        self.assertEqual(["packages", "backend_source", "ui", "runtime"], [r["name"] for r in document["records"]])
+        for record in document["records"]:
+            with self.subTest(name=record["name"]):
+                argv = record["argv"]
+                self.assertEqual("docker", argv[0])
+                self.assertIn(IMAGE_ID, argv)
+                self.assertEqual("none", argv[argv.index("--network") + 1])
+                self.assertEqual("never", argv[argv.index("--pull") + 1])
+                self.assertIn("--read-only", argv)
+                self.assertEqual("ALL", argv[argv.index("--cap-drop") + 1])
+                self.assertFalse(any(flag in argv for flag in ("-v", "--volume", "--mount")))
+                self.assertEqual([], record["mounts"])
+                self.assertEqual(0, record["exit_code"])
+                payload = subject.canonical_json_bytes(record["stdout"]["sanitized_payload"])
+                self.assertEqual(len(payload), record["stdout"]["bytes"])
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), record["stdout"]["sha256"])
+                self.assertEqual(0, record["stderr"]["bytes"])
+                self.assertEqual(hashlib.sha256(b"").hexdigest(), record["stderr"]["sha256"])
+
+    def test_identity_states_exact_trust_and_no_workload_boundary(self) -> None:
+        raw = (HERE / "identity.json.txt").read_bytes()
+        identity = json.loads(raw)
+        self.assertNotIn(b"recorded_at", raw)
+        self.assertNotIn(b"C:\\\\Users", raw)
+        self.assertEqual(HEADS, identity["generator"]["arguments"]["expected_heads"])
+        self.assertEqual(IMAGE_ID, identity["image"]["immutable_id"])
+        self.assertEqual(IMAGE_TAG, identity["image"]["local_tag_observation"])
+        self.assertEqual("linux/amd64", identity["image"]["platform"])
+        boundary = identity["execution_boundary"]
+        self.assertTrue(boundary["docker_network_none_for_every_probe"])
+        self.assertFalse(boundary["freqtrade_cli_or_service_invoked"])
+        self.assertFalse(boundary["market_data_read_or_produced"])
+        self.assertFalse(boundary["performance_output_produced"])
+        self.assertFalse(boundary["strategy_config_data_or_result_mounted"])
+        self.assertFalse(boundary["strategy_imported_or_executed"])
+        self.assertEqual([], boundary["probe_mounts"])
+        self.assertTrue(any("raw OCI" in item for item in identity["trust_boundary"]["not_claimed"]))
+
+
+class GeneratorRefusalTests(unittest.TestCase):
+    def test_canonical_json_is_compact_sorted_ascii_with_one_lf(self) -> None:
+        self.assertEqual(b'{"a":"\\u96ea","z":1}\n', subject.canonical_json_bytes({"z": 1, "a": "雪"}))
+
+    def test_cli_requires_every_explicit_identity_input(self) -> None:
+        required = {
+            "root_repo",
+            "backend_repo",
+            "frontend_repo",
+            "strategies_repo",
+            "expected_root_head",
+            "expected_backend_head",
+            "expected_frontend_head",
+            "expected_strategies_head",
+            "image_id",
+            "image_tag",
+            "output_dir",
+        }
+        actions = {action.dest: action for action in subject.build_parser()._actions}
+        self.assertTrue(required.issubset(actions))
+        self.assertTrue(all(actions[name].required for name in required))
+
+    def test_relative_repository_and_output_directories_are_refused(self) -> None:
+        with self.assertRaisesRegex(subject.EvidenceError, "root_repo_must_be_absolute"):
+            subject.validate_absolute_directory(Path("relative"), "root_repo")
+        with self.assertRaisesRegex(subject.EvidenceError, "output_dir_must_be_absolute"):
+            subject.validate_absolute_directory(Path("relative"), "output_dir")
+
+    def test_repository_dirty_head_and_root_drift_are_refused(self) -> None:
+        good = {
+            "name": "root",
+            "supplied_root": HERE,
+            "expected_head": "a" * 40,
+            "observed_root": HERE,
+            "observed_head": "a" * 40,
+            "status": "",
+        }
+        subject.validate_repository_state(**good)
+        cases = {
+            "dirty": {"status": " M Dockerfile"},
+            "head_drift": {"observed_head": "b" * 40},
+            "repository_root_drift": {"observed_root": HERE.parent},
+        }
+        for error, change in cases.items():
+            with self.subTest(error=error), self.assertRaisesRegex(subject.EvidenceError, error):
+                subject.validate_repository_state(**(good | change))
+
+    def test_submodule_gitlink_drift_is_refused(self) -> None:
+        expected = {
+            "freqtrade": HEADS["backend"],
+            "frequi": HEADS["frontend"],
+            "freqtrade-strategies": HEADS["strategies"],
+        }
+        subject.validate_submodule_links(expected, dict(expected))
+        drift = dict(expected)
+        drift["frequi"] = "0" * 40
+        with self.assertRaisesRegex(subject.EvidenceError, "root_submodule_gitlink_drift"):
+            subject.validate_submodule_links(expected, drift)
+
+    def _inspect_fixture(self) -> tuple[dict[str, object], dict[str, str]]:
+        labels = {
+            "org.freqtrade-cn.revision.backend": HEADS["backend"],
+            "org.freqtrade-cn.revision.frontend": HEADS["frontend"],
+            "org.freqtrade-cn.revision.root": HEADS["root"],
+        }
+        inspect = {
+            "Id": IMAGE_ID,
+            "RepoTags": [IMAGE_TAG],
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Descriptor": {
+                "digest": IMAGE_ID,
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "size": 856,
+            },
+            "Config": {
+                "User": "ftuser",
+                "WorkingDir": "/freqtrade",
+                "Entrypoint": ["python", "/usr/local/bin/freqtrade-entrypoint"],
+                "Labels": labels,
+            },
+        }
+        return inspect, labels
+
+    def test_image_id_tag_and_platform_drift_are_refused(self) -> None:
+        inspect, labels = self._inspect_fixture()
+        subject.validate_image_state(
+            expected_id=IMAGE_ID,
+            expected_tag=IMAGE_TAG,
+            expected_labels=labels,
+            id_inspect=inspect,
+            tag_inspect=copy.deepcopy(inspect),
+        )
+        mutations = {
+            "immutable_image_id_drift": ("id", "Id", "sha256:" + "0" * 64),
+            "image_tag_resolution_drift": ("tag", "Id", "sha256:" + "0" * 64),
+            "image_platform_drift:id": ("id", "Architecture", "arm64"),
+            "image_platform_drift:tag": ("tag", "Os", "windows"),
+        }
+        for error, (target, key, value) in mutations.items():
+            with self.subTest(error=error):
+                id_copy = copy.deepcopy(inspect)
+                tag_copy = copy.deepcopy(inspect)
+                (id_copy if target == "id" else tag_copy)[key] = value
+                with self.assertRaisesRegex(subject.EvidenceError, error):
+                    subject.validate_image_state(
+                        expected_id=IMAGE_ID,
+                        expected_tag=IMAGE_TAG,
+                        expected_labels=labels,
+                        id_inspect=id_copy,
+                        tag_inspect=tag_copy,
+                    )
+
+    def test_unexposed_or_config_digest_is_never_labeled_as_oci_index(self) -> None:
+        inspect, _ = self._inspect_fixture()
+        del inspect["Descriptor"]
+        classification = subject.classify_engine_descriptor(inspect)
+        self.assertFalse(classification["descriptor_available"])
+        self.assertFalse(classification["oci_index_claim"])
+        self.assertNotIn("OCI image index", classification["classification"])
+
+        inspect["Descriptor"] = {
+            "digest": IMAGE_ID,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 1,
+        }
+        classification = subject.classify_engine_descriptor(inspect)
+        self.assertFalse(classification["oci_index_claim"])
+        self.assertNotIn("OCI image index", classification["classification"])
+
+    def test_history_redaction_removes_environment_and_sensitive_values(self) -> None:
+        environment = subject._redact_created_by("ENV PATH=/mutable")
+        sensitive = subject._redact_created_by("RUN use --token=secret-value")
+        safe = subject._redact_created_by("COPY source target")
+        self.assertEqual("ENV <redacted-environment-value>", environment["sanitized"])
+        self.assertNotIn("mutable", environment["sanitized"])
+        self.assertEqual("<redacted-sensitive-build-history>", sensitive["sanitized"])
+        self.assertTrue(environment["redacted"])
+        self.assertTrue(sensitive["redacted"])
+        self.assertFalse(safe["redacted"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -373,11 +373,19 @@ or formally. No number of final-candle samples can be accumulated into that PASS
 
 One new development-only candidate is preregistered by the
 [bounded true-range episode screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md);
-no viewed-window performance run or prospective spend has started. Its B/C sources,
-deterministic tests, data routes, and receipt must be frozen before performance. The former
-`20250702-20260702` holdout is retired and must not be used for fresh validation. The only
-replacement interval is `[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)` under that
-one-shot protocol; inspecting any candidate output consumes it.
+no viewed-window performance run or prospective spend has started. Its temporary candidate,
+deterministic tests, exact local data admission, and exhaustive real-strategy restart matrix
+are frozen; the development matrix passed all 8,760 targets and 35,040 comparisons with zero
+mismatch. This is deterministic-mechanics evidence, not Backtest or performance evidence.
+The commit containing this update seals the
+[credential-free, content-addressed receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md),
+its independently supplied runtime-receipt SHA-256
+`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`,
+and the [pre-performance evidence report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md).
+No Backtest or result has been opened yet. The former `20250702-20260702` holdout is retired
+and must not be used for fresh validation. The only replacement interval is
+`[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)` under that one-shot protocol; inspecting any
+candidate output consumes it.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate

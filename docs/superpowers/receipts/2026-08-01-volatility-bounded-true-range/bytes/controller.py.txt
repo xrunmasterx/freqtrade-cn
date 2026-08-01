@@ -1,0 +1,1552 @@
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import importlib.util
+import json
+import os
+import secrets
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from types import ModuleType
+from typing import Protocol
+
+
+IMAGE_PYTHON = "/usr/local/bin/python"
+IMAGE_ENTRYPOINT = "/usr/local/bin/freqtrade-entrypoint"
+CONTAINER_CONFIG = "/research/control/effective-config.json"
+CONTAINER_REQUEST = "/research/control/request.json"
+CONTAINER_CONTROLLER = "/research/control/controller.py"
+CONTAINER_STATE = "/research/state"
+CONTAINER_DATA = "/research/data/okx"
+CONTAINER_STRATEGY = "/research/strategy/VolatilitySystem.py"
+SECRET_ROOT = "/run/controller-secrets"
+VERDICTS = frozenset(
+    {
+        "INVALID",
+        "INSUFFICIENT",
+        "REJECTED",
+        "METRIC-SURVIVOR_PENDING_ANALYSES",
+    }
+)
+REPORT_CONTRACT = "volatility-bounded-true-range-validator-report-v1"
+MAX_INPUT_BYTES = 32 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+MAX_METADATA_BYTES = 16 * 1024 * 1024
+MAX_POINTER_BYTES = 64 * 1024
+MAX_REPORT_BYTES = 16 * 1024 * 1024
+MAX_COMMAND_OUTPUT_BYTES = 16 * 1024 * 1024
+WINDOWS_REPARSE_POINT = 0x400
+DATA_FILES = {
+    "futures": "futures/BTC_USDT_USDT-1h-futures.feather",
+    "mark": "futures/BTC_USDT_USDT-1h-mark.feather",
+    "funding": "futures/BTC_USDT_USDT-1h-funding_rate.feather",
+    "leverage": "futures/leverage_tiers_USDT.json",
+}
+REQUIRED_INPUTS = frozenset(
+    {
+        "admission",
+        "restart",
+        "image_identity",
+        "contract",
+        "config",
+        "b_request",
+        "c_template",
+        "b_strategy",
+        "b_strategy_mirror",
+        "c_strategy",
+        "validator",
+        "controller",
+        "backend_source_manifest",
+    }
+)
+
+
+class ControllerError(RuntimeError):
+    pass
+
+
+class ConsumedExperiment(ControllerError):
+    pass
+
+
+class InfrastructureFailure(ControllerError):
+    pass
+
+
+class ProtocolFailure(ControllerError):
+    pass
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    stdout: bytes = b""
+    stderr: bytes = b""
+
+
+class Runner(Protocol):
+    def run(self, argv: tuple[str, ...]) -> CommandResult: ...
+
+
+class SubprocessRunner:
+    def run(self, argv: tuple[str, ...]) -> CommandResult:
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            timeout = 3700 if "container-post" in argv else 1800 if "--manifest" in argv else 120
+            try:
+                completed = subprocess.run(
+                    argv,
+                    check=False,
+                    stdout=stdout,
+                    stderr=stderr,
+                    timeout=timeout,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return CommandResult(125, b"", b"controller: subprocess failed\n")
+            stdout_size = stdout.tell()
+            stderr_size = stderr.tell()
+            if stdout_size > MAX_COMMAND_OUTPUT_BYTES or stderr_size > MAX_COMMAND_OUTPUT_BYTES:
+                return CommandResult(125, b"", b"controller: bounded command output exceeded\n")
+            stdout.seek(0)
+            stderr.seek(0)
+            return CommandResult(completed.returncode, stdout.read(), stderr.read())
+
+
+@dataclass(frozen=True)
+class InputFile:
+    name: str
+    path: Path
+    bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    attempt_id: str
+    attempt_parent: Path
+    spent_lease: Path
+    data_root: Path
+    docker: str
+    image_id: str
+    receipt: InputFile
+    expected_receipt_sha256: str
+    inputs: tuple[InputFile, ...]
+    network_name: str
+
+
+@dataclass(frozen=True)
+class RolePaths:
+    root: Path
+    data: Path
+    state: Path
+    output: Path
+    home: Path
+    control: Path
+
+
+@dataclass(frozen=True)
+class Mount:
+    source: Path
+    destination: str
+    read_only: bool
+    secret: bool = False
+
+
+@dataclass(frozen=True)
+class RolePlan:
+    role: str
+    name: str
+    mounts: tuple[Mount, ...]
+    server_argv: tuple[str, ...]
+    public_argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SealedFile:
+    kind: str
+    path: Path
+    bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class Seal:
+    role: str
+    result_stem: str
+    zip_path: Path
+    meta_path: Path
+    pointer_path: Path
+    files: tuple[SealedFile, ...]
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _load_json(raw: bytes) -> object:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON number: {value}")
+
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    return json.loads(raw, parse_constant=reject_constant, object_pairs_hook=pairs)
+
+
+def _load_canonical(raw: bytes) -> object:
+    value = _load_json(raw)
+    if _canonical_bytes(value) != raw:
+        raise ValueError("JSON is not canonical")
+    return value
+
+
+def _sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _validate_hash(value: object) -> str:
+    if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+        raise ControllerError("invalid SHA-256")
+    try:
+        bytes.fromhex(value)
+    except ValueError as exc:
+        raise ControllerError("invalid SHA-256") from exc
+    return value
+
+
+def _assert_plain_file(path: Path) -> os.stat_result:
+    try:
+        details = path.lstat()
+    except OSError as exc:
+        raise ControllerError("required file unavailable") from exc
+    attributes = getattr(details, "st_file_attributes", 0)
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or path.is_symlink()
+        or attributes & WINDOWS_REPARSE_POINT
+    ):
+        raise ControllerError("required path is not a regular non-link file")
+    return details
+
+
+def _assert_plain_directory(path: Path) -> os.stat_result:
+    try:
+        details = path.lstat()
+    except OSError as exc:
+        raise ControllerError("required directory unavailable") from exc
+    attributes = getattr(details, "st_file_attributes", 0)
+    if (
+        not stat.S_ISDIR(details.st_mode)
+        or path.is_symlink()
+        or attributes & WINDOWS_REPARSE_POINT
+    ):
+        raise ControllerError("required path is not a plain directory")
+    return details
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+    )
+
+
+def _read_path_bounded(path: Path, limit: int) -> bytes:
+    before = _assert_plain_file(path)
+    if before.st_size > limit:
+        raise ControllerError("file exceeds allocation ceiling")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not _same_identity(before, opened):
+            raise ControllerError("file changed before bounded read")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(limit + 1)
+        if len(raw) > limit:
+            raise ControllerError("file exceeds allocation ceiling")
+        after = _assert_plain_file(path)
+        if not _same_identity(opened, after) or len(raw) != opened.st_size:
+            raise ControllerError("file changed during bounded read")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _assert_confined_file(root: Path, path: Path) -> None:
+    root_resolved = root.resolve(strict=True)
+    resolved = path.resolve(strict=True)
+    try:
+        relative = resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ControllerError("admitted path escapes source root") from exc
+    current = root_resolved
+    root_details = current.lstat()
+    if current.is_symlink() or getattr(root_details, "st_file_attributes", 0) & WINDOWS_REPARSE_POINT:
+        raise ControllerError("source root is a link or reparse point")
+    for component in relative.parts[:-1]:
+        current = current / component
+        details = current.lstat()
+        if not stat.S_ISDIR(details.st_mode) or current.is_symlink():
+            raise ControllerError("admitted path parent is not a plain directory")
+        if getattr(details, "st_file_attributes", 0) & WINDOWS_REPARSE_POINT:
+            raise ControllerError("admitted path parent is a reparse point")
+
+
+def _read_verified(binding: InputFile) -> bytes:
+    if binding.bytes < 0 or binding.bytes > MAX_INPUT_BYTES:
+        raise ControllerError("negative byte binding")
+    _validate_hash(binding.sha256)
+    details = _assert_plain_file(binding.path)
+    if details.st_size != binding.bytes:
+        raise ControllerError(f"{binding.name} byte binding mismatch")
+    raw = _read_path_bounded(binding.path, MAX_INPUT_BYTES)
+    if len(raw) != binding.bytes or _sha256_bytes(raw) != binding.sha256:
+        raise ControllerError(f"{binding.name} identity mismatch")
+    return raw
+
+
+def _write_once(path: Path, raw: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def _copy_once(source: Path, destination: Path, expected_bytes: int, expected_hash: str) -> None:
+    before = _assert_plain_file(source)
+    if before.st_size != expected_bytes:
+        raise ControllerError("source byte identity mismatch")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_descriptor = os.open(source, flags)
+    opened = os.fstat(source_descriptor)
+    if not _same_identity(before, opened):
+        os.close(source_descriptor)
+        raise ControllerError("source changed before staging")
+    source_handle = os.fdopen(source_descriptor, "rb")
+    try:
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except BaseException:
+        source_handle.close()
+        raise
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with source_handle, os.fdopen(descriptor, "wb", closefd=False) as target:
+            while True:
+                chunk = source_handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > expected_bytes:
+                    raise ControllerError("staged file exceeds admitted bytes")
+                digest.update(chunk)
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+    except BaseException:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+    try:
+        after = _assert_plain_file(source)
+    except BaseException:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
+    if not _same_identity(opened, after):
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise ControllerError("source changed during staging")
+    if size != expected_bytes or digest.hexdigest() != expected_hash:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise ControllerError("staged file identity mismatch")
+
+
+def _mount_arg(mount: Mount, *, redact: bool = False) -> str:
+    source = "<secret>" if redact and mount.secret else str(mount.source)
+    suffix = ",readonly" if mount.read_only else ""
+    return f"type=bind,source={source},destination={mount.destination}{suffix}"
+
+
+def _validate_inspect_environment(value: object, required: set[str]) -> None:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ProtocolFailure("container inspect environment invalid")
+    if not required.issubset(set(value)):
+        raise ProtocolFailure("container inspect environment mismatch")
+    for entry in value:
+        if not isinstance(entry, str) or "=" not in entry:
+            raise ProtocolFailure("container inspect environment invalid")
+        key = entry.split("=", 1)[0].upper()
+        if (
+            any(fragment in key for fragment in ("API_KEY", "API_SECRET", "EXCHANGE"))
+            or ("PASSWORD" in key and not key.endswith("_FILE"))
+        ):
+            raise ProtocolFailure("container inspect includes a credential environment")
+
+
+def _sealed(path: Path, kind: str) -> SealedFile:
+    before = _assert_plain_file(path)
+    limit = MAX_ARTIFACT_BYTES
+    if kind.endswith("_pointer"):
+        limit = MAX_POINTER_BYTES
+    elif kind.endswith("_metadata"):
+        limit = MAX_METADATA_BYTES
+    if before.st_size > limit:
+        raise ControllerError("artifact exceeds resource ceiling")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_identity(before, opened):
+            raise ControllerError("artifact changed before sealing")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise ControllerError("artifact exceeds resource ceiling")
+                digest.update(chunk)
+        after = _assert_plain_file(path)
+        if not _same_identity(opened, after) or size != opened.st_size:
+            raise ControllerError("artifact changed while sealing")
+    finally:
+        os.close(descriptor)
+    return SealedFile(kind, path, size, digest.hexdigest())
+
+
+def load_contract(path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location("bounded_tr_shared_contract", path)
+    if spec is None or spec.loader is None:
+        raise ControllerError("cannot import shared contract")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# This is the sole adapter for the frozen validator-input-v1 schema.
+def build_validator_manifest(
+    files: tuple[dict[str, object], ...],
+    runtime_security: dict[str, object],
+) -> bytes:
+    expected = {
+        "b_result_zip",
+        "b_metadata",
+        "b_pointer",
+        "b_request",
+        "b_strategy_source",
+        "c_result_zip",
+        "c_metadata",
+        "c_pointer",
+        "c_request",
+        "c_strategy_source",
+        "effective_config",
+        "research_receipt",
+        "data_admission",
+        "restart_receipt",
+        "image_identity",
+        "backend_source_manifest",
+        "controller_source",
+        "validator_source",
+        "contract_source",
+    }
+    kinds = [item.get("kind") for item in files]
+    if len(kinds) != len(set(kinds)) or set(kinds) != expected:
+        raise ControllerError("validator manifest kind set mismatch")
+    ordered = tuple(sorted(files, key=lambda item: str(item["path"])))
+    return _canonical_bytes(
+        {
+            "contract": "volatility-bounded-true-range-validator-input-v1",
+            "files": ordered,
+            "runtime_security": runtime_security,
+            "schema_version": 1,
+            "window": "development",
+        }
+    )
+
+
+class HostController:
+    def __init__(self, config: RunConfig, *, runner: Runner, contract: object) -> None:
+        self.config = config
+        self.runner = runner
+        self.contract = contract
+        self.attempt_root = config.attempt_parent / config.attempt_id
+        self.role_paths: dict[str, RolePaths] = {}
+        self.role_plans: dict[str, RolePlan] = {}
+        self.seals: dict[str, Seal] = {}
+        self.bound_c_request = self.attempt_root / "C" / "control" / "request.json"
+        self.validator_input = self.attempt_root / "validator" / "input"
+        self.validator_output = self.attempt_root / "validator" / "output"
+        self.validator_manifest = self.validator_input / "manifest.json"
+        self.validator_plan: RolePlan | None = None
+        self.cleanup_failures: list[str] = []
+        self._prepared = False
+        self._network_created = False
+        self._network_observed = False
+        self._inspected_roles: set[str] = set()
+        self._validator_started = False
+        self._inputs: dict[str, InputFile] = {}
+        self._secrets: tempfile.TemporaryDirectory[str] | None = None
+
+    def preflight(self) -> None:
+        if self._prepared or self.attempt_root.exists():
+            raise ControllerError("attempt path is create-once")
+        if self.config.spent_lease.exists():
+            raise ConsumedExperiment("experiment is already spent")
+        if not self.config.attempt_id or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+            for character in self.config.attempt_id
+        ):
+            raise ControllerError("invalid attempt id")
+        if not self.config.network_name or self.config.image_id.startswith("sha256:") is False:
+            raise ControllerError("invalid frozen identity")
+        if len(self.config.image_id) != 71:
+            raise ControllerError("invalid image id")
+        _validate_hash(self.config.image_id[7:])
+        if self.config.network_name != f"bounded-tr-{self.config.attempt_id}":
+            raise ControllerError("network is not attempt-specific")
+        for directory in (
+            self.config.attempt_parent,
+            self.config.data_root,
+            self.config.spent_lease.parent,
+        ):
+            _assert_plain_directory(directory)
+        if self.config.attempt_parent.resolve(strict=True) != self.config.attempt_parent:
+            raise ControllerError("attempt parent must be canonical")
+        if self.config.data_root.resolve(strict=True) != self.config.data_root:
+            raise ControllerError("data root must be canonical")
+        if self.config.spent_lease.parent.resolve(strict=True) != self.config.spent_lease.parent:
+            raise ControllerError("spent lease parent must be canonical")
+
+        self._inputs = {item.name: item for item in self.config.inputs}
+        if len(self._inputs) != len(self.config.inputs) or set(self._inputs) != REQUIRED_INPUTS:
+            raise ControllerError("input binding set mismatch")
+        expected_receipt_hash = _validate_hash(self.config.expected_receipt_sha256)
+        receipt_raw = _read_path_bounded(self.config.receipt.path, MAX_INPUT_BYTES)
+        actual_receipt_hash = _sha256_bytes(receipt_raw)
+        if actual_receipt_hash != expected_receipt_hash:
+            raise ControllerError("receipt authority hash mismatch")
+        if (
+            self.config.receipt.name != "receipt"
+            or self.config.receipt.bytes != len(receipt_raw)
+            or self.config.receipt.sha256 != actual_receipt_hash
+        ):
+            raise ControllerError("receipt input binding mismatch")
+        try:
+            receipt = _load_canonical(receipt_raw)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ControllerError("invalid receipt") from exc
+        if not isinstance(receipt, dict) or set(receipt) != {"schema", "image_id", "files"}:
+            raise ControllerError("invalid receipt shape")
+        if receipt["schema"] != "bounded-tr-performance-receipt-v1":
+            raise ControllerError("invalid receipt schema")
+        if receipt["image_id"] != self.config.image_id:
+            raise ControllerError("receipt image mismatch")
+        receipt_files = receipt["files"]
+        if not isinstance(receipt_files, dict) or set(receipt_files) != REQUIRED_INPUTS:
+            raise ControllerError("receipt file set mismatch")
+        raw_inputs: dict[str, bytes] = {}
+        for name, binding in self._inputs.items():
+            if binding.path.resolve(strict=True) != binding.path:
+                raise ControllerError("input path must be canonical")
+            entry = receipt_files[name]
+            if not isinstance(entry, dict) or set(entry) != {"bytes", "sha256"}:
+                raise ControllerError("invalid receipt file binding")
+            if entry["bytes"] != binding.bytes or entry["sha256"] != binding.sha256:
+                raise ControllerError("receipt binding mismatch")
+            raw_inputs[name] = _read_verified(binding)
+        if raw_inputs["b_strategy"] != raw_inputs["b_strategy_mirror"]:
+            raise ControllerError("baseline source mirrors differ")
+        try:
+            running_controller = Path(__file__).read_bytes()
+        except OSError as exc:
+            raise ControllerError("host controller source unavailable") from exc
+        if raw_inputs["controller"] != running_controller:
+            raise ControllerError("receipt-bound controller is not this host controller")
+
+        try:
+            config_value = self.contract.load_canonical_json_bytes(raw_inputs["config"])
+            self.contract.validate_effective_config(config_value)
+            b_value = self.contract.load_canonical_json_bytes(raw_inputs["b_request"])
+            self.contract.validate_b_request(b_value)
+            c_value = self.contract.load_canonical_json_bytes(raw_inputs["c_template"])
+            self.contract.validate_c_request_template(c_value)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ControllerError("shared contract rejected an input") from exc
+
+        self._verify_image(raw_inputs["image_identity"])
+        data_bindings = self._verify_evidence(raw_inputs["admission"], raw_inputs["restart"])
+
+        self.attempt_root.mkdir()
+        for role in ("B", "C"):
+            root = self.attempt_root / role
+            paths = RolePaths(
+                root=root,
+                data=root / "data",
+                state=root / "state",
+                output=root / "state" / "backtest_results",
+                home=root / "state" / "home",
+                control=root / "control",
+            )
+            for directory in (paths.data, paths.output, paths.home, paths.control):
+                directory.mkdir(parents=True, exist_ok=True)
+            self.role_paths[role] = paths
+        self.validator_input.mkdir(parents=True)
+        self.validator_output.mkdir()
+
+        for name, relative in DATA_FILES.items():
+            source = self.config.data_root / relative
+            _assert_confined_file(self.config.data_root, source)
+            expected = data_bindings[name]
+            _copy_once(
+                source,
+                self.role_paths["B"].data / relative,
+                int(expected["raw_size"]),
+                str(expected["raw_sha256"]),
+            )
+        leverage = data_bindings["leverage"]
+        _assert_confined_file(
+            self.config.data_root,
+            self.config.data_root / DATA_FILES["leverage"],
+        )
+        _copy_once(
+            self.config.data_root / DATA_FILES["leverage"],
+            self.role_paths["C"].data / DATA_FILES["leverage"],
+            int(leverage["raw_size"]),
+            str(leverage["raw_sha256"]),
+        )
+        _write_once(self.role_paths["B"].control / "request.json", raw_inputs["b_request"])
+        state = {
+            "attempt_id": self.config.attempt_id,
+            "image_id": self.config.image_id,
+            "receipt_sha256": expected_receipt_hash,
+            "network": {
+                "driver": "bridge",
+                "isolation": False,
+                "residual_access": "outbound/LAN/host-gateway traffic permitted",
+            },
+            "schema": "bounded-tr-controller-run-state-v1",
+            "staged": {
+                "B": {name: data_bindings[name]["raw_sha256"] for name in DATA_FILES},
+                "C": {"leverage": leverage["raw_sha256"]},
+            },
+        }
+        _write_once(self.attempt_root / "run-state.json", _canonical_bytes(state))
+        self._prepared = True
+
+    def _verify_image(self, raw: bytes) -> None:
+        try:
+            value = _load_canonical(raw)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ControllerError("invalid image identity") from exc
+        if not isinstance(value, dict) or value.get("schema") != "freqtrade-cn.execution-image-identity.v2":
+            raise ControllerError("wrong image identity schema")
+        image = value.get("image")
+        if not isinstance(image, dict):
+            raise ControllerError("missing image identity")
+        if image.get("immutable_id") != self.config.image_id or image.get("platform") != "linux/amd64":
+            raise ControllerError("image identity mismatch")
+
+    def _verify_evidence(self, admission_raw: bytes, restart_raw: bytes) -> dict[str, dict[str, object]]:
+        try:
+            admission = _load_canonical(admission_raw)
+            restart = _load_canonical(restart_raw)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ControllerError("invalid admission evidence") from exc
+        if not isinstance(admission, dict) or admission.get("command") != "admit":
+            raise ControllerError("invalid data admission")
+        inputs = admission.get("inputs")
+        if not isinstance(inputs, dict) or set(inputs) != set(DATA_FILES):
+            raise ControllerError("invalid admitted data set")
+        for name, relative in DATA_FILES.items():
+            item = inputs[name]
+            if not isinstance(item, dict):
+                raise ControllerError("invalid admitted file")
+            if item.get("relative_path") != relative:
+                raise ControllerError("admitted relative path mismatch")
+            if not isinstance(item.get("raw_size"), int) or item["raw_size"] < 0:
+                raise ControllerError("admitted size invalid")
+            _validate_hash(item.get("raw_sha256"))
+        if not isinstance(restart, dict) or restart.get("command") != "verify-merge":
+            raise ControllerError("invalid restart receipt")
+        required = {
+            "complete": True,
+            "comparison_count": 35040,
+            "mismatch_count": 0,
+            "record_count": 43800,
+            "resolver_calls": 43800,
+            "shard_count": 8,
+        }
+        for key, expected in required.items():
+            if restart.get(key) != expected:
+                raise ControllerError("restart evidence is incomplete")
+        global_identity = restart.get("global_identity")
+        if not isinstance(global_identity, dict) or global_identity.get("admission_sha256") != admission.get("summary_sha256"):
+            raise ControllerError("restart admission binding mismatch")
+        rehashes = restart.get("end_rehashes")
+        if not isinstance(rehashes, dict) or set(rehashes) != {
+            "raw_funding", "raw_futures", "raw_leverage", "raw_mark"
+        }:
+            raise ControllerError("restart rehash set mismatch")
+        for name in DATA_FILES:
+            if rehashes[f"raw_{name}"] != inputs[name]["raw_sha256"]:
+                raise ControllerError("restart rehash mismatch")
+        return inputs
+
+    def create_network(self) -> None:
+        if not self._prepared or self._network_created:
+            raise ControllerError("network stage out of order")
+        create = (
+            self.config.docker,
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--label",
+            f"bounded-tr-attempt={self.config.attempt_id}",
+            self.config.network_name,
+        )
+        result = self.runner.run(create)
+        if result.returncode != 0:
+            raise InfrastructureFailure("network creation failed")
+        self._network_created = True
+        inspect = self.runner.run(
+            (self.config.docker, "network", "inspect", self.config.network_name)
+        )
+        if inspect.returncode != 0 or inspect.stderr:
+            raise ProtocolFailure("network inspect failed")
+        try:
+            value = _load_json(inspect.stdout)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ProtocolFailure("network inspect protocol invalid") from exc
+        if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+            raise ProtocolFailure("network inspect shape invalid")
+        facts = value[0]
+        if facts.get("Driver") != "bridge" or facts.get("Internal") is not False:
+            raise ProtocolFailure("network inspect security mismatch")
+        if facts.get("Name") != self.config.network_name:
+            raise ProtocolFailure("network inspect identity mismatch")
+        self._network_observed = True
+        portable = {
+            "driver": "bridge",
+            "internal": False,
+            "name": self.config.network_name,
+            "schema": "bounded-tr-network-inspect-v1",
+        }
+        _write_once(self.attempt_root / "inspect-network.json", _canonical_bytes(portable))
+
+    def _ensure_secrets(self) -> dict[str, Path]:
+        if self._secrets is None:
+            self._secrets = tempfile.TemporaryDirectory(prefix="bounded-tr-secrets-")
+            root = Path(self._secrets.name)
+            result = {}
+            for name in ("api_password", "jwt_secret_key", "ws_token"):
+                path = root / name
+                _write_once(path, secrets.token_urlsafe(32).encode("ascii"))
+                result[name] = path
+            return result
+        root = Path(self._secrets.name)
+        return {name: root / name for name in ("api_password", "jwt_secret_key", "ws_token")}
+
+    def _build_plan(self, role: str) -> RolePlan:
+        paths = self.role_paths[role]
+        request = paths.control / "request.json"
+        strategy = self._inputs["b_strategy" if role == "B" else "c_strategy"].path
+        mounts = [
+            Mount(paths.state, CONTAINER_STATE, False),
+            Mount(paths.data, CONTAINER_DATA, True),
+            Mount(strategy, CONTAINER_STRATEGY, True),
+            Mount(self._inputs["config"].path, CONTAINER_CONFIG, True),
+            Mount(request, CONTAINER_REQUEST, True),
+            Mount(self._inputs["controller"].path, CONTAINER_CONTROLLER, True),
+        ]
+        if role == "C":
+            b_seal = self.seals.get("B")
+            if b_seal is None:
+                raise ControllerError("C cannot start before sealed B")
+            mounts.extend(
+                [
+                    Mount(
+                        b_seal.zip_path,
+                        f"{CONTAINER_STATE}/backtest_results/{b_seal.zip_path.name}",
+                        True,
+                    ),
+                    Mount(
+                        b_seal.meta_path,
+                        f"{CONTAINER_STATE}/backtest_results/{b_seal.meta_path.name}",
+                        True,
+                    ),
+                ]
+            )
+        for name, source in self._ensure_secrets().items():
+            mounts.append(Mount(source, f"{SECRET_ROOT}/{name}", True, True))
+        name = f"{self.config.attempt_id}-{role.lower()}"
+        prefix = [
+            self.config.docker,
+            "run",
+            "-d",
+            "--pull",
+            "never",
+            "--name",
+            name,
+            "--network",
+            self.config.network_name,
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--user",
+            "1000:1000",
+            "--workdir",
+            "/freqtrade",
+        ]
+        public = list(prefix)
+        for mount in mounts:
+            prefix.extend(("--mount", _mount_arg(mount)))
+            public.extend(("--mount", _mount_arg(mount, redact=True)))
+        tail = [
+            "--env",
+            "HOME=/research/state/home",
+            "--env",
+            f"FT_API_PASSWORD_FILE={SECRET_ROOT}/api_password",
+            "--env",
+            f"FT_JWT_SECRET_FILE={SECRET_ROOT}/jwt_secret_key",
+            "--env",
+            f"FT_WS_TOKEN_FILE={SECRET_ROOT}/ws_token",
+            "--entrypoint",
+            IMAGE_PYTHON,
+            self.config.image_id,
+            IMAGE_ENTRYPOINT,
+            "webserver",
+            "--config",
+            CONTAINER_CONFIG,
+            "--user-data-dir",
+            CONTAINER_STATE,
+            "--datadir",
+            CONTAINER_DATA,
+        ]
+        prefix.extend(tail)
+        public.extend(tail)
+        return RolePlan(role, name, tuple(mounts), tuple(prefix), tuple(public))
+
+    def run_role(self, role: str) -> None:
+        if role not in ("B", "C") or not self._prepared or not self._network_created:
+            raise ControllerError("role stage out of order")
+        if role == "C":
+            if "B" not in self.seals:
+                raise ControllerError("C requires sealed B")
+            if not self.bound_c_request.exists():
+                self._bind_c()
+        elif self.seals:
+            raise ControllerError("B stage out of order")
+        try:
+            plan = self._build_plan(role)
+            self.role_plans[role] = plan
+            started = self.runner.run(plan.server_argv)
+            if started.returncode != 0 or started.stderr:
+                raise InfrastructureFailure(f"{role} server initialization failed")
+            self._inspect_role(plan)
+            ready = self.runner.run(
+                (
+                    self.config.docker,
+                    "exec",
+                    plan.name,
+                    IMAGE_PYTHON,
+                    CONTAINER_CONTROLLER,
+                    "container-ready",
+                    "--password-file",
+                    f"{SECRET_ROOT}/api_password",
+                )
+            )
+            if ready.returncode != 0 or ready.stdout or ready.stderr:
+                raise InfrastructureFailure(f"{role} server readiness failed")
+            if self._output_visible_or_ambiguous(role):
+                if role == "B" and not self.config.spent_lease.exists():
+                    self._create_spent_lease()
+                raise ConsumedExperiment(f"{role} output appeared before POST")
+            if role == "B":
+                self._create_spent_lease()
+            post = self.runner.run(
+                (
+                    self.config.docker,
+                    "exec",
+                    plan.name,
+                    IMAGE_PYTHON,
+                    CONTAINER_CONTROLLER,
+                    "container-post",
+                    "--role",
+                    role,
+                    "--request",
+                    CONTAINER_REQUEST,
+                    "--password-file",
+                    f"{SECRET_ROOT}/api_password",
+                )
+            )
+            if post.returncode != 0 or post.stdout or post.stderr:
+                raise ConsumedExperiment(f"{role} POST failed; experiment spent")
+            self.seals[role] = self._seal_role(role)
+            if role == "B":
+                self._bind_c()
+        except BaseException as exc:
+            if role == "B" and self._output_visible_or_ambiguous(role):
+                if not self.config.spent_lease.exists():
+                    try:
+                        self._create_spent_lease()
+                    except ConsumedExperiment:
+                        pass
+                    except BaseException as lease_exc:
+                        raise ConsumedExperiment(
+                            "B output visible but spent lease could not be persisted"
+                        ) from lease_exc
+                if not isinstance(exc, ConsumedExperiment):
+                    raise ConsumedExperiment(
+                        "B output visible; experiment spent"
+                    ) from exc
+            raise
+
+    def _output_visible_or_ambiguous(self, role: str) -> bool:
+        try:
+            return any(self.role_paths[role].output.iterdir())
+        except OSError:
+            return True
+
+    def _inspect_role(self, plan: RolePlan) -> None:
+        result = self.runner.run((self.config.docker, "inspect", plan.name))
+        if result.returncode != 0 or result.stderr:
+            raise ProtocolFailure("container inspect failed")
+        try:
+            value = _load_json(result.stdout)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ProtocolFailure("container inspect protocol invalid") from exc
+        if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+            raise ProtocolFailure("container inspect shape invalid")
+        facts = value[0]
+        config = facts.get("Config")
+        host = facts.get("HostConfig")
+        network = facts.get("NetworkSettings")
+        mounts = facts.get("Mounts")
+        if not all(isinstance(item, dict) for item in (config, host, network)):
+            raise ProtocolFailure("container inspect facts missing")
+        expected_env = {
+            "HOME=/research/state/home",
+            f"FT_API_PASSWORD_FILE={SECRET_ROOT}/api_password",
+            f"FT_JWT_SECRET_FILE={SECRET_ROOT}/jwt_secret_key",
+            f"FT_WS_TOKEN_FILE={SECRET_ROOT}/ws_token",
+        }
+        _validate_inspect_environment(config.get("Env", []), expected_env)
+        if config.get("Image") != self.config.image_id or config.get("User") != "1000:1000":
+            raise ProtocolFailure("container inspect identity mismatch")
+        if config.get("WorkingDir") != "/freqtrade":
+            raise ProtocolFailure("container inspect workdir mismatch")
+        if (
+            host.get("ReadonlyRootfs") is not True
+            or host.get("CapDrop") != ["ALL"]
+            or host.get("SecurityOpt") != ["no-new-privileges:true"]
+            or host.get("NetworkMode") != self.config.network_name
+            or host.get("PortBindings") not in ({}, None)
+            or host.get("Tmpfs") != {"/tmp": "rw,noexec,nosuid,nodev,size=64m"}
+        ):
+            raise ProtocolFailure("container inspect security mismatch")
+        networks = network.get("Networks")
+        if not isinstance(networks, dict) or set(networks) != {self.config.network_name}:
+            raise ProtocolFailure("container inspect network mismatch")
+        ports = network.get("Ports")
+        if ports is not None and not isinstance(ports, dict):
+            raise ProtocolFailure("container inspect port facts invalid")
+        if isinstance(ports, dict) and any(value not in (None, []) for value in ports.values()):
+            raise ProtocolFailure("container inspect published ports")
+        expected_mounts = {
+            item.destination: not item.read_only for item in plan.mounts
+        }
+        actual_mounts: dict[str, bool] = {}
+        if not isinstance(mounts, list):
+            raise ProtocolFailure("container inspect mounts missing")
+        for item in mounts:
+            if not isinstance(item, dict) or item.get("Type") != "bind":
+                raise ProtocolFailure("container inspect mount type mismatch")
+            destination = item.get("Destination")
+            writable = item.get("RW")
+            if not isinstance(destination, str) or not isinstance(writable, bool):
+                raise ProtocolFailure("container inspect mount invalid")
+            if destination in actual_mounts:
+                raise ProtocolFailure("container inspect duplicate mount")
+            actual_mounts[destination] = writable
+        if actual_mounts != expected_mounts:
+            raise ProtocolFailure("container inspect mount graph mismatch")
+        self._inspected_roles.add(plan.role)
+        portable = {
+            "image_id": self.config.image_id,
+            "mounts": [
+                {"destination": key, "writable": actual_mounts[key]}
+                for key in sorted(actual_mounts)
+            ],
+            "network": self.config.network_name,
+            "role": plan.role,
+            "schema": "bounded-tr-container-inspect-v1",
+            "security": {
+                "cap_drop": ["ALL"],
+                "no_new_privileges": True,
+                "published_ports": False,
+                "read_only_root": True,
+            },
+        }
+        _write_once(self.attempt_root / f"inspect-{plan.role}.json", _canonical_bytes(portable))
+
+    def _create_spent_lease(self) -> None:
+        raw = _canonical_bytes(
+            {
+                "attempt_id": self.config.attempt_id,
+                "schema": "bounded-tr-experiment-spent-v1",
+            }
+        )
+        try:
+            _write_once(self.config.spent_lease, raw)
+        except FileExistsError as exc:
+            raise ConsumedExperiment("experiment is already spent") from exc
+
+    def _seal_role(self, role: str) -> Seal:
+        output = self.role_paths[role].output
+        paths = tuple(output.iterdir())
+        if len(paths) != 3 or any(path.is_symlink() for path in paths):
+            raise ControllerError(f"{role} output artifact set is ambiguous")
+        pointers = [path for path in paths if path.name == ".last_result.json"]
+        zips = [path for path in paths if path.name.endswith(".zip")]
+        metadata = [path for path in paths if path.name.endswith(".meta.json")]
+        if len(pointers) != 1 or len(zips) != 1 or len(metadata) != 1:
+            raise ControllerError(f"{role} output artifact set is malformed")
+        pointer = _sealed(pointers[0], f"{role.lower()}_pointer")
+        try:
+            pointer_value = _load_canonical(_read_path_bounded(pointers[0], MAX_POINTER_BYTES))
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ControllerError(f"{role} pointer is invalid") from exc
+        if not isinstance(pointer_value, dict) or set(pointer_value) != {"latest_backtest"}:
+            raise ControllerError(f"{role} pointer shape is invalid")
+        latest = pointer_value["latest_backtest"]
+        if not isinstance(latest, str) or latest != zips[0].name:
+            raise ControllerError(f"{role} pointer does not bind the ZIP")
+        stem = zips[0].name[:-4]
+        try:
+            stem = self.contract.validate_result_stem(stem)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ControllerError(f"{role} result stem is invalid") from exc
+        if metadata[0].name != f"{stem}.meta.json":
+            raise ControllerError(f"{role} metadata does not bind result stem")
+        zip_seal = _sealed(zips[0], f"{role.lower()}_result_zip")
+        meta_seal = _sealed(metadata[0], f"{role.lower()}_metadata")
+        # Re-read after all three hashes to detect a replacement during sealing.
+        for sealed in (zip_seal, meta_seal, pointer):
+            again = _sealed(sealed.path, sealed.kind)
+            if again.bytes != sealed.bytes or again.sha256 != sealed.sha256:
+                raise ControllerError(f"{role} artifact changed while sealing")
+        return Seal(
+            role,
+            stem,
+            zips[0],
+            metadata[0],
+            pointers[0],
+            (zip_seal, meta_seal, pointer),
+        )
+
+    def _bind_c(self) -> None:
+        if self.bound_c_request.exists():
+            return
+        b = self.seals.get("B")
+        if b is None:
+            raise ControllerError("cannot bind C without B")
+        template = _read_verified(self._inputs["c_template"])
+        try:
+            bound = self.contract.bind_c_request(template, b.result_stem)
+            value = self.contract.load_canonical_json_bytes(bound)
+            self.contract.validate_bound_c_request(value)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ControllerError("shared contract rejected bound C request") from exc
+        if not isinstance(value, dict) or "retain_data_snapshot" in value:
+            raise ControllerError("C request must omit retain_data_snapshot")
+        _write_once(self.bound_c_request, bound)
+
+    def _manifest_item(self, kind: str, path: Path, container_path: str) -> dict[str, object]:
+        sealed = _sealed(path, kind)
+        return {
+            "bytes": sealed.bytes,
+            "kind": kind,
+            "path": container_path,
+            "sha256": sealed.sha256,
+        }
+
+    def _observed_runtime_security(self) -> dict[str, object]:
+        if not self._network_observed or self._inspected_roles != {"B", "C"}:
+            raise ControllerError("runtime security observations incomplete")
+        role = {
+            "cap_drop": ["ALL"],
+            "image_id": self.config.image_id,
+            "no_new_privileges": True,
+            "published_ports": False,
+            "read_only_root": True,
+            "tmpfs": "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "user": "1000:1000",
+            "workdir": "/freqtrade",
+        }
+        return {
+            "bridge": {
+                "driver": "bridge",
+                "internal": False,
+                "network_isolation": False,
+                "residual_access": [
+                    "attempt-peer",
+                    "host-gateway",
+                    "lan",
+                    "outbound",
+                ],
+            },
+            "roles": {"B": dict(role), "C": dict(role)},
+        }
+
+    def _prepare_validator_manifest(self) -> tuple[tuple[Mount, ...], bytes]:
+        b = self.seals["B"]
+        c = self.seals["C"]
+        definitions = (
+            ("b_result_zip", b.zip_path),
+            ("b_metadata", b.meta_path),
+            ("b_pointer", b.pointer_path),
+            ("b_request", self.role_paths["B"].control / "request.json"),
+            ("b_strategy_source", self._inputs["b_strategy"].path),
+            ("c_result_zip", c.zip_path),
+            ("c_metadata", c.meta_path),
+            ("c_pointer", c.pointer_path),
+            ("c_request", self.bound_c_request),
+            ("c_strategy_source", self._inputs["c_strategy"].path),
+            ("effective_config", self._inputs["config"].path),
+            ("research_receipt", self.config.receipt.path),
+            ("data_admission", self._inputs["admission"].path),
+            ("restart_receipt", self._inputs["restart"].path),
+            ("image_identity", self._inputs["image_identity"].path),
+            ("backend_source_manifest", self._inputs["backend_source_manifest"].path),
+            ("controller_source", self._inputs["controller"].path),
+            ("validator_source", self._inputs["validator"].path),
+            ("contract_source", self._inputs["contract"].path),
+        )
+        mounts: list[Mount] = []
+        items: list[dict[str, object]] = []
+        for index, (kind, source) in enumerate(definitions):
+            destination = f"/validation/files/{index:02d}-{kind}"
+            mounts.append(Mount(source, destination, True))
+            items.append(self._manifest_item(kind, source, destination))
+        manifest = build_validator_manifest(
+            tuple(items),
+            self._observed_runtime_security(),
+        )
+        _write_once(self.validator_manifest, manifest)
+        return tuple(mounts), manifest
+
+    def _run_validator(self) -> str:
+        mounts, _ = self._prepare_validator_manifest()
+        validator_name = f"{self.config.attempt_id}-validator"
+        report_path = "/validation/output/report.json"
+        all_mounts = [
+            Mount(self.validator_manifest, "/validation/input/manifest.json", True),
+            *mounts,
+            Mount(self.validator_output, "/validation/output", False),
+        ]
+        argv = [
+            self.config.docker,
+            "run",
+            "--pull",
+            "never",
+            "--name",
+            validator_name,
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--user",
+            "1000:1000",
+            "--workdir",
+            "/freqtrade",
+        ]
+        for mount in all_mounts:
+            argv.extend(("--mount", _mount_arg(mount)))
+        argv.extend(
+            (
+                "--entrypoint",
+                IMAGE_PYTHON,
+                self.config.image_id,
+                "/validation/files/17-validator_source",
+                "--manifest",
+                "/validation/input/manifest.json",
+                "--report",
+                report_path,
+            )
+        )
+        self.validator_plan = RolePlan(
+            "VALIDATOR",
+            validator_name,
+            tuple(all_mounts),
+            tuple(argv),
+            tuple(argv),
+        )
+        result = self.runner.run(tuple(argv))
+        self._validator_started = True
+        self._inspect_validator()
+        if result.returncode != 0 or result.stderr:
+            raise ProtocolFailure("validator worker/process failed")
+        try:
+            stdout = result.stdout.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ProtocolFailure("validator stdout is not ASCII") from exc
+        if stdout not in {f"{verdict}\n" for verdict in VERDICTS}:
+            raise ProtocolFailure("validator stdout protocol invalid")
+        verdict = stdout[:-1]
+        outputs = tuple(self.validator_output.iterdir())
+        if len(outputs) != 1 or outputs[0].name != "report.json":
+            raise ProtocolFailure("validator report artifact set invalid")
+        try:
+            report_raw = _read_path_bounded(outputs[0], MAX_REPORT_BYTES)
+            report = _load_canonical(report_raw)
+        except (OSError, TypeError, ValueError, UnicodeError) as exc:
+            raise ProtocolFailure("validator report is invalid") from exc
+        if not isinstance(report, dict) or set(report) != {
+            "schema_version",
+            "contract",
+            "classification",
+            "reasons",
+            "audit",
+        }:
+            raise ProtocolFailure("validator report schema mismatch")
+        if type(report["schema_version"]) is not int or report["schema_version"] != 1:
+            raise ProtocolFailure("validator report version mismatch")
+        if report["contract"] != REPORT_CONTRACT:
+            raise ProtocolFailure("validator report contract mismatch")
+        if report["classification"] != verdict:
+            raise ProtocolFailure("validator report verdict mismatch")
+        reasons = report["reasons"]
+        if not isinstance(reasons, list) or not all(type(item) is str for item in reasons):
+            raise ProtocolFailure("validator report reasons invalid")
+        audit = report["audit"]
+        if not isinstance(audit, dict):
+            raise ProtocolFailure("validator report audit invalid")
+        if _canonical_bytes(audit.get("runtime_security")) != _canonical_bytes(
+            self._observed_runtime_security()
+        ):
+            raise ProtocolFailure("validator report runtime security mismatch")
+        return verdict
+
+    def _inspect_validator(self) -> None:
+        plan = self.validator_plan
+        if plan is None:
+            raise ProtocolFailure("validator plan missing")
+        result = self.runner.run((self.config.docker, "inspect", plan.name))
+        if result.returncode != 0 or result.stderr:
+            raise ProtocolFailure("validator inspect failed")
+        try:
+            value = _load_json(result.stdout)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ProtocolFailure("validator inspect protocol invalid") from exc
+        if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+            raise ProtocolFailure("validator inspect shape invalid")
+        facts = value[0]
+        config = facts.get("Config")
+        host = facts.get("HostConfig")
+        network = facts.get("NetworkSettings")
+        mounts = facts.get("Mounts")
+        if not all(isinstance(item, dict) for item in (config, host, network)):
+            raise ProtocolFailure("validator inspect facts missing")
+        if (
+            config.get("Image") != self.config.image_id
+            or config.get("User") != "1000:1000"
+            or config.get("WorkingDir") != "/freqtrade"
+        ):
+            raise ProtocolFailure("validator inspect identity mismatch")
+        _validate_inspect_environment(config.get("Env", []), set())
+        if (
+            host.get("ReadonlyRootfs") is not True
+            or host.get("CapDrop") != ["ALL"]
+            or host.get("SecurityOpt") != ["no-new-privileges:true"]
+            or host.get("NetworkMode") != "none"
+            or host.get("PortBindings") not in ({}, None)
+            or host.get("Tmpfs") != {"/tmp": "rw,noexec,nosuid,nodev,size=64m"}
+        ):
+            raise ProtocolFailure("validator inspect security mismatch")
+        networks = network.get("Networks")
+        if networks not in ({}, None):
+            raise ProtocolFailure("validator unexpectedly attached to a network")
+        ports = network.get("Ports")
+        if isinstance(ports, dict) and any(item not in (None, []) for item in ports.values()):
+            raise ProtocolFailure("validator inspect published ports")
+        expected_mounts = {
+            mount.destination: not mount.read_only for mount in plan.mounts
+        }
+        actual_mounts: dict[str, bool] = {}
+        if not isinstance(mounts, list):
+            raise ProtocolFailure("validator inspect mounts missing")
+        for item in mounts:
+            if not isinstance(item, dict) or item.get("Type") != "bind":
+                raise ProtocolFailure("validator inspect mount type mismatch")
+            destination = item.get("Destination")
+            writable = item.get("RW")
+            if not isinstance(destination, str) or not isinstance(writable, bool):
+                raise ProtocolFailure("validator inspect mount invalid")
+            if destination in actual_mounts:
+                raise ProtocolFailure("validator inspect duplicate mount")
+            actual_mounts[destination] = writable
+        if actual_mounts != expected_mounts:
+            raise ProtocolFailure("validator inspect mount graph mismatch")
+        portable = {
+            "image_id": self.config.image_id,
+            "mounts": [
+                {"destination": key, "writable": actual_mounts[key]}
+                for key in sorted(actual_mounts)
+            ],
+            "network": "none",
+            "role": "VALIDATOR",
+            "schema": "bounded-tr-container-inspect-v1",
+            "security": {
+                "cap_drop": ["ALL"],
+                "no_new_privileges": True,
+                "published_ports": False,
+                "read_only_root": True,
+            },
+        }
+        _write_once(self.attempt_root / "inspect-VALIDATOR.json", _canonical_bytes(portable))
+
+    def run(self) -> str:
+        primary: BaseException | None = None
+        verdict: str | None = None
+        try:
+            self.preflight()
+            self.create_network()
+            self.run_role("B")
+            self.run_role("C")
+            verdict = self._run_validator()
+        except BaseException as exc:
+            primary = exc
+        finally:
+            self._cleanup()
+        if primary is not None:
+            raise primary
+        if self.cleanup_failures:
+            raise InfrastructureFailure("cleanup incomplete")
+        if verdict is None:
+            raise ProtocolFailure("validator did not produce a verdict")
+        return verdict
+
+    def _cleanup(self) -> None:
+        for plan in reversed(tuple(self.role_plans.values())):
+            try:
+                result = self.runner.run((self.config.docker, "rm", "-f", plan.name))
+            except BaseException:
+                self.cleanup_failures.append(f"container:{plan.role}")
+            else:
+                if result.returncode != 0:
+                    self.cleanup_failures.append(f"container:{plan.role}")
+        if self._validator_started:
+            try:
+                result = self.runner.run(
+                    (self.config.docker, "rm", "-f", f"{self.config.attempt_id}-validator")
+                )
+            except BaseException:
+                self.cleanup_failures.append("container:validator")
+            else:
+                if result.returncode != 0:
+                    self.cleanup_failures.append("container:validator")
+        if self._network_created:
+            try:
+                result = self.runner.run(
+                    (self.config.docker, "network", "rm", self.config.network_name)
+                )
+            except BaseException:
+                self.cleanup_failures.append("network")
+            else:
+                if result.returncode != 0:
+                    self.cleanup_failures.append("network")
+        if self._secrets is not None:
+            try:
+                self._secrets.cleanup()
+            except OSError:
+                self.cleanup_failures.append("secrets")
+
+
+def _container_request(url: str, password_file: Path, body: bytes | None = None) -> bytes:
+    password = _read_path_bounded(password_file, 1024).decode("ascii")
+    token = base64.b64encode(f"research:{password}".encode("ascii")).decode("ascii")
+    request = urllib.request.Request(url, data=body)
+    request.add_header("Authorization", f"Basic {token}")
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ProtocolFailure("loopback API response exceeds resource ceiling")
+        return raw
+
+
+def container_ready(password_file: Path) -> int:
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            _container_request("http://127.0.0.1:8080/api/v1/ping", password_file)
+            return 0
+        except (OSError, urllib.error.URLError):
+            time.sleep(0.25)
+    return 1
+
+
+def container_post(role: str, request_path: Path, password_file: Path) -> int:
+    raw = _read_path_bounded(request_path, MAX_METADATA_BYTES)
+    try:
+        _container_request(
+            "http://127.0.0.1:8080/api/v1/backtest",
+            password_file,
+            raw,
+        )
+    except (OSError, urllib.error.URLError):
+        return 1
+    deadline = time.monotonic() + 60 * 60
+    while time.monotonic() < deadline:
+        try:
+            response = _container_request(
+                "http://127.0.0.1:8080/api/v1/backtest",
+                password_file,
+            )
+            value = _load_json(response)
+            if isinstance(value, dict) and value.get("status") == "ended":
+                return 0
+            if isinstance(value, dict) and value.get("status") in {"error", "failed"}:
+                return 1
+        except (OSError, ValueError, urllib.error.URLError):
+            return 1
+        time.sleep(1)
+    return 1
+
+
+def _parse_input(value: str) -> InputFile:
+    parts = value.split("=", 1)
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("input must be name=path")
+    name, path_text = parts
+    path = Path(path_text)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise argparse.ArgumentTypeError("input path is unavailable") from exc
+    if not path.is_absolute() or resolved != path:
+        raise argparse.ArgumentTypeError("input path must be absolute, canonical, and non-link")
+    try:
+        raw = _read_path_bounded(path, MAX_INPUT_BYTES)
+    except ControllerError as exc:
+        raise argparse.ArgumentTypeError("input path failed bounded validation") from exc
+    return InputFile(name, path, len(raw), _sha256_bytes(raw))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("--attempt-id", required=True)
+    run_parser.add_argument("--attempt-parent", type=Path, required=True)
+    run_parser.add_argument("--spent-lease", type=Path, required=True)
+    run_parser.add_argument("--data-root", type=Path, required=True)
+    run_parser.add_argument("--docker", default="docker")
+    run_parser.add_argument("--image-id", required=True)
+    run_parser.add_argument("--network-name", required=True)
+    run_parser.add_argument("--receipt", type=_parse_input, required=True)
+    run_parser.add_argument("--receipt-sha256", required=True)
+    run_parser.add_argument("--input", type=_parse_input, action="append", required=True)
+    ready_parser = subparsers.add_parser("container-ready")
+    ready_parser.add_argument("--password-file", type=Path, required=True)
+    post_parser = subparsers.add_parser("container-post")
+    post_parser.add_argument("--role", choices=("B", "C"), required=True)
+    post_parser.add_argument("--request", type=Path, required=True)
+    post_parser.add_argument("--password-file", type=Path, required=True)
+    arguments = parser.parse_args(argv)
+    if arguments.command == "container-ready":
+        return container_ready(arguments.password_file)
+    if arguments.command == "container-post":
+        return container_post(arguments.role, arguments.request, arguments.password_file)
+    try:
+        inputs = tuple(arguments.input)
+        contract_binding = next(item for item in inputs if item.name == "contract")
+        config = RunConfig(
+            attempt_id=arguments.attempt_id,
+            attempt_parent=arguments.attempt_parent.resolve(strict=True),
+            spent_lease=arguments.spent_lease.resolve(strict=False),
+            data_root=arguments.data_root.resolve(strict=True),
+            docker=arguments.docker,
+            image_id=arguments.image_id,
+            receipt=InputFile(
+                "receipt",
+                arguments.receipt.path,
+                arguments.receipt.bytes,
+                arguments.receipt.sha256,
+            ),
+            expected_receipt_sha256=arguments.receipt_sha256,
+            inputs=inputs,
+            network_name=arguments.network_name,
+        )
+        verdict = HostController(
+            config,
+            runner=SubprocessRunner(),
+            contract=load_contract(contract_binding.path),
+        ).run()
+    except Exception:
+        print("CONTROLLER_FAILED", file=sys.stderr)
+        return 1
+    print(verdict)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,995 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tarfile
+import textwrap
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Sequence
+
+
+IDENTITY_SCHEMA = "freqtrade-cn.execution-image-identity.v2"
+EXPECTED_OS = "linux"
+EXPECTED_ARCHITECTURE = "amd64"
+EXPECTED_IMAGE_USER = "ftuser"
+EXPECTED_WORKDIR = "/freqtrade"
+EXPECTED_ENTRYPOINT = ["python", "/usr/local/bin/freqtrade-entrypoint"]
+
+GENERATED_ARTIFACTS = (
+    "backend-source-manifest.json",
+    "build-input-manifest.json",
+    "docker-image-history.redacted.json",
+    "docker-image-inspect.redacted.json",
+    "entrypoint-evidence.json",
+    "package-inventory.json",
+    "probe-records.json",
+    "ui-evidence.json",
+)
+
+REQUIRED_BACKEND_PATHS = (
+    "freqtrade/config_schema/config_schema.py",
+    "freqtrade/constants.py",
+    "freqtrade/data/btanalysis/bt_fileutils.py",
+    "freqtrade/data/history/data_snapshot.py",
+    "freqtrade/data/history/datahandlers/idatahandler.py",
+    "freqtrade/data/history/history_utils.py",
+    "freqtrade/exchange/exchange.py",
+    "freqtrade/optimize/backtest_execution_context_evidence.py",
+    "freqtrade/optimize/backtesting.py",
+    "freqtrade/optimize/optimize_reports/bt_storage.py",
+    "freqtrade/persistence/trade_model.py",
+    "freqtrade/rpc/api_server/api_backtest.py",
+    "freqtrade/rpc/api_server/api_schemas.py",
+    "freqtrade/rpc/api_server/api_v1.py",
+)
+
+ROOT_CONTROL_PATHS = (
+    ".dockerignore",
+    ".gitmodules",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker/freqtrade_entrypoint.py",
+    "tools/committed_build.py",
+    "tools/image_provenance.py",
+)
+
+SENSITIVE_HISTORY_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?key|password|private[_-]?key|secret|credential|token)"
+)
+HEX_HEAD_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+
+class EvidenceError(RuntimeError):
+    pass
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+
+
+def sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def file_record(path: Path) -> dict[str, Any]:
+    payload = path.read_bytes()
+    return {"bytes": len(payload), "sha256": sha256_bytes(payload)}
+
+
+def _decoded_stderr(stderr: bytes) -> str:
+    return stderr.decode("utf-8", errors="replace")[:2000]
+
+
+def run_checked(
+    argv: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    stdin: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        result = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            input=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise EvidenceError(f"command_start_failed:{argv[0]}:{exc.__class__.__name__}") from exc
+    if result.returncode != 0:
+        raise EvidenceError(
+            f"command_failed:{argv[0]}:{result.returncode}:{_decoded_stderr(result.stderr)}"
+        )
+    return result
+
+
+def git_text(repo: Path, *args: str) -> str:
+    result = run_checked(["git", "-C", str(repo), *args])
+    return result.stdout.decode("utf-8").strip()
+
+
+def validate_absolute_directory(path: Path, label: str) -> Path:
+    if not path.is_absolute():
+        raise EvidenceError(f"{label}_must_be_absolute")
+    resolved = path.resolve()
+    if not resolved.is_dir():
+        raise EvidenceError(f"{label}_not_directory")
+    return resolved
+
+
+def validate_repository_state(
+    *,
+    name: str,
+    supplied_root: Path,
+    expected_head: str,
+    observed_root: Path,
+    observed_head: str,
+    status: str,
+) -> None:
+    if observed_root.resolve() != supplied_root.resolve():
+        raise EvidenceError(f"{name}_repository_root_drift")
+    if observed_head != expected_head:
+        raise EvidenceError(f"{name}_head_drift")
+    if status:
+        raise EvidenceError(f"{name}_dirty")
+
+
+def inspect_repository(name: str, root: Path, expected_head: str) -> dict[str, Any]:
+    observed_root = Path(git_text(root, "rev-parse", "--show-toplevel"))
+    observed_head = git_text(root, "rev-parse", "HEAD")
+    status = git_text(root, "status", "--porcelain=v1", "--untracked-files=all")
+    validate_repository_state(
+        name=name,
+        supplied_root=root,
+        expected_head=expected_head,
+        observed_root=observed_root,
+        observed_head=observed_head,
+        status=status,
+    )
+    return {
+        "commit": observed_head,
+        "tree": git_text(root, "rev-parse", "HEAD^{tree}"),
+        "worktree_clean": True,
+    }
+
+
+def root_gitlinks(root: Path) -> dict[str, str]:
+    links: dict[str, str] = {}
+    for path in ("freqtrade", "frequi", "freqtrade-strategies"):
+        line = git_text(root, "ls-tree", "HEAD", "--", path)
+        pieces = line.split(None, 3)
+        if len(pieces) != 4 or pieces[0] != "160000" or pieces[1] != "commit":
+            raise EvidenceError(f"root_gitlink_missing:{path}")
+        links[path] = pieces[2]
+    return links
+
+
+def validate_submodule_links(expected: dict[str, str], observed: dict[str, str]) -> None:
+    if observed != expected:
+        raise EvidenceError("root_submodule_gitlink_drift")
+
+
+def git_archive_files(
+    repo: Path,
+) -> tuple[list[dict[str, Any]], dict[str, bytes], dict[str, Any]]:
+    argv = ["git", "-C", str(repo), "archive", "--format=tar", "HEAD"]
+    result = run_checked(argv)
+    files: list[dict[str, Any]] = []
+    payloads: dict[str, bytes] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            for member in archive.getmembers():
+                if member.isdir():
+                    continue
+                if member.isfile():
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise EvidenceError("git_archive_file_data_missing")
+                    payload = source.read()
+                    mode = "100755" if member.mode & 0o111 else "100644"
+                elif member.issym():
+                    payload = member.linkname.encode("utf-8")
+                    mode = "120000"
+                else:
+                    raise EvidenceError("git_archive_special_file")
+                payloads[member.name] = payload
+                files.append(
+                    {
+                        "bytes": len(payload),
+                        "git_mode": mode,
+                        "path": member.name,
+                        "sha256": sha256_bytes(payload),
+                    }
+                )
+    except tarfile.TarError as exc:
+        raise EvidenceError("git_archive_invalid") from exc
+    return (
+        sorted(files, key=lambda item: item["path"]),
+        payloads,
+        {
+            "bytes": len(result.stdout),
+            "sha256": sha256_bytes(result.stdout),
+            "source": "git archive --format=tar HEAD (same committed-build extraction boundary)",
+        },
+    )
+
+
+def manifest_summary(files: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    canonical = canonical_json_bytes(list(files))
+    return {
+        "canonical_bytes": len(canonical),
+        "file_count": len(files),
+        "payload_bytes": sum(int(item["bytes"]) for item in files),
+        "sha256": sha256_bytes(canonical),
+    }
+
+
+def _backend_context_included(path: str) -> bool:
+    excluded_prefixes = (
+        ".venv/",
+        "site/",
+        "user_data/",
+        "freqtrade/rpc/api_server/ui/installed/",
+    )
+    if path == "freqtrade/rpc/api_server/ui/installed/.gitkeep":
+        return True
+    return not path.startswith(excluded_prefixes) and not any(
+        part in {".pytest_cache", ".ruff_cache"} for part in Path(path).parts
+    )
+
+
+def _frontend_context_included(path: str) -> bool:
+    excluded = {"node_modules", "dist", ".vite", ".nuxt", "coverage", "playwright-report", "test-results"}
+    return not any(part in excluded for part in Path(path).parts)
+
+
+def _without_git_mode(files: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"bytes": item["bytes"], "path": item["path"], "sha256": item["sha256"]}
+        for item in files
+    ]
+
+
+def build_host_manifests(
+    roots: dict[str, Path], repository_identity: dict[str, dict[str, Any]], frontend_head: str
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, bytes]]:
+    blobs: dict[str, dict[str, bytes]] = {}
+    files: dict[str, list[dict[str, Any]]] = {}
+    archives: dict[str, dict[str, Any]] = {}
+    for name in ("root", "backend", "frontend"):
+        files[name], blobs[name], archives[name] = git_archive_files(roots[name])
+
+    root_lookup = {item["path"]: item for item in files["root"]}
+    missing_control = sorted(set(ROOT_CONTROL_PATHS) - set(root_lookup))
+    if missing_control:
+        raise EvidenceError(f"root_control_files_missing:{','.join(missing_control)}")
+    root_control = [root_lookup[path] for path in ROOT_CONTROL_PATHS]
+    backend_context = [item for item in files["backend"] if _backend_context_included(item["path"])]
+    frontend_context = [item for item in files["frontend"] if _frontend_context_included(item["path"])]
+
+    expected_backend = [
+        item
+        for item in files["backend"]
+        if item["path"].startswith("freqtrade/")
+        and not item["path"].startswith("freqtrade/rpc/api_server/ui/installed/")
+    ]
+    expected_backend_simple = _without_git_mode(expected_backend)
+    expected_paths = {item["path"] for item in expected_backend_simple}
+    missing_required = sorted(set(REQUIRED_BACKEND_PATHS) - expected_paths)
+    if missing_required:
+        raise EvidenceError(f"required_backend_paths_missing:{','.join(missing_required)}")
+
+    dockerfile = blobs["root"]["Dockerfile"].decode("utf-8")
+    base_references = []
+    for line in dockerfile.splitlines():
+        match = re.match(r"FROM\s+(\S+)(?:\s+AS\s+\S+)?\s*$", line, re.IGNORECASE)
+        if match and match.group(1) not in {"base", "python-deps", "runtime-image"}:
+            base_references.append(match.group(1))
+
+    build_manifest = {
+        "schema": "freqtrade-cn.image-build-input-manifest.v1",
+        "algorithm": "Git HEAD blob bytes; path-sorted; per-file SHA-256; compact sorted-key JSON",
+        "frontend_build_arg": {"FREQUI_COMMIT_HASH": frontend_head},
+        "base_image_references_from_dockerfile": base_references,
+        "root_control_files": {
+            "files": root_control,
+            "summary": manifest_summary(root_control),
+        },
+        "backend_copy_context": {
+            "archive": archives["backend"],
+            "commit": repository_identity["backend"]["commit"],
+            "tree": repository_identity["backend"]["tree"],
+            "files": backend_context,
+            "summary": manifest_summary(backend_context),
+        },
+        "frontend_copy_context": {
+            "archive": archives["frontend"],
+            "commit": repository_identity["frontend"]["commit"],
+            "tree": repository_identity["frontend"]["tree"],
+            "files": frontend_context,
+            "summary": manifest_summary(frontend_context),
+        },
+        "scope": {
+            "strategy_repository_packaged": False,
+            "registry_base_object_bytes_available_from_allowed_local_engine_reads": False,
+            "claim": "source/build-input binding, not a registry-independent rebuild claim",
+        },
+        "root_archive": archives["root"],
+    }
+    return build_manifest, expected_backend_simple, blobs["root"]
+
+
+def collection_record(argv: Sequence[str], result: subprocess.CompletedProcess[bytes]) -> dict[str, Any]:
+    return {
+        "argv": list(argv),
+        "exit_code": result.returncode,
+        "stdout": {"bytes": len(result.stdout), "sha256": sha256_bytes(result.stdout)},
+        "stderr": {
+            "bytes": len(result.stderr),
+            "sha256": sha256_bytes(result.stderr),
+            "sanitized_utf8": _decoded_stderr(result.stderr),
+        },
+    }
+
+
+def docker_inspect(reference: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    argv = ["docker", "image", "inspect", "--format", "{{json .}}", reference]
+    result = run_checked(argv)
+    if result.stderr:
+        raise EvidenceError("docker_image_inspect_emitted_stderr")
+    try:
+        payload = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceError("docker_image_inspect_invalid_json") from exc
+    if not isinstance(payload, dict):
+        raise EvidenceError("docker_image_inspect_not_object")
+    return payload, collection_record(argv, result)
+
+
+def classify_engine_descriptor(inspect: dict[str, Any]) -> dict[str, Any]:
+    image_id = inspect.get("Id")
+    descriptor = inspect.get("Descriptor")
+    observation: dict[str, Any] = {
+        "engine_image_record_id": image_id,
+        "engine_image_record_id_kind": "Docker Engine local image record ID",
+        "raw_content_objects_exposed": {
+            "oci_index_bytes": False,
+            "platform_manifest_bytes": False,
+            "image_config_bytes": False,
+        },
+    }
+    if not isinstance(descriptor, dict):
+        observation.update(
+            {
+                "classification": "unclassified local Engine image record",
+                "descriptor_available": False,
+                "oci_index_claim": False,
+            }
+        )
+        return observation
+    digest = descriptor.get("digest")
+    media_type = descriptor.get("mediaType")
+    matches = digest == image_id
+    is_index = media_type in {
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+    }
+    observation.update(
+        {
+            "classification": (
+                "local Engine reports an OCI image index descriptor"
+                if is_index and matches
+                else "local Engine descriptor observation"
+            ),
+            "descriptor_available": True,
+            "descriptor_digest_matches_engine_id": matches,
+            "descriptor_media_type": media_type,
+            "oci_index_claim": bool(is_index and matches),
+        }
+    )
+    return observation
+
+
+def validate_image_state(
+    *,
+    expected_id: str,
+    expected_tag: str,
+    expected_labels: dict[str, str],
+    id_inspect: dict[str, Any],
+    tag_inspect: dict[str, Any],
+) -> None:
+    if id_inspect.get("Id") != expected_id:
+        raise EvidenceError("immutable_image_id_drift")
+    if tag_inspect.get("Id") != expected_id:
+        raise EvidenceError("image_tag_resolution_drift")
+    if expected_tag not in (tag_inspect.get("RepoTags") or []):
+        raise EvidenceError("image_tag_missing")
+    for label, inspect in (("id", id_inspect), ("tag", tag_inspect)):
+        if inspect.get("Os") != EXPECTED_OS or inspect.get("Architecture") != EXPECTED_ARCHITECTURE:
+            raise EvidenceError(f"image_platform_drift:{label}")
+        config = inspect.get("Config") or {}
+        if config.get("User") != EXPECTED_IMAGE_USER:
+            raise EvidenceError(f"image_user_drift:{label}")
+        if config.get("WorkingDir") != EXPECTED_WORKDIR:
+            raise EvidenceError(f"image_workdir_drift:{label}")
+        if config.get("Entrypoint") != EXPECTED_ENTRYPOINT:
+            raise EvidenceError(f"image_entrypoint_drift:{label}")
+        labels = config.get("Labels") or {}
+        if any(labels.get(key) != value for key, value in expected_labels.items()):
+            raise EvidenceError(f"image_revision_label_drift:{label}")
+
+
+def redacted_inspect(
+    expected_id: str,
+    expected_tag: str,
+    id_inspect: dict[str, Any],
+    tag_inspect: dict[str, Any],
+    id_collection: dict[str, Any],
+    tag_collection: dict[str, Any],
+) -> dict[str, Any]:
+    config = id_inspect.get("Config") or {}
+    descriptor = id_inspect.get("Descriptor")
+    safe_descriptor = None
+    if isinstance(descriptor, dict):
+        safe_descriptor = {
+            "digest": descriptor.get("digest"),
+            "media_type": descriptor.get("mediaType"),
+            "size_bytes": descriptor.get("size"),
+        }
+    expected_label_keys = {
+        "org.freqtrade-cn.revision.backend",
+        "org.freqtrade-cn.revision.frontend",
+        "org.freqtrade-cn.revision.root",
+    }
+    labels = config.get("Labels") or {}
+    safe_labels = {key: labels[key] for key in sorted(expected_label_keys) if key in labels}
+    rootfs = id_inspect.get("RootFS") or {}
+    return {
+        "schema": "freqtrade-cn.local-docker-image-inspect.redacted.v1",
+        "collection": {"by_immutable_id": id_collection, "by_local_tag": tag_collection},
+        "requested": {"immutable_image_id": expected_id, "local_tag": expected_tag},
+        "engine_fields": {
+            "architecture": id_inspect.get("Architecture"),
+            "config_projection": {
+                "cmd": config.get("Cmd"),
+                "entrypoint": config.get("Entrypoint"),
+                "labels": safe_labels,
+                "user": config.get("User"),
+                "working_directory": config.get("WorkingDir"),
+            },
+            "created": id_inspect.get("Created"),
+            "descriptor": safe_descriptor,
+            "id": id_inspect.get("Id"),
+            "os": id_inspect.get("Os"),
+            "repo_digests": sorted(id_inspect.get("RepoDigests") or []),
+            "repo_tags": sorted(id_inspect.get("RepoTags") or []),
+            "rootfs_projection": {
+                "diff_ids": list(rootfs.get("Layers") or []),
+                "type": rootfs.get("Type"),
+            },
+            "size_bytes": id_inspect.get("Size"),
+            "tag_resolved_id": tag_inspect.get("Id"),
+        },
+        "identity_classification": classify_engine_descriptor(id_inspect),
+        "redactions": {
+            "config_environment": "omitted; environment dumps and mutable PATH claims are out of scope",
+            "graph_driver": "omitted; host storage paths are not image identity",
+            "non_revision_labels": len(set(labels) - expected_label_keys),
+            "raw_content_limitation": (
+                "allowed local docker image inspect/history exposed descriptor fields and decoded "
+                "projections, not rehashable index/manifest/config object bytes"
+            ),
+        },
+    }
+
+
+def _redact_created_by(value: str) -> dict[str, Any]:
+    stripped = value.lstrip()
+    record: dict[str, Any] = {
+        "raw_bytes": len(value.encode("utf-8")),
+        "raw_sha256": sha256_bytes(value.encode("utf-8")),
+    }
+    if re.match(r"ENV\s", stripped, re.IGNORECASE):
+        record.update({"redacted": True, "sanitized": "ENV <redacted-environment-value>"})
+    elif SENSITIVE_HISTORY_PATTERN.search(value):
+        record.update({"redacted": True, "sanitized": "<redacted-sensitive-build-history>"})
+    else:
+        record.update({"redacted": False, "sanitized": value})
+    return record
+
+
+def _utc_timestamp(value: str) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise EvidenceError("docker_history_timestamp_missing_timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def docker_history(image_id: str) -> dict[str, Any]:
+    template = "{{json .ID}}\t{{json .CreatedAt}}\t{{json .CreatedBy}}\t{{json .Comment}}\t{{json .Size}}"
+    argv = ["docker", "image", "history", "--no-trunc", "--format", template, image_id]
+    result = run_checked(argv)
+    if result.stderr:
+        raise EvidenceError("docker_image_history_emitted_stderr")
+    rows = []
+    for line in result.stdout.decode("utf-8").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 5:
+            raise EvidenceError("docker_image_history_unexpected_row")
+        image, created_at, created_by, comment, size = (json.loads(part) for part in parts)
+        rows.append(
+            {
+                "comment": comment,
+                "created_at_engine": created_at,
+                "created_at_utc": _utc_timestamp(created_at),
+                "created_by": _redact_created_by(created_by),
+                "id": image,
+                "size_engine": size,
+            }
+        )
+    return {
+        "schema": "freqtrade-cn.local-docker-image-history.redacted.v1",
+        "collection": collection_record(argv, result),
+        "immutable_image_id": image_id,
+        "rows": rows,
+        "redaction_policy": (
+            "ENV values and sensitive-looking build commands are replaced; raw command bytes "
+            "remain bound only by byte count and SHA-256"
+        ),
+    }
+
+
+def _probe_script(source: str) -> str:
+    return textwrap.dedent(source).strip() + "\n"
+
+
+PROBE_SCRIPTS = {
+    "packages": _probe_script(
+        r'''
+        import hashlib
+        import importlib.metadata
+        import json
+        import platform
+        import re
+        from pathlib import Path
+
+        distributions = []
+        for dist in importlib.metadata.distributions():
+            name = dist.metadata.get("Name")
+            if name and dist.version:
+                distributions.append({"name": name, "version": dist.version})
+        distributions.sort(key=lambda item: (item["name"].casefold(), item["name"], item["version"]))
+        source = Path("/freqtrade/freqtrade/__init__.py").read_text(encoding="utf-8")
+        match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', source, re.MULTILINE)
+        if match is None:
+            raise SystemExit("freqtrade module version missing")
+        payload = {
+            "distributions": distributions,
+            "freqtrade_module_version": match.group(1),
+            "python": {"implementation": platform.python_implementation(), "version": platform.python_version()},
+            "schema": "freqtrade-cn.package-probe.v1",
+        }
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        '''
+    ),
+    "backend_source": _probe_script(
+        r'''
+        import hashlib
+        import json
+        from pathlib import Path
+
+        root = Path("/freqtrade/freqtrade")
+        ui = root / "rpc" / "api_server" / "ui" / "installed"
+        files = []
+        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+            if path == ui or ui in path.parents:
+                continue
+            if path.is_symlink():
+                raise SystemExit(f"unexpected backend symlink: {path}")
+            if path.is_file():
+                data = path.read_bytes()
+                files.append({
+                    "bytes": len(data),
+                    "path": path.relative_to("/freqtrade").as_posix(),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                })
+        payload = {
+            "exclusion": "freqtrade/rpc/api_server/ui/installed/** (separate UI probe)",
+            "files": files,
+            "schema": "freqtrade-cn.backend-source-probe.v1",
+        }
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        '''
+    ),
+    "ui": _probe_script(
+        r'''
+        import hashlib
+        import json
+        from pathlib import Path
+
+        root = Path("/freqtrade/freqtrade/rpc/api_server/ui/installed")
+        marker_path = root / ".uiversion"
+        marker_bytes = marker_path.read_bytes()
+        files = []
+        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+            if path.is_symlink():
+                raise SystemExit(f"unexpected UI symlink: {path}")
+            if path.is_file():
+                data = path.read_bytes()
+                files.append({
+                    "bytes": len(data),
+                    "path": path.relative_to(root).as_posix(),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                })
+        payload = {
+            "files": files,
+            "marker": {
+                "bytes": len(marker_bytes),
+                "ends_with_lf": marker_bytes.endswith(b"\n"),
+                "path": "/freqtrade/freqtrade/rpc/api_server/ui/installed/.uiversion",
+                "sha256": hashlib.sha256(marker_bytes).hexdigest(),
+                "utf8": marker_bytes.decode("utf-8"),
+            },
+            "schema": "freqtrade-cn.ui-probe.v1",
+        }
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        '''
+    ),
+    "runtime": _probe_script(
+        r'''
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+
+        entrypoint = Path("/usr/local/bin/freqtrade-entrypoint")
+        data = entrypoint.read_bytes()
+        forbidden = [
+            "/freqtrade/user_data/config.json",
+            "/freqtrade/user_data/strategies",
+            "/freqtrade/user_data/data",
+            "/freqtrade/user_data/backtest_results",
+            "/research/config",
+            "/research/data",
+            "/research/results",
+            "/research/strategies",
+        ]
+        payload = {
+            "entrypoint": {
+                "bytes": len(data),
+                "path": entrypoint.as_posix(),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            },
+            "forbidden_payload_paths": {path: Path(path).exists() for path in forbidden},
+            "runtime": {"cwd": Path.cwd().as_posix(), "gid": os.getgid(), "uid": os.getuid()},
+            "schema": "freqtrade-cn.runtime-boundary-probe.v1",
+        }
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        '''
+    ),
+}
+
+
+def run_probe(name: str, image_id: str, source: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--entrypoint",
+        "python",
+        image_id,
+        "-c",
+        source,
+    ]
+    result = run_checked(argv)
+    if result.stderr:
+        raise EvidenceError(f"probe_emitted_stderr:{name}")
+    try:
+        payload = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceError(f"probe_invalid_json:{name}") from exc
+    if canonical_json_bytes(payload) != result.stdout:
+        raise EvidenceError(f"probe_noncanonical_stdout:{name}")
+    record = {
+        "argv": argv,
+        "exit_code": result.returncode,
+        "mounts": [],
+        "name": name,
+        "stderr": {
+            "bytes": 0,
+            "sanitized_utf8": "",
+            "sha256": sha256_bytes(b""),
+        },
+        "stdout": {
+            "bytes": len(result.stdout),
+            "canonical_json_one_lf": True,
+            "sanitized_payload": payload,
+            "sha256": sha256_bytes(result.stdout),
+        },
+    }
+    return payload, record
+
+
+def write_canonical(path: Path, value: Any) -> bytes:
+    payload = canonical_json_bytes(value)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+    return payload
+
+
+def validate_cli_values(args: argparse.Namespace) -> None:
+    for label in ("root", "backend", "frontend", "strategies"):
+        value = getattr(args, f"expected_{label}_head")
+        if not HEX_HEAD_PATTERN.fullmatch(value):
+            raise EvidenceError(f"expected_{label}_head_invalid")
+    if not IMAGE_ID_PATTERN.fullmatch(args.image_id):
+        raise EvidenceError("image_id_invalid")
+    if "@sha256:" in args.image_tag or args.image_tag.startswith("sha256:"):
+        raise EvidenceError("image_tag_must_be_local_tag")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Generate bounded immutable-image evidence")
+    parser.add_argument("--root-repo", required=True, type=Path)
+    parser.add_argument("--backend-repo", required=True, type=Path)
+    parser.add_argument("--frontend-repo", required=True, type=Path)
+    parser.add_argument("--strategies-repo", required=True, type=Path)
+    parser.add_argument("--expected-root-head", required=True)
+    parser.add_argument("--expected-backend-head", required=True)
+    parser.add_argument("--expected-frontend-head", required=True)
+    parser.add_argument("--expected-strategies-head", required=True)
+    parser.add_argument("--image-id", required=True)
+    parser.add_argument("--image-tag", required=True)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    return parser
+
+
+def generate(args: argparse.Namespace) -> dict[str, Any]:
+    validate_cli_values(args)
+    roots = {
+        "root": validate_absolute_directory(args.root_repo, "root_repo"),
+        "backend": validate_absolute_directory(args.backend_repo, "backend_repo"),
+        "frontend": validate_absolute_directory(args.frontend_repo, "frontend_repo"),
+        "strategies": validate_absolute_directory(args.strategies_repo, "strategies_repo"),
+    }
+    output_dir = validate_absolute_directory(args.output_dir, "output_dir")
+    expected_heads = {
+        "root": args.expected_root_head,
+        "backend": args.expected_backend_head,
+        "frontend": args.expected_frontend_head,
+        "strategies": args.expected_strategies_head,
+    }
+    repositories = {
+        name: inspect_repository(name, roots[name], expected_heads[name]) for name in roots
+    }
+    expected_links = {
+        "freqtrade": expected_heads["backend"],
+        "frequi": expected_heads["frontend"],
+        "freqtrade-strategies": expected_heads["strategies"],
+    }
+    observed_links = root_gitlinks(roots["root"])
+    validate_submodule_links(expected_links, observed_links)
+    repositories["backend"]["root_gitlink"] = observed_links["freqtrade"]
+    repositories["frontend"]["root_gitlink"] = observed_links["frequi"]
+    repositories["strategies"]["root_gitlink"] = observed_links["freqtrade-strategies"]
+    repositories["strategies"]["packaged_in_image"] = False
+
+    build_manifest, expected_backend_files, root_blobs = build_host_manifests(
+        roots, repositories, expected_heads["frontend"]
+    )
+    expected_labels = {
+        "org.freqtrade-cn.revision.backend": expected_heads["backend"],
+        "org.freqtrade-cn.revision.frontend": expected_heads["frontend"],
+        "org.freqtrade-cn.revision.root": expected_heads["root"],
+    }
+    id_inspect, id_collection = docker_inspect(args.image_id)
+    tag_inspect, tag_collection = docker_inspect(args.image_tag)
+    validate_image_state(
+        expected_id=args.image_id,
+        expected_tag=args.image_tag,
+        expected_labels=expected_labels,
+        id_inspect=id_inspect,
+        tag_inspect=tag_inspect,
+    )
+    inspect_artifact = redacted_inspect(
+        args.image_id,
+        args.image_tag,
+        id_inspect,
+        tag_inspect,
+        id_collection,
+        tag_collection,
+    )
+    history_artifact = docker_history(args.image_id)
+
+    probe_payloads: dict[str, dict[str, Any]] = {}
+    probe_records = []
+    for name in ("packages", "backend_source", "ui", "runtime"):
+        payload, record = run_probe(name, args.image_id, PROBE_SCRIPTS[name])
+        probe_payloads[name] = payload
+        probe_records.append(record)
+
+    observed_backend_files = probe_payloads["backend_source"].get("files")
+    if observed_backend_files != expected_backend_files:
+        raise EvidenceError("backend_source_manifest_drift")
+    backend_manifest = {
+        "schema": "freqtrade-cn.backend-source-manifest.v1",
+        "algorithm": "path/bytes/SHA-256; compact sorted-key JSON; path-sorted",
+        "backend_commit": expected_heads["backend"],
+        "files": expected_backend_files,
+        "required_paths": list(REQUIRED_BACKEND_PATHS),
+        "summary": manifest_summary(expected_backend_files),
+        "verified_equal": {
+            "expected_git_head_files": True,
+            "observed_immutable_image_files": True,
+        },
+        "ui_exclusion": "freqtrade/rpc/api_server/ui/installed/** is bound separately",
+    }
+
+    package_inventory = {
+        "schema": "freqtrade-cn.package-inventory.v1",
+        "immutable_image_id": args.image_id,
+        "distributions": probe_payloads["packages"]["distributions"],
+        "freqtrade_module_version": probe_payloads["packages"]["freqtrade_module_version"],
+        "python": probe_payloads["packages"]["python"],
+    }
+    expected_marker = f"local-frequi-{expected_heads['frontend']}"
+    marker = probe_payloads["ui"]["marker"]
+    if marker.get("utf8") != expected_marker:
+        raise EvidenceError("ui_marker_drift")
+    ui_files = probe_payloads["ui"]["files"]
+    ui_evidence = {
+        "schema": "freqtrade-cn.installed-ui-evidence.v1",
+        "frontend_commit": expected_heads["frontend"],
+        "immutable_image_id": args.image_id,
+        "files": ui_files,
+        "marker": marker,
+        "summary": manifest_summary(ui_files),
+    }
+
+    runtime_payload = probe_payloads["runtime"]
+    if runtime_payload["runtime"] != {"cwd": EXPECTED_WORKDIR, "gid": 1000, "uid": 1000}:
+        raise EvidenceError("runtime_uid_or_workdir_drift")
+    if any(runtime_payload["forbidden_payload_paths"].values()):
+        raise EvidenceError("unexpected_strategy_config_data_or_result_path")
+    source_entrypoint = root_blobs["docker/freqtrade_entrypoint.py"]
+    source_entrypoint_record = {
+        "bytes": len(source_entrypoint),
+        "path": "docker/freqtrade_entrypoint.py",
+        "sha256": sha256_bytes(source_entrypoint),
+    }
+    if runtime_payload["entrypoint"]["sha256"] != source_entrypoint_record["sha256"]:
+        raise EvidenceError("entrypoint_content_drift")
+    entrypoint_evidence = {
+        "schema": "freqtrade-cn.entrypoint-evidence.v1",
+        "expected_from_root_commit": source_entrypoint_record,
+        "observed_in_immutable_image": runtime_payload["entrypoint"],
+        "runtime": runtime_payload["runtime"],
+        "match": True,
+    }
+    probe_artifact = {
+        "schema": "freqtrade-cn.immutable-image-probe-records.v1",
+        "immutable_image_id": args.image_id,
+        "isolation_contract": {
+            "capabilities_dropped": "ALL",
+            "container_filesystem_read_only": True,
+            "mounts": [],
+            "network": "none",
+            "pull_policy": "never",
+            "service_started": False,
+        },
+        "records": probe_records,
+    }
+
+    values = {
+        "backend-source-manifest.json": backend_manifest,
+        "build-input-manifest.json": build_manifest,
+        "docker-image-history.redacted.json": history_artifact,
+        "docker-image-inspect.redacted.json": inspect_artifact,
+        "entrypoint-evidence.json": entrypoint_evidence,
+        "package-inventory.json": package_inventory,
+        "probe-records.json": probe_artifact,
+        "ui-evidence.json": ui_evidence,
+    }
+    artifact_records: dict[str, dict[str, Any]] = {}
+    for name in GENERATED_ARTIFACTS:
+        payload = write_canonical(output_dir / name, values[name])
+        artifact_records[name] = {"bytes": len(payload), "sha256": sha256_bytes(payload)}
+
+    generator_path = Path(__file__).resolve()
+    test_path = output_dir / "test_image_identity.py"
+    descriptor = {
+        "schema": IDENTITY_SCHEMA,
+        "artifacts": artifact_records,
+        "canonicalization": "UTF-8 ASCII-safe compact sorted-key JSON with exactly one LF",
+        "generator": {
+            "arguments": {
+                "absolute_repository_roots_required": True,
+                "expected_heads": expected_heads,
+                "image_id": args.image_id,
+                "image_tag": args.image_tag,
+                "output_directory_required_absolute": True,
+                "repository_root_values_recorded": False,
+            },
+            "file": {"name": generator_path.name, **file_record(generator_path)},
+            "tests": {"name": test_path.name, **file_record(test_path)},
+        },
+        "image": {
+            "architecture": EXPECTED_ARCHITECTURE,
+            "engine_observation": inspect_artifact["identity_classification"],
+            "immutable_id": args.image_id,
+            "local_tag_observation": args.image_tag,
+            "os": EXPECTED_OS,
+            "platform": f"{EXPECTED_OS}/{EXPECTED_ARCHITECTURE}",
+        },
+        "repositories": repositories,
+        "trust_boundary": {
+            "asserted": [
+                "four explicit repositories were clean at the exact expected heads",
+                "Root gitlinks matched the exact backend/frontend/strategies heads",
+                "the local tag resolved to the exact immutable Engine image record ID",
+                "local Engine platform/config/revision-label projections matched",
+                "network-none immutable-ID probes matched backend source, UI marker/files, packages, entrypoint, uid and workdir",
+            ],
+            "not_claimed": [
+                "registry availability or identity",
+                "registry-independent rebuild reproducibility for base images",
+                "rehash of raw OCI index, platform-manifest, or image-config objects",
+                "strategy execution or strategy packaging",
+                "market-data, exchange, Backtest, analysis, result, or performance identity",
+                "host Docker CLI binary identity or mutable PATH identity",
+            ],
+            "raw_oci_limitation": inspect_artifact["redactions"]["raw_content_limitation"],
+        },
+        "execution_boundary": {
+            "credentials_or_environment_dump_recorded": False,
+            "docker_network_none_for_every_probe": True,
+            "freqtrade_cli_or_service_invoked": False,
+            "market_data_read_or_produced": False,
+            "performance_output_produced": False,
+            "probe_mounts": [],
+            "strategy_config_data_or_result_mounted": False,
+            "strategy_imported_or_executed": False,
+            "strategy_repository_packaged": False,
+        },
+    }
+    identity_payload = write_canonical(output_dir / "identity.json.txt", descriptor)
+    return {
+        "artifacts": artifact_records,
+        "identity": {"bytes": len(identity_payload), "sha256": sha256_bytes(identity_payload)},
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        result = generate(args)
+    except EvidenceError as exc:
+        print(f"ERROR:{exc}", file=sys.stderr)
+        return 1
+    print(canonical_json_bytes(result).decode("ascii"), end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

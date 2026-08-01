@@ -104,8 +104,17 @@ not an active backlog.
   [VolatilitySystem Bounded True-Range Episode Development Screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md)
   is the active preregistered strategy research. It freezes one adaptive, integrated,
   B/C-only development hypothesis and the exact restart, episode, accounting, and failure
-  rules before any workload. No market data, Backtest, strategy edit, or result has been
-  opened under it. Its only prospective interval is
+  rules before performance. The exact four local OKX inputs passed a credential-free
+  admission scan, and the frozen real-strategy restart matrix covered all 8,760 development
+  targets, 43,800 fresh-strategy records, and 35,040 comparisons across eight shards with
+  zero mismatch. The commit containing this update seals the
+  [credential-free research receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md)
+  and its 1,509-byte canonical runtime receipt at SHA-256
+  `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`;
+  the [receipt report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md)
+  is the pre-performance evidence authority. These are input-integrity,
+  deterministic-mechanics, and reproducibility checks only: no Backtest, performance
+  metric, strategy edit, or result has been opened under this study. Its only prospective interval is
   `[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)`, with the immutable research receipt due
   before `2026-08-28T18:00:00Z`. A result can be only a development or prospective
   survivor, not a significance or profit claim; tracked strategy changes, Runtime, Paper,
@@ -283,7 +292,8 @@ not an active backlog.
 | Preceding strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
 | Latest strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Completed; candidate rejected before performance |
 | Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
-| Active strategy research | `plans/2026-08-01-volatility-bounded-true-range-episode-screen.md` | Preregistered; no workload or result yet |
+| Active strategy research | `plans/2026-08-01-volatility-bounded-true-range-episode-screen.md` | Preregistered; deterministic matrix and non-executable receipt sealed; no Backtest or result yet |
+| Active strategy-research receipt | `reports/2026-08-01-volatility-bounded-true-range-research-receipt.md` | Sealed pre-performance evidence; no candidate result |
 | Preceding completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Preceding acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
 | Preceding completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |

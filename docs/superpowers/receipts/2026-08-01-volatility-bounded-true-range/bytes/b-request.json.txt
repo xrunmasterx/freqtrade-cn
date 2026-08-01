@@ -1,0 +1,1 @@
+{"backtest_cache":"none","capture_data_snapshot":true,"capture_execution_context_evidence":true,"capture_strategy_evidence":true,"dry_run_wallet":1000,"enable_protections":false,"experiment_id":"volatility-bounded-tr-development-b","max_open_trades":1,"retain_data_snapshot":true,"stake_amount":100,"strategy":"VolatilitySystem","timeframe":"1h","timerange":"20240701-20250701"}

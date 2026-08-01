@@ -1,0 +1,955 @@
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+import controller
+
+
+IMAGE_ID = "sha256:" + "f" * 64
+VALID_STEM = (
+    "backtest-result-2026-08-01_12-00-00_000001-"
+    "0123456789abcdef0123456789abcdef"
+)
+VERDICTS = (
+    "INVALID",
+    "INSUFFICIENT",
+    "REJECTED",
+    "METRIC-SURVIVOR_PENDING_ANALYSES",
+)
+
+
+def runtime_security(image_id: str = IMAGE_ID) -> dict[str, object]:
+    role = {
+        "cap_drop": ["ALL"],
+        "image_id": image_id,
+        "no_new_privileges": True,
+        "published_ports": False,
+        "read_only_root": True,
+        "tmpfs": "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "user": "1000:1000",
+        "workdir": "/freqtrade",
+    }
+    return {
+        "bridge": {
+            "driver": "bridge",
+            "internal": False,
+            "network_isolation": False,
+            "residual_access": ["attempt-peer", "host-gateway", "lan", "outbound"],
+        },
+        "roles": {"B": copy.deepcopy(role), "C": copy.deepcopy(role)},
+    }
+
+
+def canonical(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+class FakeContract:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def load_canonical_json_bytes(self, raw: bytes) -> object:
+        self.calls.append("load")
+        value = json.loads(raw)
+        if canonical(value) != raw:
+            raise ValueError("not canonical")
+        return value
+
+    def validate_effective_config(self, value: object) -> None:
+        self.calls.append("config")
+        if value != {"config": "frozen"}:
+            raise ValueError("bad config")
+
+    def validate_b_request(self, value: object) -> None:
+        self.calls.append("b")
+        if value != {"retain_data_snapshot": True, "role": "B"}:
+            raise ValueError("bad B")
+
+    def validate_c_request_template(self, value: object) -> None:
+        self.calls.append("c-template")
+        if value != {
+            "replay_data_snapshot": {"filename": "__B_RESULT_STEM__"},
+            "role": "C",
+        }:
+            raise ValueError("bad C template")
+
+    def validate_bound_c_request(self, value: object) -> None:
+        self.calls.append("c-bound")
+        if value != {
+            "replay_data_snapshot": {"filename": VALID_STEM},
+            "role": "C",
+        }:
+            raise ValueError("bad bound C")
+        if "retain_data_snapshot" in value:
+            raise ValueError("retain must be absent")
+
+    def validate_result_stem(self, value: object) -> str:
+        self.calls.append("stem")
+        c_stem = VALID_STEM[:-32] + "f" * 32
+        if value not in (VALID_STEM, c_stem):
+            raise ValueError("bad stem")
+        return str(value)
+
+    def bind_c_request(self, template: bytes, stem: str) -> bytes:
+        self.calls.append("bind")
+        self.validate_result_stem(stem)
+        value = self.load_canonical_json_bytes(template)
+        self.validate_c_request_template(value)
+        value = copy.deepcopy(value)
+        value["replay_data_snapshot"]["filename"] = stem
+        self.validate_bound_c_request(value)
+        return canonical(value)
+
+
+class FakeRunner:
+    def __init__(self, fixture: "Fixture") -> None:
+        self.fixture = fixture
+        self.calls: list[tuple[str, ...]] = []
+        self.cleanup_calls: list[tuple[str, ...]] = []
+        self.fail: dict[str, int] = {}
+        self.stdout: dict[str, bytes] = {}
+        self.stderr: dict[str, bytes] = {}
+        self.inspect_mutation = None
+        self.cleanup_failure = False
+        self.cleanup_exception = False
+        self.publish_before_ready = False
+        self.report_mutation = None
+
+    def run(self, argv: tuple[str, ...]) -> controller.CommandResult:
+        self.calls.append(argv)
+        label = self._label(argv)
+        if label == "network-create":
+            return self._result(label, b"network-id\n")
+        if label == "network-inspect":
+            return self._result(
+                label,
+                canonical(
+                    [
+                        {
+                            "Driver": "bridge",
+                            "EnableIPv6": False,
+                            "Internal": False,
+                            "Name": self.fixture.config.network_name,
+                        }
+                    ]
+                ),
+            )
+        if label.startswith("server-"):
+            return self._result(label, b"container-id\n")
+        if label.startswith("inspect-"):
+            role = label.rsplit("-", 1)[1]
+            value = self.fixture.inspect_value(role)
+            if self.inspect_mutation is not None:
+                self.inspect_mutation(value, role)
+            return self._result(label, canonical([value]))
+        if label.startswith("ready-"):
+            if self.publish_before_ready:
+                self.fixture.publish_role(label.rsplit("-", 1)[1])
+            return self._result(label)
+        if label.startswith("post-"):
+            role = label.rsplit("-", 1)[1]
+            if self.fail.get(label, 0) == 0:
+                self.fixture.publish_role(role)
+            return self._result(label)
+        if label == "validator":
+            if self.fail.get(label, 0) == 0:
+                self.fixture.publish_report(
+                    self.stdout.get(label, b"METRIC-SURVIVOR_PENDING_ANALYSES\n")
+                )
+            return self._result(
+                label,
+                self.stdout.get(label, b"METRIC-SURVIVOR_PENDING_ANALYSES\n"),
+                self.stderr.get(label, b""),
+            )
+        if label.startswith("cleanup-"):
+            self.cleanup_calls.append(argv)
+            if self.cleanup_exception:
+                raise OSError("cleanup unavailable")
+            if self.cleanup_failure:
+                return controller.CommandResult(1, b"", b"cleanup failed")
+            return controller.CommandResult(0, b"", b"")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    def _result(self, label: str, stdout: bytes = b"", stderr: bytes = b""):
+        return controller.CommandResult(
+            self.fail.get(label, 0),
+            self.stdout.get(label, stdout),
+            self.stderr.get(label, stderr),
+        )
+
+    @staticmethod
+    def _label(argv: tuple[str, ...]) -> str:
+        if argv[1:4] == ("network", "create", "--driver"):
+            return "network-create"
+        if argv[1:3] == ("network", "inspect"):
+            return "network-inspect"
+        if argv[1] == "run" and "--network" in argv:
+            if "none" in argv:
+                return "validator"
+            name = argv[argv.index("--name") + 1]
+            return f"server-{name.rsplit('-', 1)[-1].upper()}"
+        if argv[1] == "inspect":
+            return f"inspect-{argv[-1].rsplit('-', 1)[-1].upper()}"
+        if argv[1] == "exec":
+            role = argv[2].rsplit("-", 1)[-1].upper()
+            return f"ready-{role}" if "container-ready" in argv else f"post-{role}"
+        if argv[1:3] in (("rm", "-f"), ("network", "rm")):
+            return "cleanup-" + argv[1]
+        raise AssertionError(f"unclassified command: {argv}")
+
+
+class Fixture:
+    def __init__(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+        self.source_data = self.root / "source-data"
+        self.source_data.mkdir()
+        self.inputs = self.root / "inputs"
+        self.inputs.mkdir()
+        self.attempt_parent = self.root / "attempts"
+        self.attempt_parent.mkdir()
+        self.spent_lease = self.root / "experiment.spent"
+        self.contract = FakeContract()
+        self.files: dict[str, Path] = {}
+        self.data: dict[str, dict[str, object]] = {}
+        for key, relative, payload in (
+            ("futures", "futures/BTC_USDT_USDT-1h-futures.feather", b"futures"),
+            ("mark", "futures/BTC_USDT_USDT-1h-mark.feather", b"mark"),
+            ("funding", "futures/BTC_USDT_USDT-1h-funding_rate.feather", b"funding"),
+            ("leverage", "futures/leverage_tiers_USDT.json", b"leverage"),
+        ):
+            path = self.source_data / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            self.data[key] = {
+                "raw_sha256": sha256(payload),
+                "raw_size": len(payload),
+                "relative_path": relative,
+            }
+        admission = {
+            "command": "admit",
+            "inputs": self.data,
+            "summary_sha256": "a" * 64,
+        }
+        restart = {
+            "command": "verify-merge",
+            "complete": True,
+            "comparison_count": 35040,
+            "mismatch_count": 0,
+            "record_count": 43800,
+            "resolver_calls": 43800,
+            "shard_count": 8,
+            "summary_sha256": "b" * 64,
+            "global_identity": {"admission_sha256": "a" * 64},
+            "end_rehashes": {
+                "raw_funding": self.data["funding"]["raw_sha256"],
+                "raw_futures": self.data["futures"]["raw_sha256"],
+                "raw_leverage": self.data["leverage"]["raw_sha256"],
+                "raw_mark": self.data["mark"]["raw_sha256"],
+            },
+        }
+        image = {
+            "schema": "freqtrade-cn.execution-image-identity.v2",
+            "image": {"immutable_id": IMAGE_ID, "platform": "linux/amd64"},
+        }
+        values = {
+            "admission": canonical(admission),
+            "restart": canonical(restart),
+            "image_identity": canonical(image),
+            "contract": b"fake shared contract\n",
+            "config": canonical({"config": "frozen"}),
+            "b_request": canonical({"retain_data_snapshot": True, "role": "B"}),
+            "c_template": canonical(
+                {
+                    "replay_data_snapshot": {"filename": "__B_RESULT_STEM__"},
+                    "role": "C",
+                }
+            ),
+            "b_strategy": b"baseline\n",
+            "b_strategy_mirror": b"baseline\n",
+            "c_strategy": b"candidate\n",
+            "validator": b"validator\n",
+            "controller": Path(controller.__file__).read_bytes(),
+            "backend_source_manifest": b"backend source evidence\n",
+        }
+        for name, raw in values.items():
+            path = self.inputs / name
+            path.write_bytes(raw)
+            self.files[name] = path
+        receipt_files = {
+            name: {"bytes": len(path.read_bytes()), "sha256": sha256(path.read_bytes())}
+            for name, path in self.files.items()
+        }
+        receipt = {
+            "schema": "bounded-tr-performance-receipt-v1",
+            "image_id": IMAGE_ID,
+            "files": receipt_files,
+        }
+        receipt_path = self.inputs / "receipt.json"
+        receipt_path.write_bytes(canonical(receipt))
+        self.files["receipt"] = receipt_path
+        bindings = tuple(
+            controller.InputFile(
+                name=name,
+                path=path,
+                bytes=len(path.read_bytes()),
+                sha256=sha256(path.read_bytes()),
+            )
+            for name, path in self.files.items()
+            if name != "receipt"
+        )
+        self.config = controller.RunConfig(
+            attempt_id="attempt-001",
+            attempt_parent=self.attempt_parent,
+            spent_lease=self.spent_lease,
+            data_root=self.source_data,
+            docker="docker",
+            image_id=IMAGE_ID,
+            receipt=controller.InputFile(
+                "receipt",
+                receipt_path,
+                len(receipt_path.read_bytes()),
+                sha256(receipt_path.read_bytes()),
+            ),
+            expected_receipt_sha256=sha256(receipt_path.read_bytes()),
+            inputs=bindings,
+            network_name="bounded-tr-attempt-001",
+        )
+        self.runner = FakeRunner(self)
+        self.host = controller.HostController(
+            self.config,
+            runner=self.runner,
+            contract=self.contract,
+        )
+
+    def binding(self, name: str) -> controller.InputFile:
+        return next(item for item in self.config.inputs if item.name == name)
+
+    def inspect_value(self, role: str) -> dict[str, object]:
+        if role == "VALIDATOR":
+            plan = self.host.validator_plan
+            assert plan is not None
+            env = []
+            network_mode = "none"
+            networks = {}
+        else:
+            plan = self.host.role_plans[role]
+            env = [
+                "HOME=/research/state/home",
+                "FT_API_PASSWORD_FILE=/run/controller-secrets/api_password",
+                "FT_JWT_SECRET_FILE=/run/controller-secrets/jwt_secret_key",
+                "FT_WS_TOKEN_FILE=/run/controller-secrets/ws_token",
+            ]
+            network_mode = self.config.network_name
+            networks = {self.config.network_name: {}}
+        return {
+            "Config": {
+                "Env": env,
+                "Image": IMAGE_ID,
+                "User": "1000:1000",
+                "WorkingDir": "/freqtrade",
+            },
+            "HostConfig": {
+                "CapDrop": ["ALL"],
+                "NetworkMode": network_mode,
+                "PortBindings": {},
+                "ReadonlyRootfs": True,
+                "SecurityOpt": ["no-new-privileges:true"],
+                "Tmpfs": {"/tmp": "rw,noexec,nosuid,nodev,size=64m"},
+            },
+            "Mounts": [
+                {
+                    "Destination": mount.destination,
+                    "RW": not mount.read_only,
+                    "Type": "bind",
+                }
+                for mount in plan.mounts
+            ],
+            "NetworkSettings": {
+                "Networks": networks,
+                "Ports": {},
+            },
+        }
+
+    def publish_role(self, role: str) -> None:
+        root = self.host.role_paths[role].output
+        stem = VALID_STEM if role == "B" else VALID_STEM[:-32] + "f" * 32
+        (root / f"{stem}.zip").write_bytes(f"native-{role}-zip".encode())
+        (root / f"{stem}.meta.json").write_bytes(canonical({"role": role}))
+        (root / ".last_result.json").write_bytes(
+            canonical({"latest_backtest": f"{stem}.zip"})
+        )
+
+    def publish_report(self, stdout: bytes) -> None:
+        verdict = stdout.decode("ascii").strip() if stdout else "INVALID"
+        path = self.host.validator_output / "report.json"
+        value = {
+            "schema_version": 1,
+            "contract": "volatility-bounded-true-range-validator-report-v1",
+            "classification": verdict,
+            "reasons": [],
+            "audit": {"runtime_security": runtime_security(self.config.image_id)},
+        }
+        if self.runner.report_mutation is not None:
+            self.runner.report_mutation(value)
+        path.write_bytes(canonical(value))
+
+    def close(self) -> None:
+        if self.host._secrets is not None:
+            self.host._secrets.cleanup()
+            self.host._secrets = None
+        self.temporary.cleanup()
+
+
+class HostControllerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fx = Fixture()
+
+    def tearDown(self) -> None:
+        self.fx.close()
+
+    def test_preflight_stages_exact_b4_c1_without_walking_or_mounting_source_root(self):
+        self.fx.host.preflight()
+        b_files = sorted(
+            path.relative_to(self.fx.host.role_paths["B"].data).as_posix()
+            for path in self.fx.host.role_paths["B"].data.rglob("*")
+            if path.is_file()
+        )
+        c_files = sorted(
+            path.relative_to(self.fx.host.role_paths["C"].data).as_posix()
+            for path in self.fx.host.role_paths["C"].data.rglob("*")
+            if path.is_file()
+        )
+        self.assertEqual(
+            [
+                "futures/BTC_USDT_USDT-1h-funding_rate.feather",
+                "futures/BTC_USDT_USDT-1h-futures.feather",
+                "futures/BTC_USDT_USDT-1h-mark.feather",
+                "futures/leverage_tiers_USDT.json",
+            ],
+            b_files,
+        )
+        self.assertEqual(["futures/leverage_tiers_USDT.json"], c_files)
+        self.assertNotEqual(self.fx.source_data, self.fx.host.role_paths["B"].data)
+        self.assertNotEqual(self.fx.source_data, self.fx.host.role_paths["C"].data)
+        for name, expected in self.fx.data.items():
+            destination = self.fx.host.role_paths["B"].data / str(expected["relative_path"])
+            self.assertEqual(expected["raw_sha256"], sha256(destination.read_bytes()), name)
+
+    def test_preflight_is_create_once_and_second_run_refuses_spent_experiment(self):
+        self.fx.host.preflight()
+        with self.assertRaises(controller.ControllerError):
+            self.fx.host.preflight()
+        self.fx.spent_lease.write_bytes(b"already spent")
+        other = replace(
+            self.fx.config,
+            attempt_id="attempt-002",
+            network_name="bounded-tr-attempt-002",
+        )
+        with self.assertRaisesRegex(controller.ConsumedExperiment, "spent"):
+            controller.HostController(
+                other, runner=self.fx.runner, contract=self.fx.contract
+            ).preflight()
+
+    def test_external_receipt_hash_rejects_recomputed_tampered_binding(self):
+        value = json.loads(self.fx.files["receipt"].read_bytes())
+        value["schema"] = "attacker-recomputed-receipt"
+        tampered = canonical(value)
+        self.fx.files["receipt"].write_bytes(tampered)
+        changed = replace(
+            self.fx.config,
+            receipt=controller.InputFile(
+                "receipt",
+                self.fx.files["receipt"],
+                len(tampered),
+                sha256(tampered),
+            ),
+        )
+        with self.assertRaisesRegex(controller.ControllerError, "receipt authority"):
+            controller.HostController(
+                changed,
+                runner=self.fx.runner,
+                contract=self.fx.contract,
+            ).preflight()
+
+    def test_preflight_rejects_attacker_recomputed_alternate_controller(self):
+        alternate = b"# alternate host controller\n"
+        self.fx.files["controller"].write_bytes(alternate)
+        receipt = json.loads(self.fx.files["receipt"].read_bytes())
+        receipt["files"]["controller"] = {
+            "bytes": len(alternate),
+            "sha256": sha256(alternate),
+        }
+        receipt_raw = canonical(receipt)
+        self.fx.files["receipt"].write_bytes(receipt_raw)
+        bindings = tuple(
+            controller.InputFile(
+                item.name,
+                item.path,
+                len(item.path.read_bytes()),
+                sha256(item.path.read_bytes()),
+            )
+            for item in self.fx.config.inputs
+        )
+        changed = replace(
+            self.fx.config,
+            receipt=controller.InputFile(
+                "receipt",
+                self.fx.files["receipt"],
+                len(receipt_raw),
+                sha256(receipt_raw),
+            ),
+            expected_receipt_sha256=sha256(receipt_raw),
+            inputs=bindings,
+        )
+        with self.assertRaisesRegex(controller.ControllerError, "host controller"):
+            controller.HostController(
+                changed,
+                runner=self.fx.runner,
+                contract=self.fx.contract,
+            ).preflight()
+
+    def test_contract_is_shared_authority_and_c_omits_retain(self):
+        verdict = self.fx.host.run()
+        self.assertEqual("METRIC-SURVIVOR_PENDING_ANALYSES", verdict)
+        self.assertIn("config", self.fx.contract.calls)
+        self.assertIn("b", self.fx.contract.calls)
+        self.assertIn("bind", self.fx.contract.calls)
+        self.assertIn("c-bound", self.fx.contract.calls)
+        bound = json.loads(self.fx.host.bound_c_request.read_bytes())
+        self.assertNotIn("retain_data_snapshot", bound)
+        self.assertEqual(VALID_STEM, bound["replay_data_snapshot"]["filename"])
+
+    def test_real_shared_contract_import_and_binding_api(self):
+        contract_root = Path(__file__).resolve().parent.parent / "contract"
+        shared = controller.load_contract(contract_root / "contract.py")
+        config_raw = (contract_root / "effective-config.json").read_bytes()
+        b_raw = (contract_root / "b-request.json").read_bytes()
+        c_raw = (contract_root / "c-request-template.json").read_bytes()
+        shared.validate_effective_config(shared.load_canonical_json_bytes(config_raw))
+        shared.validate_b_request(shared.load_canonical_json_bytes(b_raw))
+        shared.validate_c_request_template(shared.load_canonical_json_bytes(c_raw))
+        bound = shared.bind_c_request(c_raw, VALID_STEM)
+        value = shared.load_canonical_json_bytes(bound)
+        shared.validate_bound_c_request(value)
+        self.assertNotIn("retain_data_snapshot", value)
+
+    def test_spent_lease_is_created_after_b_ready_and_immediately_before_first_post(self):
+        self.fx.host.run()
+        labels = [FakeRunner._label(call) for call in self.fx.runner.calls]
+        self.assertLess(labels.index("ready-B"), labels.index("post-B"))
+        self.assertTrue(self.fx.spent_lease.is_file())
+        lease = json.loads(self.fx.spent_lease.read_bytes())
+        self.assertEqual("attempt-001", lease["attempt_id"])
+        self.assertEqual("bounded-tr-experiment-spent-v1", lease["schema"])
+
+    def test_pre_spend_server_failure_leaves_lease_absent_but_post_failure_consumes(self):
+        self.fx.runner.fail["ready-B"] = 7
+        with self.assertRaises(controller.InfrastructureFailure):
+            self.fx.host.run()
+        self.assertFalse(self.fx.spent_lease.exists())
+
+        fx = Fixture()
+        try:
+            fx.runner.fail["post-B"] = 9
+            with self.assertRaises(controller.ConsumedExperiment):
+                fx.host.run()
+            self.assertTrue(fx.spent_lease.is_file())
+        finally:
+            fx.close()
+
+    def test_native_b_and_c_artifacts_are_sealed_without_mutation_or_ambiguity(self):
+        self.fx.host.preflight()
+        self.fx.host.create_network()
+        self.fx.host.run_role("B")
+        before = {
+            path.name: path.read_bytes()
+            for path in self.fx.host.role_paths["B"].output.iterdir()
+        }
+        self.fx.host.run_role("C")
+        after = {
+            path.name: path.read_bytes()
+            for path in self.fx.host.role_paths["B"].output.iterdir()
+        }
+        self.assertEqual(before, after)
+        self.assertEqual(3, len(self.fx.host.seals["B"].files))
+        self.assertEqual(3, len(self.fx.host.seals["C"].files))
+
+    def test_malformed_extra_and_pointer_outputs_fail_closed(self):
+        for mutation in ("extra", "legacy", "pointer"):
+            with self.subTest(mutation=mutation):
+                fx = Fixture()
+                try:
+                    original = fx.publish_role
+
+                    def publish(role: str) -> None:
+                        original(role)
+                        root = fx.host.role_paths[role].output
+                        if mutation == "extra":
+                            (root / "extra.json").write_bytes(b"{}\n")
+                        elif mutation == "legacy":
+                            for path in tuple(root.iterdir()):
+                                if path.suffix == ".zip":
+                                    old = path
+                                    old.rename(root / "backtest-result-legacy.zip")
+                                elif path.name.endswith(".meta.json"):
+                                    path.rename(root / "backtest-result-legacy.meta.json")
+                            (root / ".last_result.json").write_bytes(
+                                canonical({"latest_backtest": "backtest-result-legacy.zip"})
+                            )
+                        else:
+                            (root / ".last_result.json").write_bytes(
+                                canonical({"latest_backtest": "../escape.zip"})
+                            )
+
+                    fx.publish_role = publish
+                    with self.assertRaises(controller.ControllerError):
+                        fx.host.run()
+                finally:
+                    fx.close()
+
+    def test_role_argv_has_exact_bridge_security_entrypoint_and_mount_graph(self):
+        self.fx.host.preflight()
+        self.fx.host.create_network()
+        self.fx.host.run_role("B")
+        self.fx.host.run_role("C")
+        b_plan = self.fx.host.role_plans["B"]
+        c_plan = self.fx.host.role_plans["C"]
+        for plan in (b_plan, c_plan):
+            argv = plan.server_argv
+            self.assertEqual(self.fx.config.network_name, argv[argv.index("--network") + 1])
+            self.assertNotIn("none", argv)
+            self.assertNotIn("-p", argv)
+            self.assertNotIn("--publish", argv)
+            self.assertIn("--read-only", argv)
+            self.assertEqual("ALL", argv[argv.index("--cap-drop") + 1])
+            self.assertEqual("1000:1000", argv[argv.index("--user") + 1])
+            self.assertEqual("/freqtrade", argv[argv.index("--workdir") + 1])
+            entrypoint = argv.index("--entrypoint")
+            self.assertEqual("/usr/local/bin/python", argv[entrypoint + 1])
+            image_index = argv.index(IMAGE_ID)
+            self.assertEqual("/usr/local/bin/freqtrade-entrypoint", argv[image_index + 1])
+            destinations = {mount.destination: mount for mount in plan.mounts}
+            self.assertFalse(destinations["/research/state"].read_only)
+            self.assertTrue(destinations["/research/data/okx"].read_only)
+            self.assertTrue(destinations["/research/strategy/VolatilitySystem.py"].read_only)
+            self.assertNotIn(str(self.fx.source_data), " ".join(argv))
+        c_destinations = {mount.destination for mount in c_plan.mounts}
+        self.assertIn(
+            f"/research/state/backtest_results/{VALID_STEM}.zip", c_destinations
+        )
+        self.assertIn(
+            f"/research/state/backtest_results/{VALID_STEM}.meta.json", c_destinations
+        )
+
+    def test_inspect_drift_fails_closed_and_network_truth_is_not_isolation_claim(self):
+        def mutate(value: dict[str, object], role: str) -> None:
+            if role == "B":
+                value["HostConfig"]["ReadonlyRootfs"] = False
+
+        self.fx.runner.inspect_mutation = mutate
+        with self.assertRaisesRegex(controller.ProtocolFailure, "inspect"):
+            self.fx.host.run()
+        state = json.loads(
+            (self.fx.host.attempt_root / "run-state.json").read_bytes()
+        )
+        self.assertIs(state["network"]["isolation"], False)
+        self.assertIn("outbound", state["network"]["residual_access"])
+
+    def test_validator_has_one_manifest_network_none_and_only_allowlisted_verdicts(self):
+        for verdict in VERDICTS:
+            with self.subTest(verdict=verdict):
+                fx = Fixture()
+                try:
+                    fx.runner.stdout["validator"] = (verdict + "\n").encode("ascii")
+                    self.assertEqual(verdict, fx.host.run())
+                    calls = [
+                        call
+                        for call in fx.runner.calls
+                        if FakeRunner._label(call) == "validator"
+                    ]
+                    self.assertEqual(1, len(calls))
+                    argv = calls[0]
+                    self.assertEqual("none", argv[argv.index("--network") + 1])
+                    self.assertEqual("never", argv[argv.index("--pull") + 1])
+                    self.assertIn("--read-only", argv)
+                    self.assertEqual("ALL", argv[argv.index("--cap-drop") + 1])
+                    self.assertEqual(
+                        "no-new-privileges:true",
+                        argv[argv.index("--security-opt") + 1],
+                    )
+                    self.assertEqual("1000:1000", argv[argv.index("--user") + 1])
+                    self.assertEqual("/freqtrade", argv[argv.index("--workdir") + 1])
+                    self.assertEqual(
+                        controller.IMAGE_PYTHON,
+                        argv[argv.index("--entrypoint") + 1],
+                    )
+                    self.assertNotIn("-p", argv)
+                    self.assertNotIn("--publish", argv)
+                    self.assertEqual(1, argv.count("--manifest"))
+                    self.assertEqual(1, argv.count("--report"))
+                    self.assertFalse(
+                        any(token in " ".join(argv).lower() for token in (
+                            "lookahead_analysis",
+                            "recursive_analysis",
+                            "hyperopt",
+                        ))
+                    )
+                    self.assertEqual(
+                        1,
+                        len(list(fx.host.validator_input.glob("*.json"))),
+                    )
+                    self.assertEqual(
+                        1,
+                        len(list(fx.host.validator_output.glob("*.json"))),
+                    )
+                    self.assertIsNotNone(fx.host.validator_plan)
+                    self.assertEqual(
+                        ["/validation/output"],
+                        [
+                            mount.destination
+                            for mount in fx.host.validator_plan.mounts
+                            if not mount.read_only
+                        ],
+                    )
+                    manifest = json.loads(fx.host.validator_manifest.read_bytes())
+                    self.assertEqual(
+                        {
+                            "contract",
+                            "files",
+                            "runtime_security",
+                            "schema_version",
+                            "window",
+                        },
+                        set(manifest),
+                    )
+                    self.assertEqual(
+                        "volatility-bounded-true-range-validator-input-v1",
+                        manifest["contract"],
+                    )
+                    self.assertEqual(1, manifest["schema_version"])
+                    self.assertEqual("development", manifest["window"])
+                    self.assertEqual(
+                        runtime_security(fx.config.image_id),
+                        manifest["runtime_security"],
+                    )
+                    self.assertEqual(
+                        ["attempt-peer", "host-gateway", "lan", "outbound"],
+                        manifest["runtime_security"]["bridge"]["residual_access"],
+                    )
+                    self.assertEqual(
+                        [item["path"] for item in manifest["files"]],
+                        sorted(item["path"] for item in manifest["files"]),
+                    )
+                    self.assertEqual(
+                        {
+                            "b_result_zip", "b_metadata", "b_pointer", "b_request",
+                            "b_strategy_source", "c_result_zip", "c_metadata", "c_pointer",
+                            "c_request", "c_strategy_source", "effective_config",
+                            "research_receipt", "data_admission", "restart_receipt",
+                            "image_identity", "backend_source_manifest", "controller_source",
+                            "validator_source", "contract_source",
+                        },
+                        {item["kind"] for item in manifest["files"]},
+                    )
+                    self.assertTrue(
+                        all(set(item) == {"kind", "path", "bytes", "sha256"}
+                            for item in manifest["files"])
+                    )
+                    report = json.loads(
+                        (fx.host.validator_output / "report.json").read_bytes()
+                    )
+                    self.assertEqual(
+                        {
+                            "audit",
+                            "classification",
+                            "contract",
+                            "reasons",
+                            "schema_version",
+                        },
+                        set(report),
+                    )
+                    self.assertEqual(
+                        manifest["runtime_security"],
+                        report["audit"]["runtime_security"],
+                    )
+                finally:
+                    fx.close()
+
+    def test_validator_exit_stdout_stderr_and_report_matrix_fail_closed(self):
+        cases = (
+            (3, b"", b"", "nonzero"),
+            (0, b"UNKNOWN\n", b"", "stdout"),
+            (0, b"INVALID\nextra\n", b"", "stdout"),
+            (0, b"INVALID\n", b"warning", "stderr"),
+        )
+        for code, stdout, stderr, _ in cases:
+            with self.subTest(code=code, stdout=stdout, stderr=stderr):
+                fx = Fixture()
+                try:
+                    fx.runner.fail["validator"] = code
+                    fx.runner.stdout["validator"] = stdout
+                    fx.runner.stderr["validator"] = stderr
+                    with self.assertRaises(controller.ProtocolFailure):
+                        fx.host.run()
+                finally:
+                    fx.close()
+
+    def test_validator_report_contract_is_exact_and_bound_to_stdout_and_observation(self):
+        def remove_reasons(value: dict[str, object]) -> None:
+            value.pop("reasons")
+
+        def wrong_version(value: dict[str, object]) -> None:
+            value["schema_version"] = True
+
+        def wrong_contract(value: dict[str, object]) -> None:
+            value["contract"] = "wrong-report-contract"
+
+        def add_extra(value: dict[str, object]) -> None:
+            value["extra"] = False
+
+        def wrong_reasons_type(value: dict[str, object]) -> None:
+            value["reasons"] = "not-a-list"
+
+        def wrong_reason_item_type(value: dict[str, object]) -> None:
+            value["reasons"] = [1]
+
+        def wrong_audit_type(value: dict[str, object]) -> None:
+            value["audit"] = []
+
+        def verdict_mismatch(value: dict[str, object]) -> None:
+            value["classification"] = "INVALID"
+
+        def runtime_security_mismatch(value: dict[str, object]) -> None:
+            value["audit"]["runtime_security"]["bridge"]["internal"] = True
+
+        cases = {
+            "missing": remove_reasons,
+            "wrong-version": wrong_version,
+            "wrong-contract": wrong_contract,
+            "extra": add_extra,
+            "reasons-type": wrong_reasons_type,
+            "reason-item-type": wrong_reason_item_type,
+            "audit-type": wrong_audit_type,
+            "verdict-mismatch": verdict_mismatch,
+            "runtime-security-mismatch": runtime_security_mismatch,
+        }
+        for name, mutation in cases.items():
+            with self.subTest(name=name):
+                fx = Fixture()
+                try:
+                    fx.runner.report_mutation = mutation
+                    with self.assertRaises(controller.ProtocolFailure):
+                        fx.host.run()
+                finally:
+                    fx.close()
+
+    def test_cleanup_failures_preserve_primary_error_and_fail_controller_success(self):
+        self.fx.runner.cleanup_failure = True
+        with self.assertRaisesRegex(controller.InfrastructureFailure, "cleanup incomplete"):
+            self.fx.host.run()
+        self.assertTrue(self.fx.host.cleanup_failures)
+        report = self.fx.host.validator_output / "report.json"
+        self.assertTrue(report.is_file())
+        self.assertEqual(
+            "METRIC-SURVIVOR_PENDING_ANALYSES",
+            json.loads(report.read_bytes())["classification"],
+        )
+
+        fx = Fixture()
+        try:
+            fx.runner.cleanup_failure = True
+            fx.runner.fail["post-B"] = 9
+            with self.assertRaises(controller.ConsumedExperiment) as raised:
+                fx.host.run()
+            self.assertIn("B POST failed", str(raised.exception))
+            self.assertTrue(fx.host.cleanup_failures)
+        finally:
+            fx.close()
+
+        fx = Fixture()
+        try:
+            fx.runner.cleanup_exception = True
+            fx.runner.fail["post-B"] = 9
+            with self.assertRaisesRegex(controller.ConsumedExperiment, "B POST failed"):
+                fx.host.run()
+            self.assertTrue(fx.host.cleanup_failures)
+        finally:
+            fx.close()
+
+    def test_visible_output_before_failed_readiness_permanently_consumes(self):
+        self.fx.runner.publish_before_ready = True
+        self.fx.runner.fail["ready-B"] = 7
+        with self.assertRaises(controller.ConsumedExperiment):
+            self.fx.host.run()
+        self.assertTrue(self.fx.spent_lease.is_file())
+
+    def test_validator_inspect_drift_fails_closed(self):
+        def mutate(value: dict[str, object], role: str) -> None:
+            if role == "VALIDATOR":
+                value["HostConfig"]["NetworkMode"] = "bridge"
+
+        self.fx.runner.inspect_mutation = mutate
+        with self.assertRaisesRegex(controller.ProtocolFailure, "validator inspect"):
+            self.fx.host.run()
+
+    def test_bounded_reader_rejects_oversize_and_links(self):
+        ordinary = self.fx.root / "two-bytes"
+        ordinary.write_bytes(b"xx")
+        with self.assertRaisesRegex(controller.ControllerError, "ceiling"):
+            controller._read_path_bounded(ordinary, 1)
+        link = self.fx.root / "link"
+        try:
+            link.symlink_to(ordinary)
+        except OSError:
+            self.skipTest("symlink creation is unavailable")
+        with self.assertRaisesRegex(controller.ControllerError, "non-link"):
+            controller._read_path_bounded(link, 10)
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "non-link"):
+            controller._parse_input(f"linked={link}")
+
+    def test_manifest_and_run_state_contain_no_host_absolute_paths_or_secrets(self):
+        self.fx.host.run()
+        portable = [
+            self.fx.host.validator_manifest.read_bytes(),
+            (self.fx.host.attempt_root / "run-state.json").read_bytes(),
+        ]
+        for raw in portable:
+            self.assertNotIn(str(self.fx.root).encode(), raw)
+            self.assertNotIn(b"api_password_value", raw)
+            self.assertNotIn(b"environment", raw.lower())
+        state = json.loads(portable[1])
+        self.assertEqual(
+            self.fx.config.expected_receipt_sha256,
+            state["receipt_sha256"],
+        )
+        manifest = json.loads(portable[0])
+        security_raw = canonical(manifest["runtime_security"])
+        self.assertNotIn(str(self.fx.root).encode(), security_raw)
+        self.assertNotIn(self.fx.config.network_name.encode(), security_raw)
+        self.assertNotIn(b"password", security_raw.lower())
+        self.assertNotIn(b"environment", security_raw.lower())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

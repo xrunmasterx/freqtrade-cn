@@ -1,10 +1,18 @@
 # VolatilitySystem Bounded True-Range Episode Development Screen
 
-**Status:** Preregistered after independent statistical/product and implementation Gates
-both returned `P0=0, P1=0, P2=0`. No strategy workload has run. Deterministic source/test
-preparation and the one-shot development screen remain blocked until this plan and its
-README/STRATEGY routing are committed; development performance also requires the
-credential-free research receipt. Runtime, Paper, and Live remain prohibited.
+**Status:** Preregistered at Root `788d2256cc772f51e9442e3d3f25e4649aa5b4a9`
+after independent statistical/product and implementation Gates returned
+`P0=0, P1=0, P2=0`. The temporary candidate, deterministic tests, exact four-file data
+admission, and exhaustive eight-shard real-strategy restart matrix are frozen outside
+tracked paths. All 8,760 development targets, 43,800 records, and 35,040 comparisons
+passed with zero mismatch. No Backtest, performance metric, strategy edit, or result has
+been opened. The commit containing this update seals the
+[credential-free research receipt](../receipts/2026-08-01-volatility-bounded-true-range/README.md),
+its independently re-Gated one-shot controller/validator, and canonical runtime receipt
+SHA-256 `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`.
+Development performance remains blocked until this package is committed and the worktree
+and Git index are independently verified clean and byte-exact. Runtime, Paper, and Live
+remain prohibited.
 
 **Decision date:** 2026-08-01
 
@@ -234,11 +242,13 @@ primary prehistory, and must contain at least the 799-row suffix through the fir
 target, beginning `2024-05-28T18:00:00Z`. Missing either route makes the study
 `INVALID`; the larger audit route does not enlarge the scored interval.
 
-B captures the admitted canonical rows once and C replays those exact rows. Required
-DataSnapshot, Execution Context, scored endpoints, and admission routes must match;
-Strategy Evidence must be valid and different. Existing accepted Backtest identity,
-redaction, retained-row replay, comparison, and chart-source contracts remain authoritative
-and are referenced rather than redesigned here.
+B captures and retains the admitted canonical rows once. C replays those exact B rows
+through the accepted replay binding, but C's request omits `retain_data_snapshot`; the
+screen must not create a second retained-row copy. Required DataSnapshot, Execution
+Context, scored endpoints, and admission routes must match; Strategy Evidence must be
+valid and different. Existing accepted Backtest identity, redaction, retained-row replay,
+comparison, and chart-source contracts remain authoritative and are referenced rather
+than redesigned here.
 
 Freqtrade's timerange trim may retain a row whose timestamp equals the requested stop.
 That exact-end row is an unscored execution sentinel only: it cannot complete a new
@@ -283,12 +293,12 @@ BotRelease. If it is not committed before `2026-08-28T18:00:00Z`, the window los
 fresh-validation claim and cannot be used.
 
 If and only if C becomes `DEVELOPMENT-SURVIVOR`, then after `2027-10-01T00:00:00Z` run
-one atomic B-then-C spend using the receipt's exact sources and tests. B captures the
-admitted Futures, mark, and funding rows once; C replays those exact rows. Apply every
-development validity, restart-parity, sufficiency, mechanism, performance, risk,
-force-exit, Lookahead, and Recursive rule in this document without alteration. Required
-DataSnapshot, Execution Context, endpoints, and admission routes match; valid Strategy
-Evidence differs.
+one atomic B-then-C spend using the receipt's exact sources and tests. B captures and
+retains the admitted Futures, mark, and funding rows once; C replays those exact rows but
+again omits `retain_data_snapshot`. Apply every development validity, restart-parity,
+sufficiency, mechanism, performance, risk, force-exit, Lookahead, and Recursive rule in
+this document without alteration. Required DataSnapshot, Execution Context, endpoints,
+and admission routes match; valid Strategy Evidence differs.
 
 Before interpreting any prospective metric, execute the frozen every-target,
 every-deduplicated-suffix real-strategy restart matrix on the prospective scored rows
@@ -343,6 +353,14 @@ After that commit, perform these stages in order:
    `freqtrade-strategies/user_data/strategies/futures/VolatilitySystem.py`. Commit the
    non-executable research receipt required by the prospective protocol before any
    performance output and before the prospective restart-audit deadline.
+
+The [sealed receipt report](../reports/2026-08-01-volatility-bounded-true-range-research-receipt.md)
+records the completed admission and matrix facts, the independent controller/validator
+re-Gate, the exact 20 non-executable durable byte copies, the exact-13 runtime binding,
+and the evidence deliberately left outside Git. Its canonical runtime receipt is 1,509
+bytes with SHA-256
+`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`.
+This remains pre-performance evidence and does not classify C.
 
 Any parity miss rejects C immediately. Do not lengthen warmup, round a threshold, add a
 tolerance, or delay the pulse after seeing a witness. Compare exact booleans and validity
@@ -400,6 +418,36 @@ non-equivalence remains a Paper blocker.
 
 Run B, then C, once. A failed infrastructure attempt may be rerun only if it exposed no
 strategy output and all semantic and input hashes remain byte-identical.
+
+### Sealed execution boundary
+
+The host controller accepts the committed receipt's SHA-256 as an independent required
+argument and verifies it before parsing the receipt. It must not derive that authority
+from the supplied receipt itself. The canonical runtime receipt has exactly
+`schema`, `image_id`, and `files`; `files` binds the 13 named runtime inputs
+`admission`, `restart`, `image_identity`, `contract`, `config`, `b_request`,
+`c_template`, both baseline strategy mirrors, candidate strategy, validator,
+controller, and backend source manifest. It stages only the four admitted B inputs
+(primary Futures, mark, funding rate, and leverage tiers) and only leverage tiers for C;
+neither role may walk or mount the source data root.
+
+B and C use the same immutable image and one attempt-specific ordinary Docker bridge
+because the pinned exchange startup path still reloads public market metadata. They
+publish no ports, use a read-only root filesystem, drop all capabilities, set
+`no-new-privileges`, and receive only bounded read-only inputs plus isolated writable
+state/output mounts. This bridge is credential-free but is not network isolation: public
+responses can change, and outbound, LAN, and host-gateway reachability remain residual
+risks recorded by the report. The validator runs afterward in the same image with
+`--network none`.
+
+The first visible B output irreversibly spends the attempt before the first result POST.
+The controller seals the original ZIP, metadata JSON, and pointer bytes for both roles;
+it neither rewrites those artifacts nor creates an alternate archive layer. Exactly one
+portable, content-bound manifest inventories B/C artifacts and the frozen receipt,
+admission, restart, image, source, controller, validator, and shared-contract evidence.
+The validator consumes only that manifest and writes exactly one canonical report with
+one allowlisted classification. It does not launch Lookahead, Recursive, Hyperopt, Paper,
+Live, or any second strategy replay.
 
 Validity is evaluated before sample size or P&L. Required fields, rows, identities,
 orders, trades, fees, funding, counts, and arithmetic must reconcile. Any mismatch is
@@ -463,10 +511,15 @@ counters.
 
 For every successful entry, recompute stake as
 `amount * safe_price / leverage` and exclude fee-inclusive cost fields. The allowed
-absolute stake difference is the larger of `1e-8 USDT` and one admitted amount quantum
-times fill price divided by leverage. Each trade's order-derived successful-entry count
-must equal `nr_of_successful_entries`. Trade totals, side totals, profit, fees, and
-historical funding must also reconcile to the exported aggregates.
+absolute stake difference is `1e-8 USDT`. The standard minified export provides neither
+an amount quantum nor trade ID, entry/exit-success counts, amount precision, precision
+mode, or contract size; the validator must not invent or require those fields. Assign
+each trade its stable array ordinal and derive successful-entry/exit counts only from its
+nested filled orders. A B trade has one initial entry, optionally one later positive
+adjustment entry, and then one full exit. A C trade has exactly one entry and one full
+exit. Partial exits, extra entries, open orders, null fill timestamps, and any other
+sequence are `INVALID`. Trade totals, side totals, profit, fees, and historical funding
+must reconcile to the exported aggregates.
 
 The exported minified orders and trades are the accounting inputs. For each filled order
 `o`, let `q_o = amount`, `p_o = safe_price`, `d = +1` for a long trade and
@@ -489,16 +542,23 @@ side_derived_profit_abs = fsum(trade_derived_profit_abs for that side)
 ```
 
 `trades[*].funding_fees` is already signed: positive is a credit and negative is a
-charge. Recompute it through the pinned Freqtrade historical-funding path using the
-admitted mark and funding rows for the trade interval; current, zero, or synthetic
-fallback remains forbidden. Per-trade funding, `profit_abs`, role totals, side totals,
-trade counts, and successful-entry counts must match their derived values within an
-absolute `1e-8 USDT` or exact-integer tolerance as applicable. Report both
-`raw_trade_cashflow_abs` and `trade_derived_profit_abs`. The latter must use the pinned
-engine's exact per-trade `float(f'{raw_trade_cashflow_abs:.8f}')` rounding before every
-role, side, gross-profit, or gross-loss reduction; the raw value is decomposition evidence
-only. `profit_abs` already contains both order fees and funding, so aggregate it once and
-never add or subtract either component again.
+charge. Recompute it through the pinned `load_backtest_data_snapshot_replay`,
+`Exchange.combine_funding_and_mark(..., None)`, and
+`Exchange.calculate_funding_fees` path using the admitted mark and funding rows; current,
+zero, or synthetic fallback remains forbidden. For each filled entry in the trade's
+nested order sequence, open an inclusive interval at that entry timestamp, use the
+cumulative post-entry amount, and close the interval inclusively at the next filled entry
+timestamp or the final filled exit timestamp. Therefore an adjustment boundary is
+included once under the old amount and once under the new amount, matching the pinned
+engine's scheduling. Sum the interval values with `FtPrecise`; do not match orders across
+trades and do not create a funding sidecar or second replay. Per-trade funding,
+`profit_abs`, role totals, side totals, trade counts, and derived successful-entry counts
+must match within an absolute `1e-8 USDT` or exact-integer tolerance as applicable.
+Report both `raw_trade_cashflow_abs` and `trade_derived_profit_abs`. The latter must use
+the pinned engine's exact per-trade `float(f'{raw_trade_cashflow_abs:.8f}')` rounding
+before every role, side, gross-profit, or gross-loss reduction; the raw value is
+decomposition evidence only. `profit_abs` already contains both order fees and funding,
+so aggregate it once and never add or subtract either component again.
 
 The sole profit-factor Gate authority is derived from those reconciled trade profits:
 

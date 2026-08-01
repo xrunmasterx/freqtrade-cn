@@ -1,0 +1,1470 @@
+# ruff: noqa: E402
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import math
+import struct
+import subprocess
+import sys
+import zipfile
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+HERE = Path(__file__).resolve().parent
+CONTRACT_DIR = HERE.parent / "contract"
+BACKEND_ROOT = Path(
+    r"C:\Users\dezhengu\orca\workspaces\freqtrade-cn\phase1-complete-development\freqtrade"
+)
+for import_root in (str(CONTRACT_DIR), str(BACKEND_ROOT)):
+    if import_root not in sys.path:
+        sys.path.insert(0, import_root)
+
+import contract
+import validator
+from freqtrade.data.btanalysis import load_backtest_data_snapshot_replay
+from freqtrade.exchange import Exchange
+from freqtrade.util import FtPrecise
+from validator import (
+    CLASS_INSUFFICIENT,
+    CLASS_INVALID,
+    CLASS_PENDING,
+    CLASS_REJECTED,
+    GateFacts,
+    OhlcvRow,
+    WINDOWS,
+    _audit_trade,
+    _recompute_trade_funding,
+    classify_gate,
+    validate_manifest,
+)
+
+
+HOUR = 3_600_000
+THREE_HOURS = 3 * HOUR
+PAIR = "BTC/USDT:USDT"
+STRATEGY = "VolatilitySystem"
+ROW = struct.Struct(">qddddd")
+STEM_B = "backtest-result-2026-08-01_00-00-00_000001-" + "a" * 32
+STEM_C = "backtest-result-2026-08-01_00-00-01_000001-" + "b" * 32
+IMAGE_ID = "sha256:" + "f" * 64
+
+
+def _canon(value: object) -> bytes:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8") + b"\n"
+
+
+def _backend_canon(value: object) -> bytes:
+    return _canon(value)[:-1]
+
+
+def _runtime_security(image_id: str = IMAGE_ID) -> dict[str, object]:
+    role = {
+        "cap_drop": ["ALL"],
+        "image_id": image_id,
+        "no_new_privileges": True,
+        "published_ports": False,
+        "read_only_root": True,
+        "tmpfs": "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "user": "1000:1000",
+        "workdir": "/freqtrade",
+    }
+    return {
+        "bridge": {
+            "driver": "bridge",
+            "internal": False,
+            "network_isolation": False,
+            "residual_access": ["attempt-peer", "host-gateway", "lan", "outbound"],
+        },
+        "roles": {"B": copy.deepcopy(role), "C": copy.deepcopy(role)},
+    }
+
+
+def _primary_rows(event_count: int = 28) -> tuple[list[OhlcvRow], list[str]]:
+    window = WINDOWS["development"]
+    first_full = window.prefix_start_ms + HOUR
+    last_full = window.end_ms - THREE_HOURS
+    slots = list(range(first_full, last_full + 1, THREE_HOURS))
+    scored_slots = [slot for slot in slots if slot >= window.start_ms]
+    event_slots = [scored_slots[20 + index * 18] for index in range(event_count)]
+    sides = ["long", "short", "short"] + [
+        "long" if index % 2 else "short" for index in range(3, event_count)
+    ]
+    deltas: dict[int, float] = {window.start_ms - THREE_HOURS: 5.0}
+    for slot, side in zip(event_slots, sides, strict=True):
+        deltas[slot] = 5.0 if side == "long" else -5.0
+    deltas[event_slots[3] + THREE_HOURS] = 4.0 if sides[3] == "long" else -4.0
+    deltas[last_full] = 5.0
+
+    rows = [OhlcvRow(window.prefix_start_ms, 100.0, 100.25, 99.75, 100.0, 1.0)]
+    prior_close = 100.0
+    for slot in slots:
+        target = prior_close + deltas.get(slot, 0.0)
+        delta = (target - prior_close) / 3
+        value = prior_close
+        for offset in range(3):
+            next_value = value + delta
+            rows.append(
+                OhlcvRow(
+                    slot + offset * HOUR,
+                    value,
+                    max(value, next_value) + 0.25,
+                    min(value, next_value) - 0.25,
+                    next_value,
+                    1.0,
+                )
+            )
+            value = next_value
+        prior_close = target
+    rows.append(
+        OhlcvRow(
+            window.end_ms,
+            prior_close,
+            prior_close + 0.25,
+            prior_close - 0.25,
+            prior_close,
+            1.0,
+        )
+    )
+    return rows, sides
+
+
+def _series(venue: str, candle_type: str, rows: list[OhlcvRow]):
+    raw = b"".join(
+        ROW.pack(row.timestamp_ms, row.open, row.high, row.low, row.close, row.volume)
+        for row in rows
+    )
+    descriptor = {
+        "venue": venue,
+        "pair": PAIR,
+        "timeframe": "1h",
+        "candle_type": candle_type,
+        "columns": ["timestamp_ms", "open", "high", "low", "close", "volume"],
+        "row_count": len(rows),
+        "start_ms": rows[0].timestamp_ms if rows else None,
+        "end_ms": rows[-1].timestamp_ms if rows else None,
+    }
+    descriptor_bytes = _backend_canon(descriptor)
+    digest = hashlib.sha256(
+        b"freqtrade.logical-ohlcv-series.v1\0"
+        + len(descriptor_bytes).to_bytes(8, "big")
+        + descriptor_bytes
+        + raw
+    ).hexdigest()
+    return {**descriptor, "series_digest": f"data-series-{digest}"}, raw
+
+
+def _replay(primary_rows: list[OhlcvRow], *, funding_rate: float = 0.0):
+    window = WINDOWS["development"]
+    funding_times = list(range(window.prefix_start_ms, window.end_ms + HOUR, HOUR))
+    mark_rows = [OhlcvRow(ts, 100.0, 100.0, 100.0, 100.0, 0.0) for ts in funding_times]
+    funding_rows = [
+        OhlcvRow(ts, funding_rate, funding_rate, funding_rate, funding_rate, 0.0)
+        for ts in funding_times
+    ]
+    material = [
+        _series("okx", "futures", primary_rows),
+        _series("okx", "funding_rate", funding_rows),
+        _series("okx", "mark", mark_rows),
+    ]
+    series = sorted(
+        (item[0] for item in material),
+        key=lambda item: (
+            item["venue"],
+            item["pair"],
+            item["timeframe"],
+            item["candle_type"],
+            item["start_ms"],
+            item["end_ms"],
+            item["series_digest"],
+        ),
+    )
+    raw_by_digest = {item[0]["series_digest"]: item[1] for item in material}
+    snapshot_payload = {
+        "schema_version": 1,
+        "canonicalization": "freqtrade-logical-ohlcv-v1",
+        "hash_algorithm": "sha256",
+        "series_count": len(series),
+        "row_count": sum(item["row_count"] for item in series),
+        "series": series,
+    }
+    snapshot = {
+        "snapshot_id": "data-snapshot-"
+        + hashlib.sha256(
+            b"freqtrade.data-snapshot-manifest.v1\0" + _backend_canon(snapshot_payload)
+        ).hexdigest(),
+        **snapshot_payload,
+    }
+    digest_by_type = {item["candle_type"]: item["series_digest"] for item in series}
+    routes = [
+        {
+            "ordinal": ordinal,
+            "source_role": role,
+            "pair": PAIR,
+            "timeframe": "1h",
+            "candle_type": candle_type,
+            "series_digest": digest_by_type[candle_type],
+        }
+        for ordinal, (role, candle_type) in enumerate(
+            (("primary", "futures"), ("funding", "funding_rate"), ("mark", "mark"))
+        )
+    ]
+    replay_payload = {
+        "schema_version": 1,
+        "row_encoding": "freqtrade-logical-ohlcv-rows-v1",
+        "data_snapshot": snapshot,
+        "routes": routes,
+    }
+    replay_id = "replay-payload-" + hashlib.sha256(
+        b"freqtrade.data-snapshot-replay-manifest.v1\0" + _backend_canon(replay_payload)
+    ).hexdigest()
+    manifest = {**replay_payload, "replay_payload_id": replay_id}
+    binding = {
+        "schema_version": 1,
+        "snapshot_id": snapshot["snapshot_id"],
+        "row_encoding": replay_payload["row_encoding"],
+        "replay_payload_id": replay_id,
+    }
+    members = {
+        f"data_snapshot/series/{digest.removeprefix('data-series-')}.rows": raw
+        for digest, raw in raw_by_digest.items()
+    }
+    return manifest, binding, members
+
+
+def _order(
+    *,
+    amount: float,
+    price: float,
+    timestamp: int | None,
+    is_entry: bool,
+    side: str,
+    tag: str | None,
+) -> dict[str, object]:
+    return {
+        "amount": amount,
+        "safe_price": price,
+        "ft_order_side": side,
+        "order_filled_timestamp": timestamp,
+        "ft_is_entry": is_entry,
+        "ft_order_tag": tag,
+        "cost": amount * price,
+    }
+
+
+def _trade(
+    ordinal: int,
+    side: str,
+    open_timestamp: int,
+    close_timestamp: int,
+    requested_profit: float = 1.0,
+    exit_reason: str = "exit_signal",
+    *,
+    adjustment_timestamp: int | None = None,
+    funding_fees: float = 0.0,
+    entry_amount: float = 1.0,
+) -> dict[str, object]:
+    is_short = side == "short"
+    entry_side = "sell" if is_short else "buy"
+    exit_side = "buy" if is_short else "sell"
+    entries = [
+        _order(
+            amount=entry_amount,
+            price=100.0,
+            timestamp=open_timestamp,
+            is_entry=True,
+            side=entry_side,
+            tag="bounded-tr",
+        )
+    ]
+    if adjustment_timestamp is not None:
+        entries.append(
+            _order(
+                amount=0.5,
+                price=100.0,
+                timestamp=adjustment_timestamp,
+                is_entry=True,
+                side=entry_side,
+                tag="adjustment",
+            )
+        )
+    total_amount = sum(float(item["amount"]) for item in entries)
+    entry_cash = total_amount * 100.0
+    entry_fees = entry_cash * 0.0005
+    if is_short:
+        exit_price = (entry_cash - entry_fees + funding_fees - requested_profit) / (
+            total_amount * 1.0005
+        )
+    else:
+        exit_price = (requested_profit + entry_cash + entry_fees - funding_fees) / (
+            total_amount * 0.9995
+        )
+    exit_order = _order(
+        amount=total_amount,
+        price=exit_price,
+        timestamp=close_timestamp,
+        is_entry=False,
+        side=exit_side,
+        tag=exit_reason,
+    )
+    direction = -1.0 if is_short else 1.0
+    cashflows = [
+        direction * (-1.0 if item["ft_is_entry"] else 1.0)
+        * float(item["amount"])
+        * float(item["safe_price"])
+        for item in [*entries, exit_order]
+    ]
+    fees = [
+        abs(float(item["amount"]) * float(item["safe_price"])) * 0.0005
+        for item in [*entries, exit_order]
+    ]
+    profit = float(f"{math.fsum(cashflows) - math.fsum(fees) + funding_fees:.8f}")
+    open_value = entry_cash * (1 - 0.0005 if is_short else 1 + 0.0005)
+    ratio = float(f"{(profit / open_value) * 2.0:.8f}")
+    stake = entry_cash / 2.0
+    return {
+        "pair": PAIR,
+        "stake_amount": stake,
+        "max_stake_amount": stake,
+        "amount": total_amount,
+        "open_date": datetime.fromtimestamp(open_timestamp / 1000, tz=UTC).isoformat(),
+        "close_date": datetime.fromtimestamp(close_timestamp / 1000, tz=UTC).isoformat(),
+        "open_rate": 100.0,
+        "close_rate": exit_price,
+        "fee_open": 0.0005,
+        "fee_close": 0.0005,
+        "trade_duration": (close_timestamp - open_timestamp) // 60_000,
+        "profit_ratio": ratio,
+        "profit_abs": profit,
+        "exit_reason": exit_reason,
+        "initial_stop_loss_abs": 0.0,
+        "initial_stop_loss_ratio": -1.0,
+        "stop_loss_abs": 0.0,
+        "stop_loss_ratio": -1.0,
+        "min_rate": 99.0,
+        "max_rate": max(101.0, exit_price),
+        "is_open": False,
+        "enter_tag": f"episode-{ordinal}",
+        "leverage": 2.0,
+        "is_short": is_short,
+        "open_timestamp": open_timestamp,
+        "close_timestamp": close_timestamp,
+        "orders": [*entries, exit_order],
+        "funding_fees": funding_fees,
+    }
+
+
+def _drawdown(trades: list[dict[str, object]]) -> float:
+    cumulative = high = worst = relative = 0.0
+    for ordinal, trade in sorted(
+        enumerate(trades), key=lambda item: (item[1]["close_timestamp"], item[0])
+    ):
+        del ordinal
+        cumulative += float(trade["profit_abs"])
+        high = max(high, cumulative)
+        drawdown = cumulative - high
+        if drawdown < worst:
+            worst = drawdown
+            relative = -drawdown / (1000.0 + high)
+    return relative
+
+
+def _stats(trades: list[dict[str, object]]) -> dict[str, object]:
+    profits = [float(trade["profit_abs"]) for trade in trades]
+    total = math.fsum(profits)
+    long_total = math.fsum(
+        float(trade["profit_abs"]) for trade in trades if not trade["is_short"]
+    )
+    short_total = math.fsum(
+        float(trade["profit_abs"]) for trade in trades if trade["is_short"]
+    )
+    wins = [value for value in profits if value > 0]
+    losses = [value for value in profits if value < 0]
+    gross_profit = math.fsum(wins)
+    gross_loss = -math.fsum(losses)
+    profit_factor = gross_profit / gross_loss if gross_loss else 0.0
+    average_win = gross_profit / len(wins) if wins else 0.0
+    average_loss = gross_loss / len(losses) if losses else 0.0
+    expectancy = (len(wins) / len(profits)) * average_win - (
+        len(losses) / len(profits)
+    ) * average_loss
+    total_row = {
+        "key": "TOTAL",
+        "trades": len(trades),
+        "profit_total_abs": total,
+        "profit_total": total / 1000.0,
+        "profit_factor": profit_factor,
+    }
+    stats = {
+        "trades": trades,
+        "total_trades": len(trades),
+        "trade_count_long": sum(not trade["is_short"] for trade in trades),
+        "trade_count_short": sum(bool(trade["is_short"]) for trade in trades),
+        "starting_balance": 1000.0,
+        "stake_amount": 100.0,
+        "profit_total_abs": total,
+        "profit_total": total / 1000.0,
+        "profit_total_long_abs": long_total,
+        "profit_total_short_abs": short_total,
+        "profit_total_long": long_total / 1000.0,
+        "profit_total_short": short_total / 1000.0,
+        "expectancy": expectancy,
+        "profit_factor": profit_factor,
+        "max_drawdown_account": _drawdown(trades),
+        "results_per_pair": [total_row],
+        "timerange": WINDOWS["development"].timerange,
+        "timeframe": "1h",
+        "backtest_start_ts": WINDOWS["development"].start_ms,
+        "backtest_end_ts": WINDOWS["development"].end_ms,
+        **{name: 0 for name in validator.COUNTER_FIELDS},
+    }
+    return {
+        "strategy": {STRATEGY: stats},
+        "strategy_comparison": [
+            {**total_row, "key": STRATEGY, "max_drawdown_account": stats["max_drawdown_account"]}
+        ],
+    }
+
+
+def _strategy_material(role: str):
+    source = (
+        "class VolatilitySystem:\n"
+        f"    ROLE = {role!r}\n"
+        f"    stoploss = {-1.0 if role == 'B' else -0.1!r}\n"
+        f"    position_adjustment_enable = {role == 'B'!r}\n"
+    ).encode()
+    settings = {
+        "timeframe": "1h",
+        "startup_candle_count": 499,
+        "stake_amount": 100.0,
+        "stoploss": -1.0 if role == "B" else -0.1,
+        "position_adjustment_enable": role == "B",
+        "max_entry_position_adjustment": -1.0,
+    }
+    payload = {
+        "schema_version": 2,
+        "strategy": STRATEGY,
+        "parameter_scope": "resolved_freqtrade_strategy_parameters_v2",
+        "resolved_parameters": {"parameters": {}, "settings": settings},
+    }
+    payload_bytes = _backend_canon(payload)
+    evidence_base = {
+        "schema_version": 2,
+        "canonicalization": "freqtrade-backtest-strategy-evidence-v2",
+        "hash_algorithm": "sha256",
+        "strategy": STRATEGY,
+        "source_scope": "primary_strategy_module",
+        "parameter_scope": "resolved_freqtrade_strategy_parameters_v2",
+        "source_digest": "strategy-source-" + hashlib.sha256(source).hexdigest(),
+        "parameters_digest": "strategy-parameters-"
+        + hashlib.sha256(
+            b"freqtrade-backtest-strategy-parameters-v2\0" + payload_bytes
+        ).hexdigest(),
+    }
+    evidence = {
+        **evidence_base,
+        "evidence_id": "strategy-evidence-"
+        + hashlib.sha256(
+            b"freqtrade-backtest-strategy-evidence-id-v2\0"
+            + _backend_canon(evidence_base)
+        ).hexdigest(),
+    }
+    return source, payload, evidence
+
+
+def _execution_evidence() -> dict[str, object]:
+    base = {
+        "schema_version": 1,
+        "canonicalization": "freqtrade-backtest-execution-context-evidence-v1",
+        "hash_algorithm": "sha256",
+        "core_runtime_scope": "freqtrade_python_numeric_exchange_versions_v1",
+        "effective_config_scope": "standard_backtest_effective_config_v1",
+        "exchange_simulation_scope": "admitted_pair_exchange_simulation_v1",
+        "core_runtime_id": "core-runtime-" + "1" * 64,
+        "effective_config_id": "effective-config-" + "2" * 64,
+        "exchange_simulation_id": "exchange-simulation-" + "3" * 64,
+    }
+    return {
+        **base,
+        "evidence_id": "execution-context-evidence-"
+        + hashlib.sha256(
+            b"freqtrade-backtest-execution-context-evidence-id-v1\0"
+            + _backend_canon(base)
+        ).hexdigest(),
+    }
+
+
+def _revision(
+    role: str,
+    request: dict[str, object],
+    snapshot: dict[str, object],
+    replay_binding: dict[str, object],
+    strategy_evidence: dict[str, object],
+    execution_evidence: dict[str, object],
+) -> dict[str, object]:
+    request_snapshot = copy.deepcopy(request)
+    experiment_id = request_snapshot.pop("experiment_id")
+    payload = {
+        "schema_version": 2,
+        "experiment_id": experiment_id,
+        "engine": "freqtrade",
+        "engine_version": "2026.7-dev-382320523",
+        "strategy": STRATEGY,
+        "strategy_run_id": f"run-{role}",
+        "backtest_request": request_snapshot,
+        "strategy_evidence": strategy_evidence,
+        "execution_context_evidence": execution_evidence,
+        "data_snapshot_id": snapshot["snapshot_id"],
+        "data_snapshot": snapshot,
+        "identity_scope": "strategy_config_and_data_content",
+    }
+    if role == "B":
+        payload["data_snapshot_replay"] = replay_binding
+    return {
+        "revision_id": "experiment-revision-"
+        + hashlib.sha256(_backend_canon(payload)).hexdigest(),
+        **payload,
+    }
+
+
+def _write_zip(
+    path: Path,
+    role: str,
+    result: dict[str, object],
+    request: dict[str, object],
+    replay: tuple[dict, dict, dict[str, bytes]],
+    execution: dict[str, object],
+) -> tuple[Path, Path, bytes]:
+    stem = STEM_B if role == "B" else STEM_C
+    source, parameters, strategy_evidence = _strategy_material(role)
+    replay_manifest, binding, replay_members = replay
+    revision = _revision(
+        role,
+        request,
+        replay_manifest["data_snapshot"],
+        binding,
+        strategy_evidence,
+        execution,
+    )
+    metadata = {STRATEGY: {"run_id": f"run-{role}", "experiment_revision": revision}}
+    archive_config = copy.deepcopy(contract.EXPECTED_EFFECTIVE_CONFIG)
+    archive_config["timerange"] = WINDOWS["development"].timerange
+    archive_config["backtest_cache"] = "none"
+    archive_config["enable_protections"] = False
+    archive_config["api_server"]["jwt_secret_key"] = "***"
+    archive_config["api_server"]["password"] = "***"
+    archive_config["api_server"]["ws_token"] = "***"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(f"{stem}.json", json.dumps(result))
+        archive.writestr(f"{stem}_config.json", json.dumps(archive_config))
+        archive.writestr(f"{stem}_{STRATEGY}.py", source)
+        archive.writestr(f"{stem}_{STRATEGY}_evidence.json", _backend_canon(parameters))
+        if role == "B":
+            archive.writestr("data_snapshot/manifest.json", _backend_canon(replay_manifest))
+            for member, raw in sorted(replay_members.items()):
+                archive.writestr(member, raw, compress_type=zipfile.ZIP_STORED)
+    metadata_path = path.with_name(f"{stem}.meta.json")
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    return path, metadata_path, source
+
+
+def _trade_sets(primary_rows: list[OhlcvRow]):
+    states = validator.build_indicator_states(primary_rows)
+    window = WINDOWS["development"]
+    ledger = validator.derive_episode_ledger(states, window.start_ms, window.end_ms)
+    episodes = sorted(
+        (
+            episode
+            for episode in ledger.episodes
+            if episode.episode_id in set(ledger.scored_armed)
+            and episode.first_completion_ms + HOUR < window.end_ms
+        ),
+        key=lambda item: item.first_completion_ms,
+    )
+    baseline = [
+        _trade(
+            index,
+            episode.side,
+            episode.first_completion_ms + HOUR,
+            episode.first_completion_ms + 2 * HOUR,
+            -5.0 if index == 0 else 0.5,
+        )
+        for index, episode in enumerate(episodes[:24])
+    ]
+    candidate = []
+    for index, episode in enumerate(episodes[:24]):
+        stop = index < 6
+        candidate.append(
+            _trade(
+                100 + index,
+                episode.side,
+                episode.first_completion_ms + HOUR,
+                episode.first_completion_ms + 2 * HOUR,
+                -0.3 if stop else 1.2,
+                "stop_loss" if stop else "exit_signal",
+            )
+        )
+    return baseline, candidate
+
+
+def _json_file(path: Path, value: object) -> Path:
+    path.write_bytes(_canon(value))
+    return path
+
+
+def _minimal_receipts(tmp_path: Path, b_source: bytes, c_source: bytes) -> dict[str, Path]:
+    backend_head = "3823205239281af56c34f4ff07f1674edddbe6db"
+    data_hashes = {name: hashlib.sha256(name.encode()).hexdigest() for name in ("futures", "mark", "funding", "leverage")}
+    paths = {
+        "futures": "futures/BTC_USDT_USDT-1h-futures.feather",
+        "mark": "futures/BTC_USDT_USDT-1h-mark.feather",
+        "funding": "futures/BTC_USDT_USDT-1h-funding_rate.feather",
+        "leverage": "futures/leverage_tiers_USDT.json",
+    }
+    admission = {
+        "command": "admit",
+        "summary_sha256": "5" * 64,
+        "inputs": {
+            name: {
+                "relative_path": paths[name],
+                "raw_size": index + 1,
+                "raw_sha256": data_hashes[name],
+            }
+            for index, name in enumerate(("futures", "mark", "funding", "leverage"))
+        },
+    }
+    restart = {
+        "command": "verify-merge",
+        "complete": True,
+        "mismatch_count": 0,
+        "comparison_count": 35040,
+        "record_count": 43800,
+        "resolver_calls": 43800,
+        "shard_count": 8,
+        "global_identity": {"admission_sha256": admission["summary_sha256"]},
+        "end_rehashes": {
+            f"raw_{name}": data_hashes[name]
+            for name in ("futures", "mark", "funding", "leverage")
+        },
+    }
+    backend = {
+        "schema": "freqtrade-cn.backend-source-manifest.v1",
+        "backend_commit": backend_head,
+        "files": [],
+        "verified_equal": {
+            "expected_git_head_files": True,
+            "observed_immutable_image_files": True,
+        },
+    }
+    backend_path = _json_file(tmp_path / "backend.json", backend)
+    image = {
+        "schema": "freqtrade-cn.execution-image-identity.v2",
+        "repositories": {"backend": {"commit": backend_head}},
+        "image": {"immutable_id": IMAGE_ID, "platform": "linux/amd64"},
+        "artifacts": {
+            "backend-source-manifest.json": {
+                "bytes": len(backend_path.read_bytes()),
+                "sha256": hashlib.sha256(backend_path.read_bytes()).hexdigest(),
+            }
+        },
+    }
+    return {
+        "data_admission": _json_file(tmp_path / "admission.json", admission),
+        "restart_receipt": _json_file(tmp_path / "restart.json", restart),
+        "image_identity": _json_file(tmp_path / "image.json", image),
+        "backend_source_manifest": backend_path,
+    }
+
+
+def _manifest(tmp_path: Path, *, funding_rate: float = 0.0):
+    primary, _ = _primary_rows()
+    replay = _replay(primary, funding_rate=funding_rate)
+    baseline_trades, candidate_trades = _trade_sets(primary)
+    execution = _execution_evidence()
+    b_request = copy.deepcopy(contract.EXPECTED_B_REQUEST)
+    c_request = copy.deepcopy(contract.EXPECTED_C_REQUEST_TEMPLATE)
+    c_request["replay_data_snapshot"]["filename"] = STEM_B
+    b_zip, b_meta, b_source = _write_zip(
+        tmp_path / f"{STEM_B}.zip", "B", _stats(baseline_trades), b_request, replay, execution
+    )
+    c_zip, c_meta, c_source = _write_zip(
+        tmp_path / f"{STEM_C}.zip", "C", _stats(candidate_trades), c_request, replay, execution
+    )
+    b_source_path = tmp_path / "B.py"
+    c_source_path = tmp_path / "C.py"
+    b_source_path.write_bytes(b_source)
+    c_source_path.write_bytes(c_source)
+    b_request_path = _json_file(tmp_path / "B.request.json", b_request)
+    c_request_path = _json_file(tmp_path / "C.request.json", c_request)
+    b_pointer = _json_file(tmp_path / "B.last-result.json", {"latest_backtest": f"{STEM_B}.zip"})
+    c_pointer = _json_file(tmp_path / "C.last-result.json", {"latest_backtest": f"{STEM_C}.zip"})
+    config_path = tmp_path / "effective-config.json"
+    config_path.write_bytes((CONTRACT_DIR / "effective-config.json").read_bytes())
+    receipts = _minimal_receipts(tmp_path, b_source, c_source)
+    controller_source = tmp_path / "controller.py"
+    controller_source.write_bytes(b"# synthetic pinned controller\n")
+    files = {
+        "b_result_zip": b_zip,
+        "b_metadata": b_meta,
+        "b_pointer": b_pointer,
+        "b_request": b_request_path,
+        "b_strategy_source": b_source_path,
+        "c_result_zip": c_zip,
+        "c_metadata": c_meta,
+        "c_pointer": c_pointer,
+        "c_request": c_request_path,
+        "c_strategy_source": c_source_path,
+        "effective_config": config_path,
+        "controller_source": controller_source,
+        "validator_source": HERE / "validator.py",
+        "contract_source": CONTRACT_DIR / "contract.py",
+        **receipts,
+    }
+    receipt_sources = {
+        "admission": files["data_admission"],
+        "restart": files["restart_receipt"],
+        "image_identity": files["image_identity"],
+        "contract": files["contract_source"],
+        "config": files["effective_config"],
+        "b_request": files["b_request"],
+        "c_template": CONTRACT_DIR / "c-request-template.json",
+        "b_strategy": files["b_strategy_source"],
+        "b_strategy_mirror": files["b_strategy_source"],
+        "c_strategy": files["c_strategy_source"],
+        "validator": files["validator_source"],
+        "controller": files["controller_source"],
+        "backend_source_manifest": files["backend_source_manifest"],
+    }
+    receipt = {
+        "schema": "bounded-tr-performance-receipt-v1",
+        "image_id": IMAGE_ID,
+        "files": {
+            name: {
+                "bytes": len(source.read_bytes()),
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+            for name, source in receipt_sources.items()
+        },
+    }
+    files["research_receipt"] = _json_file(tmp_path / "receipt.json", receipt)
+    controller_order = (
+        "b_result_zip",
+        "b_metadata",
+        "b_pointer",
+        "b_request",
+        "b_strategy_source",
+        "c_result_zip",
+        "c_metadata",
+        "c_pointer",
+        "c_request",
+        "c_strategy_source",
+        "effective_config",
+        "research_receipt",
+        "data_admission",
+        "restart_receipt",
+        "image_identity",
+        "backend_source_manifest",
+        "controller_source",
+        "validator_source",
+        "contract_source",
+    )
+    mounted = {}
+    for index, kind in enumerate(controller_order):
+        mounted_path = tmp_path / f"{index:02d}-{kind}"
+        mounted_path.write_bytes(files[kind].read_bytes())
+        mounted[kind] = mounted_path
+    files = mounted
+    records = []
+    for kind, path in sorted(files.items(), key=lambda item: str(item[1].resolve())):
+        raw = path.read_bytes()
+        records.append(
+            {
+                "kind": kind,
+                "path": str(path.resolve()),
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    value = {
+        "schema_version": 1,
+        "contract": "volatility-bounded-true-range-validator-input-v1",
+        "window": "development",
+        "runtime_security": _runtime_security(),
+        "files": records,
+    }
+    path = tmp_path / "54-input.json"
+    path.write_bytes(_canon(value))
+    return path, value, files
+
+
+def _rewrite_manifest(path: Path, value: dict[str, object]) -> None:
+    path.write_bytes(_canon(value))
+
+
+def _rehash_record(value: dict[str, object], kind: str, path: Path) -> None:
+    raw = path.read_bytes()
+    record = next(item for item in value["files"] if item["kind"] == kind)
+    record["bytes"] = len(raw)
+    record["sha256"] = hashlib.sha256(raw).hexdigest()
+
+
+def _rewrite_zip(path: Path, mutate) -> None:
+    with zipfile.ZipFile(path) as source:
+        members = [(item.filename, source.read(item), item.compress_type) for item in source.infolist()]
+    members = mutate(members)
+    with zipfile.ZipFile(path, "w") as target:
+        for name, raw, compression in members:
+            target.writestr(name, raw, compress_type=compression)
+
+
+def test_classification_precedence_and_pending_name() -> None:
+    assert classify_gate(GateFacts.passing()).classification == CLASS_PENDING
+    invalid = replace(GateFacts.passing(), b_closed_trades=0)
+    assert classify_gate(invalid, invalid_reasons=("arithmetic",)).classification == CLASS_INVALID
+    insufficient = replace(GateFacts.passing(), b_closed_trades=19, c_profit_total=-1)
+    assert classify_gate(insufficient).classification == CLASS_INSUFFICIENT
+    rejected = replace(GateFacts.passing(), c_profit_total=0)
+    assert classify_gate(rejected).classification == CLASS_REJECTED
+    below_half = replace(
+        GateFacts.passing(),
+        c_max_initial_stake=40.0,
+        c_all_initial_stakes_half=False,
+    )
+    assert classify_gate(below_half).classification == CLASS_REJECTED
+    assert classify_gate(below_half).reasons == ("initial stake",)
+
+
+def test_standard_schema_omits_invented_fields_and_accepts_b_one_or_two_entries() -> None:
+    window = WINDOWS["development"]
+    combined = pd.DataFrame(
+        {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+    )
+    for adjustment in (None, window.start_ms + 2 * HOUR):
+        trade = _trade(
+            0,
+            "long",
+            window.start_ms + HOUR,
+            window.start_ms + 3 * HOUR,
+            adjustment_timestamp=adjustment,
+        )
+        assert {
+            "trade_id",
+            "nr_of_successful_entries",
+            "nr_of_successful_exits",
+            "amount_precision",
+            "precision_mode",
+            "contract_size",
+            "strategy",
+        }.isdisjoint(trade)
+        audited = _audit_trade(
+            trade,
+            role="B",
+            trade_ordinal=7,
+            window=window,
+            funding_rates=combined,
+        )
+        assert audited.trade_ordinal == 7
+        assert audited.successful_entry_count == (2 if adjustment else 1)
+
+
+def test_b_initial_stake_may_be_full_proposed_stake() -> None:
+    window = WINDOWS["development"]
+    trade = _trade(0, "long", window.start_ms + HOUR, window.start_ms + 3 * HOUR)
+    for order in trade["orders"]:
+        order["amount"] = 2.0
+        order["cost"] = float(order["safe_price"]) * 2.0
+    trade["amount"] = 2.0
+    trade["stake_amount"] = 100.0
+    trade["max_stake_amount"] = 100.0
+    trade["profit_abs"] = float(trade["profit_abs"]) * 2.0
+    audited = _audit_trade(
+        trade,
+        role="B",
+        trade_ordinal=0,
+        window=window,
+        funding_rates=pd.DataFrame(
+            {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+        ),
+    )
+    assert audited.initial_stake == 100.0
+
+
+def test_amount_reconciliation_uses_absolute_tolerance() -> None:
+    window = WINDOWS["development"]
+    trade = _trade(0, "long", window.start_ms + HOUR, window.start_ms + 3 * HOUR)
+    trade["amount"] = float(trade["amount"]) + 5e-9
+    _audit_trade(
+        trade,
+        role="C",
+        trade_ordinal=0,
+        window=window,
+        funding_rates=pd.DataFrame(
+            {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+        ),
+    )
+    trade["amount"] = float(trade["amount"]) + 1e-8
+    with pytest.raises(validator.InvalidArtifact):
+        _audit_trade(
+            trade,
+            role="C",
+            trade_ordinal=0,
+            window=window,
+            funding_rates=pd.DataFrame(
+                {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+            ),
+        )
+
+
+@pytest.mark.parametrize("role,entries", [("B", 3), ("C", 2)])
+def test_extra_entry_is_invalid(role: str, entries: int) -> None:
+    window = WINDOWS["development"]
+    trade = _trade(
+        0,
+        "long",
+        window.start_ms + HOUR,
+        window.start_ms + 4 * HOUR,
+        adjustment_timestamp=window.start_ms + 2 * HOUR,
+    )
+    if entries == 3:
+        trade["orders"].insert(2, copy.deepcopy(trade["orders"][1]))
+    with pytest.raises(validator.InvalidArtifact):
+        _audit_trade(
+            trade,
+            role=role,
+            trade_ordinal=0,
+            window=window,
+            funding_rates=pd.DataFrame(
+                {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+            ),
+        )
+
+
+@pytest.mark.parametrize("anomaly", ["partial_exit", "null_fill", "open_trade", "exit_then_entry"])
+def test_partial_exit_and_order_anomalies_are_invalid(anomaly: str) -> None:
+    window = WINDOWS["development"]
+    trade = _trade(0, "long", window.start_ms + HOUR, window.start_ms + 3 * HOUR)
+    if anomaly == "partial_exit":
+        trade["orders"][-1]["amount"] = 0.5
+    elif anomaly == "null_fill":
+        trade["orders"][-1]["order_filled_timestamp"] = None
+    elif anomaly == "open_trade":
+        trade["is_open"] = True
+    else:
+        trade["orders"] = [trade["orders"][-1], trade["orders"][0]]
+    with pytest.raises(validator.InvalidArtifact):
+        _audit_trade(
+            trade,
+            role="C",
+            trade_ordinal=0,
+            window=window,
+            funding_rates=pd.DataFrame(
+                {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+            ),
+        )
+
+
+def test_funding_intervals_are_inclusive_signed_and_use_pinned_helpers(monkeypatch) -> None:
+    t0 = WINDOWS["development"].start_ms + HOUR
+    t1 = t0 + HOUR
+    t2 = t1 + HOUR
+    funding = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [t0 - HOUR, t0, t1, t2, t2 + HOUR], unit="ms", utc=True
+            ),
+            "open": [0.5, 0.001, 0.001, 0.001, 0.5],
+            "high": [0.5, 0.001, 0.001, 0.001, 0.5],
+            "low": [0.5, 0.001, 0.001, 0.001, 0.5],
+            "close": [0.5, 0.001, 0.001, 0.001, 0.5],
+            "volume": [0.0, 0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    mark = funding.assign(open=100.0, high=100.0, low=100.0, close=100.0)
+    combined = Exchange.combine_funding_and_mark(funding, mark, None)
+    calls = []
+    original = Exchange.calculate_funding_fees
+
+    def tracked(self, frame, amount, is_short, open_date, close_date):
+        calls.append((amount, is_short, open_date, close_date))
+        return original(self, frame, amount, is_short, open_date, close_date)
+
+    monkeypatch.setattr(Exchange, "calculate_funding_fees", tracked)
+    long_trade = _trade(
+        0,
+        "long",
+        t0,
+        t2,
+        adjustment_timestamp=t1,
+        funding_fees=-0.5,
+    )
+    total, intervals = _recompute_trade_funding(long_trade, combined)
+    assert total == pytest.approx(-0.5)
+    assert [item["amount"] for item in intervals] == [1.0, 1.5]
+    assert [item["funding_fees"] for item in intervals] == pytest.approx([-0.2, -0.3])
+    assert len(calls) == 2
+    short = copy.deepcopy(long_trade)
+    short["is_short"] = True
+    short["orders"][0]["ft_order_side"] = "sell"
+    short["orders"][1]["ft_order_side"] = "sell"
+    short["orders"][2]["ft_order_side"] = "buy"
+    assert _recompute_trade_funding(short, combined)[0] == pytest.approx(0.5)
+
+
+def test_adjacent_intervals_and_same_timestamp_reversal_are_trade_local() -> None:
+    t0 = WINDOWS["development"].start_ms + HOUR
+    t1 = t0 + HOUR
+    t2 = t1 + HOUR
+    combined = pd.DataFrame(
+        {
+            "date": pd.to_datetime([t0, t1, t2], unit="ms", utc=True),
+            "open_mark": [100.0, 100.0, 100.0],
+            "open_fund": [0.001, 0.001, 0.001],
+        }
+    )
+    first = _trade(0, "long", t0, t1, funding_fees=-0.2)
+    second = _trade(1, "short", t1, t2, funding_fees=0.2)
+    assert _recompute_trade_funding(first, combined)[0] == pytest.approx(-0.2)
+    assert _recompute_trade_funding(second, combined)[0] == pytest.approx(0.2)
+
+
+def test_patched_equal_aggregate_does_not_hide_wrong_interval(monkeypatch) -> None:
+    t0 = WINDOWS["development"].start_ms + HOUR
+    t1 = t0 + HOUR
+    t2 = t1 + HOUR
+    combined = pd.DataFrame(
+        {
+            "date": pd.to_datetime([t0, t1, t2], unit="ms", utc=True),
+            "open_mark": [100.0, 100.0, 100.0],
+            "open_fund": [0.001, 0.001, 0.001],
+        }
+    )
+    expected = [(t0, t1, 1.0), (t1, t2, 1.5)]
+    seen = []
+
+    def assert_interval(_self, _df, amount, is_short, open_date, close_date):
+        assert is_short is False
+        actual = (int(open_date.timestamp() * 1000), int(close_date.timestamp() * 1000), amount)
+        seen.append(actual)
+        if actual != expected[len(seen) - 1]:
+            raise AssertionError("wrong causal interval")
+        return (-0.2, -0.3)[len(seen) - 1]
+
+    monkeypatch.setattr(Exchange, "calculate_funding_fees", assert_interval)
+    trade = _trade(0, "long", t0, t2, adjustment_timestamp=t1, funding_fees=-0.5)
+    total, intervals = _recompute_trade_funding(trade, combined)
+    assert total == -0.5
+    assert len(intervals) == 2
+
+
+@pytest.mark.parametrize("wrong", [True, 1.0, "1"])
+def test_execution_evidence_schema_tag_is_raw_int_only(wrong: object) -> None:
+    evidence = _execution_evidence()
+    evidence["schema_version"] = wrong
+    with pytest.raises(validator.InvalidArtifact, match="execution_evidence_version"):
+        validator._validate_execution_evidence(evidence)
+
+
+@pytest.mark.parametrize("wrong", [True, 2.0, "2"])
+def test_strategy_evidence_schema_tag_is_raw_int_only(wrong: object) -> None:
+    source, payload, evidence = _strategy_material("B")
+    evidence["schema_version"] = wrong
+    with pytest.raises(validator.InvalidArtifact, match="strategy_evidence_version"):
+        validator._validate_strategy_evidence(
+            evidence,
+            source=source,
+            parameter_payload=payload,
+            parameter_bytes=_backend_canon(payload),
+        )
+
+
+@pytest.mark.parametrize("wrong", [True, 2.0, "2"])
+def test_strategy_parameter_schema_tag_is_raw_int_only(wrong: object) -> None:
+    source, payload, evidence = _strategy_material("B")
+    payload["schema_version"] = wrong
+    payload_bytes = _backend_canon(payload)
+    evidence["parameters_digest"] = "strategy-parameters-" + hashlib.sha256(
+        b"freqtrade-backtest-strategy-parameters-v2\0" + payload_bytes
+    ).hexdigest()
+    evidence_identity = {key: value for key, value in evidence.items() if key != "evidence_id"}
+    evidence["evidence_id"] = "strategy-evidence-" + hashlib.sha256(
+        b"freqtrade-backtest-strategy-evidence-id-v2\0"
+        + _backend_canon(evidence_identity)
+    ).hexdigest()
+    with pytest.raises(validator.InvalidArtifact, match="strategy_parameter_payload_version"):
+        validator._validate_strategy_evidence(
+            evidence,
+            source=source,
+            parameter_payload=payload,
+            parameter_bytes=payload_bytes,
+        )
+
+
+def test_ftprecise_amount_sum_is_used(monkeypatch) -> None:
+    calls = 0
+    original = validator.FtPrecise
+
+    class Tracked(original):
+        def __init__(self, value, decimals=None):
+            nonlocal calls
+            calls += 1
+            super().__init__(value, decimals)
+
+    monkeypatch.setattr(validator, "FtPrecise", Tracked)
+    t0 = WINDOWS["development"].start_ms + HOUR
+    trade = _trade(0, "long", t0, t0 + 2 * HOUR, adjustment_timestamp=t0 + HOUR)
+    _recompute_trade_funding(
+        trade,
+        pd.DataFrame({"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}),
+    )
+    assert calls >= 2
+    assert float(FtPrecise("0.1") + FtPrecise("0.2")) == 0.3
+
+
+def test_c_stake_and_max_stake_reconcile_at_absolute_1e8() -> None:
+    t0 = WINDOWS["development"].start_ms + HOUR
+    trade = _trade(0, "long", t0, t0 + HOUR)
+    trade["stake_amount"] = 50.0 + 1.1e-8
+    with pytest.raises(validator.InvalidArtifact):
+        _audit_trade(
+            trade,
+            role="C",
+            trade_ordinal=0,
+            window=WINDOWS["development"],
+            funding_rates=pd.DataFrame(
+                {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+            ),
+        )
+
+
+def test_c_initial_stake_below_half_is_rejected_even_when_internally_reconciled() -> None:
+    t0 = WINDOWS["development"].start_ms + HOUR
+    trade = _trade(0, "long", t0, t0 + HOUR, entry_amount=0.8)
+    assert trade["stake_amount"] == 40.0
+    with pytest.raises(validator.InvalidArtifact, match="trade_initial_stake"):
+        _audit_trade(
+            trade,
+            role="C",
+            trade_ordinal=0,
+            window=WINDOWS["development"],
+            funding_rates=pd.DataFrame(
+                {"date": pd.to_datetime([], utc=True), "open_mark": [], "open_fund": []}
+            ),
+        )
+
+
+def test_valid_manifest_uses_b_retained_and_c_nonretained(tmp_path: Path) -> None:
+    manifest, _value, files = _manifest(tmp_path)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification in {CLASS_INSUFFICIENT, CLASS_REJECTED, CLASS_PENDING}
+    assert outcome.audit["runtime_security"] == _runtime_security()
+    with zipfile.ZipFile(files["c_result_zip"]) as archive:
+        assert not any(name.startswith("data_snapshot/") for name in archive.namelist())
+    c_metadata = json.loads(files["c_metadata"].read_bytes())
+    assert "data_snapshot_replay" not in c_metadata[STRATEGY]["experiment_revision"]
+    b_metadata = json.loads(files["b_metadata"].read_bytes())
+    binding = b_metadata[STRATEGY]["experiment_revision"]["data_snapshot_replay"]
+    replay = load_backtest_data_snapshot_replay(files["b_result_zip"], binding)
+    assert replay.binding == binding
+
+
+def test_c_request_is_exact_bound_contract_with_retain_omitted(tmp_path: Path, monkeypatch) -> None:
+    manifest, _value, files = _manifest(tmp_path)
+    calls = {"b": 0, "c": 0, "config": 0, "stem": 0}
+    monkeypatch.setattr(
+        validator.contract,
+        "validate_b_request",
+        lambda value: calls.__setitem__("b", calls["b"] + 1),
+    )
+    monkeypatch.setattr(
+        validator.contract,
+        "validate_bound_c_request",
+        lambda value: calls.__setitem__("c", calls["c"] + 1),
+    )
+    monkeypatch.setattr(
+        validator.contract,
+        "validate_effective_config",
+        lambda value: calls.__setitem__("config", calls["config"] + 1),
+    )
+    original_stem = validator.contract.validate_result_stem
+
+    def stem(value):
+        calls["stem"] += 1
+        return original_stem(value)
+
+    monkeypatch.setattr(validator.contract, "validate_result_stem", stem)
+    validate_manifest(manifest)
+    assert calls == {"b": 1, "c": 1, "config": 1, "stem": 2}
+    c_request = json.loads(files["c_request"].read_bytes())
+    assert "retain_data_snapshot" not in c_request
+
+
+def test_c_replay_leakage_is_invalid(tmp_path: Path) -> None:
+    manifest, value, files = _manifest(tmp_path)
+    c_zip = files["c_result_zip"]
+    _rewrite_zip(c_zip, lambda members: [*members, ("data_snapshot/leak.rows", b"x", 0)])
+    _rehash_record(value, "c_result_zip", c_zip)
+    _rewrite_manifest(manifest, value)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification == CLASS_INVALID
+    assert outcome.reasons == ("candidate_replay_member_forbidden",)
+
+
+@pytest.mark.parametrize("role", ["b", "c"])
+def test_pointer_must_canonically_bind_its_original_zip(role: str, tmp_path: Path) -> None:
+    manifest, value, files = _manifest(tmp_path)
+    pointer = files[f"{role}_pointer"]
+    pointer.write_bytes(_canon({"latest_backtest": f"{STEM_B}-wrong.zip"}))
+    _rehash_record(value, f"{role}_pointer", pointer)
+    _rewrite_manifest(manifest, value)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification == CLASS_INVALID
+    assert "result_stem" in outcome.reasons[0] or "pointer" in outcome.reasons[0]
+
+
+def test_research_receipt_must_bind_every_available_input(tmp_path: Path) -> None:
+    manifest, value, files = _manifest(tmp_path)
+    receipt_path = files["research_receipt"]
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt["files"]["b_strategy"]["sha256"] = "0" * 64
+    receipt_path.write_bytes(_canon(receipt))
+    _rehash_record(value, "research_receipt", receipt_path)
+    _rewrite_manifest(manifest, value)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification == CLASS_INVALID
+    assert outcome.reasons == ("research_receipt_binding_b_strategy",)
+    assert outcome.audit == {"runtime_security": _runtime_security()}
+
+
+def test_research_receipt_c_template_binding_is_reconstructed_without_file_kind(
+    tmp_path: Path,
+) -> None:
+    manifest, value, files = _manifest(tmp_path)
+    receipt_path = files["research_receipt"]
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt["files"]["c_template"]["sha256"] = "0" * 64
+    receipt_path.write_bytes(_canon(receipt))
+    _rehash_record(value, "research_receipt", receipt_path)
+    _rewrite_manifest(manifest, value)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification == CLASS_INVALID
+    assert outcome.reasons == ("research_receipt_binding_c_template",)
+    assert outcome.audit == {"runtime_security": _runtime_security()}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value["bridge"].update({"internal": True}),
+        lambda value: value["bridge"].update({"residual_access": ["outbound"]}),
+        lambda value: value["roles"]["B"].update({"image_id": "sha256:" + "0" * 64}),
+        lambda value: value["roles"]["C"].update({"host_path": "C:/secret"}),
+    ],
+)
+def test_runtime_security_manifest_mutation_fails_closed(tmp_path: Path, mutation) -> None:
+    manifest, value, _files = _manifest(tmp_path)
+    mutation(value["runtime_security"])
+    _rewrite_manifest(manifest, value)
+    assert validate_manifest(manifest).classification == CLASS_INVALID
+
+
+def test_runtime_security_shape_discloses_peer_risk_without_host_or_secret_data() -> None:
+    security = _runtime_security()
+    assert set(security) == {"bridge", "roles"}
+    assert security["bridge"] == {
+        "driver": "bridge",
+        "internal": False,
+        "network_isolation": False,
+        "residual_access": ["attempt-peer", "host-gateway", "lan", "outbound"],
+    }
+    assert set(security["roles"]) == {"B", "C"}
+    assert security["roles"]["B"] == security["roles"]["C"]
+    raw = _canon(security).lower()
+    assert b"host_path" not in raw
+    assert b"network_name" not in raw
+    assert b"password" not in raw
+    assert b"environment" not in raw
+
+
+def test_b_and_c_archived_configs_must_be_identical(tmp_path: Path) -> None:
+    manifest, value, files = _manifest(tmp_path)
+    c_zip = files["c_result_zip"]
+
+    def mutate(members):
+        changed = []
+        for name, raw, compression in members:
+            if name.endswith("_config.json"):
+                config = json.loads(raw)
+                config["unbound_extra"] = "different"
+                raw = json.dumps(config).encode()
+            changed.append((name, raw, compression))
+        return changed
+
+    _rewrite_zip(c_zip, mutate)
+    _rehash_record(value, "c_result_zip", c_zip)
+    _rewrite_manifest(manifest, value)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification == CLASS_INVALID
+    assert outcome.reasons == ("cross_config",)
+
+
+@pytest.mark.parametrize("kind", ["mark", "funding"])
+def test_missing_mark_or_funding_route_is_invalid(tmp_path: Path, kind: str) -> None:
+    manifest, value, files = _manifest(tmp_path)
+    b_zip = files["b_result_zip"]
+
+    def mutate(members):
+        result = []
+        for name, raw, compression in members:
+            if name == "data_snapshot/manifest.json":
+                payload = json.loads(raw)
+                payload["routes"] = [r for r in payload["routes"] if r["source_role"] != kind]
+                raw = _backend_canon(payload)
+            result.append((name, raw, compression))
+        return result
+
+    _rewrite_zip(b_zip, mutate)
+    _rehash_record(value, "b_result_zip", b_zip)
+    _rewrite_manifest(manifest, value)
+    assert validate_manifest(manifest).classification == CLASS_INVALID
+
+
+@pytest.mark.parametrize("fault", ["path", "hash", "bytes", "inventory", "order"])
+def test_manifest_path_hash_bytes_and_inventory_fail_closed(tmp_path: Path, fault: str) -> None:
+    manifest, value, _files = _manifest(tmp_path)
+    if fault == "path":
+        value["files"][0]["path"] = "relative.json"
+    elif fault == "hash":
+        value["files"][0]["sha256"] = "0" * 64
+    elif fault == "bytes":
+        value["files"][0]["bytes"] += 1
+    elif fault == "inventory":
+        value["files"].pop()
+    else:
+        value["files"][0], value["files"][1] = value["files"][1], value["files"][0]
+    _rewrite_manifest(manifest, value)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification == CLASS_INVALID
+    assert outcome.reasons[0].startswith("manifest_") or "file_" in outcome.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"exchange": {"key": "secret-value"}},
+        {"authorization": "Bearer abcdefghijklmnopqrstuvwxyz"},
+        {"uri": "https://user:password@example.invalid/path"},
+    ],
+)
+def test_credential_or_secret_input_is_invalid(tmp_path: Path, payload: object) -> None:
+    manifest, value, files = _manifest(tmp_path)
+    receipt = files["research_receipt"]
+    receipt.write_bytes(_canon(payload))
+    _rehash_record(value, "research_receipt", receipt)
+    _rewrite_manifest(manifest, value)
+    outcome = validate_manifest(manifest)
+    assert outcome.classification == CLASS_INVALID
+    assert "secret" in outcome.reasons[0] or "credential" in outcome.reasons[0]
+
+
+def test_canonical_report_stdout_and_exit_zero_for_semantic_classes(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    manifest, _value, _files = _manifest(tmp_path)
+    for classification in (CLASS_INVALID, CLASS_INSUFFICIENT, CLASS_REJECTED, CLASS_PENDING):
+        report = tmp_path / f"{classification}.json"
+        monkeypatch.setattr(
+            validator,
+            "validate_manifest",
+            lambda _path, value=classification: validator.ValidationOutcome(
+                value,
+                ("test",),
+                {"runtime_security": _runtime_security()},
+            ),
+        )
+        assert validator._main(["--manifest", str(manifest), "--report", str(report)]) == 0
+        assert capsys.readouterr().out == classification + "\n"
+        raw = report.read_bytes()
+        assert raw.endswith(b"\n") and not raw.endswith(b"\n\n") and b"\r" not in raw
+        assert raw == validator._canonical_json(json.loads(raw))
+        payload = json.loads(raw)
+        assert set(payload) == {
+            "schema_version",
+            "contract",
+            "classification",
+            "reasons",
+            "audit",
+        }
+        assert type(payload["schema_version"]) is int and payload["schema_version"] == 1
+        assert payload["contract"] == validator.REPORT_CONTRACT
+        assert payload["classification"] == classification
+        assert payload["reasons"] == ["test"]
+        assert payload["audit"] == {"runtime_security": _runtime_security()}
+
+
+def test_fatal_failure_is_nonzero_and_writes_no_report(tmp_path: Path, monkeypatch) -> None:
+    manifest, _value, _files = _manifest(tmp_path)
+    report = tmp_path / "fatal.json"
+
+    def fatal(_path):
+        raise RuntimeError("fatal worker failure")
+
+    monkeypatch.setattr(validator, "validate_manifest", fatal)
+    assert validator._main(["--manifest", str(manifest), "--report", str(report)]) != 0
+    assert not report.exists()
+
+
+def test_cli_process_prints_only_ascii_class_and_preserves_inputs(tmp_path: Path) -> None:
+    manifest, _value, files = _manifest(tmp_path)
+    before = {kind: path.read_bytes() for kind, path in files.items()}
+    report = tmp_path / "55-report.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(files["validator_source"]),
+            "--manifest",
+            str(manifest),
+            "--report",
+            str(report),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    assert completed.returncode == 0
+    assert completed.stderr == b""
+    assert completed.stdout in {
+        (CLASS_INVALID + "\n").encode(),
+        (CLASS_INSUFFICIENT + "\n").encode(),
+        (CLASS_REJECTED + "\n").encode(),
+        (CLASS_PENDING + "\n").encode(),
+    }
+    assert before == {kind: path.read_bytes() for kind, path in files.items()}
+    assert report.is_file()
+
+
+def test_no_automatic_analysis_or_obsolete_archive_layer_tokens() -> None:
+    source = (HERE / "validator.py").read_text(encoding="utf-8").lower()
+    forbidden = (
+        "lookahead_analysis",
+        "recursive_analysis",
+        "funding_ledger",
+        "funding_producer",
+        "mechanics_evidence",
+        "normalized_request",
+        "strategy_binding",
+        "replay_evidence",
+        "artifact_bundle",
+    )
+    assert all(token not in source for token in forbidden)

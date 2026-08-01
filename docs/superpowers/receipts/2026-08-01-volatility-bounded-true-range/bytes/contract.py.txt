@@ -1,0 +1,448 @@
+"""Canonical, stdlib-only contract for the single development B-then-C request pair."""
+
+from __future__ import annotations
+
+import ast
+import copy
+import hashlib
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+class ContractError(ValueError):
+    """The frozen contract or a proposed binding is invalid."""
+
+
+SECRET_FILE_SENTINEL = "__SET_VIA_SECRET_FILE__"
+B_RESULT_STEM_PLACEHOLDER = "__B_RESULT_STEM__"
+B_EXPERIMENT_ID = "volatility-bounded-tr-development-b"
+C_EXPERIMENT_ID = "volatility-bounded-tr-development-c"
+STRATEGY_NAME = "VolatilitySystem"
+RESULT_STEM_PREFIX = "backtest-result-"
+RESULT_STEM_TIMESTAMP_FORMAT = "%Y-%m-%d_%H-%M-%S_%f"
+RESULT_STEM_PATTERN = re.compile(
+    r"\Abacktest-result-(?P<timestamp>[0-9]{4}-[0-9]{2}-[0-9]{2}_"
+    r"[0-9]{2}-[0-9]{2}-[0-9]{2}_[0-9]{6})-[0-9a-f]{32}\Z"
+)
+
+
+EXPECTED_EFFECTIVE_CONFIG: dict[str, Any] = {
+    "amend_last_stake_amount": False,
+    "amount_reserve_percent": 0.05,
+    "api_server": {
+        "CORS_origins": [],
+        "enable_openapi": False,
+        "enabled": True,
+        "jwt_secret_key": SECRET_FILE_SENTINEL,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8080,
+        "password": SECRET_FILE_SENTINEL,
+        "username": "research",
+        "verbosity": "error",
+        "ws_token": SECRET_FILE_SENTINEL,
+    },
+    "cancel_open_orders_on_exit": False,
+    "dataformat_ohlcv": "feather",
+    "dataformat_trades": "feather",
+    "datadir": "/research/data/okx",
+    "dry_run": True,
+    "dry_run_wallet": 1000,
+    "enable_dynamic_pairlist": False,
+    "entry_pricing": {
+        "check_depth_of_market": {
+            "bids_to_ask_delta": 1,
+            "enabled": False,
+        },
+        "order_book_top": 1,
+        "price_last_balance": 0,
+        "price_side": "same",
+        "use_order_book": True,
+    },
+    "exchange": {
+        "ccxt_async_config": {},
+        "ccxt_config": {
+            "options": {
+                "defaultType": "swap",
+                "fetchMarkets": {"types": ["swap"]},
+            }
+        },
+        "key": "",
+        "name": "okx",
+        "pair_blacklist": [],
+        "pair_whitelist": ["BTC/USDT:USDT"],
+        "password": "",
+        "secret": "",
+    },
+    "exit_pricing": {
+        "order_book_top": 1,
+        "price_last_balance": 0,
+        "price_side": "same",
+        "use_order_book": True,
+    },
+    "export": "trades",
+    "exportdirectory": "/research/state/backtest_results",
+    "fee": 0.0005,
+    "force_entry_enable": False,
+    "last_stake_amount_min_ratio": 0.5,
+    "liquidation_buffer": 0.05,
+    "margin_mode": "isolated",
+    "max_open_trades": 1,
+    "order_time_in_force": {"entry": "GTC", "exit": "GTC"},
+    "order_types": {
+        "emergency_exit": "market",
+        "entry": "limit",
+        "exit": "limit",
+        "force_entry": "market",
+        "force_exit": "market",
+        "stoploss": "market",
+        "stoploss_on_exchange": False,
+    },
+    "pairlists": [{"method": "StaticPairList"}],
+    "position_stacking": False,
+    "stake_amount": 100,
+    "stake_currency": "USDT",
+    "strategy_path": "/research/strategy",
+    "timeframe": "1h",
+    "tradable_balance_ratio": 1,
+    "trading_mode": "futures",
+    "unfilledtimeout": {
+        "entry": 10,
+        "exit": 10,
+        "exit_timeout_count": 0,
+        "unit": "minutes",
+    },
+    "user_data_dir": "/research/state",
+}
+
+EXPECTED_B_REQUEST: dict[str, Any] = {
+    "backtest_cache": "none",
+    "capture_data_snapshot": True,
+    "capture_execution_context_evidence": True,
+    "capture_strategy_evidence": True,
+    "dry_run_wallet": 1000,
+    "enable_protections": False,
+    "experiment_id": B_EXPERIMENT_ID,
+    "max_open_trades": 1,
+    "retain_data_snapshot": True,
+    "stake_amount": 100,
+    "strategy": STRATEGY_NAME,
+    "timeframe": "1h",
+    "timerange": "20240701-20250701",
+}
+
+EXPECTED_C_REQUEST_TEMPLATE: dict[str, Any] = {
+    "backtest_cache": "none",
+    "capture_data_snapshot": True,
+    "capture_execution_context_evidence": True,
+    "capture_strategy_evidence": True,
+    "dry_run_wallet": 1000,
+    "enable_protections": False,
+    "experiment_id": C_EXPERIMENT_ID,
+    "max_open_trades": 1,
+    "replay_data_snapshot": {
+        "filename": B_RESULT_STEM_PLACEHOLDER,
+        "strategy": STRATEGY_NAME,
+    },
+    "stake_amount": 100,
+    "strategy": STRATEGY_NAME,
+    "timeframe": "1h",
+    "timerange": "20240701-20250701",
+}
+
+_BACKTEST_REQUEST_FIELDS = {
+    "backtest_cache",
+    "capture_data_snapshot",
+    "capture_execution_context_evidence",
+    "capture_strategy_evidence",
+    "dry_run_wallet",
+    "enable_protections",
+    "experiment_id",
+    "freqai",
+    "freqaimodel",
+    "max_open_trades",
+    "replay_data_snapshot",
+    "retain_data_snapshot",
+    "stake_amount",
+    "strategy",
+    "timeframe",
+    "timeframe_detail",
+    "timerange",
+}
+_REPLAY_SOURCE_FIELDS = {"filename", "strategy"}
+_FORBIDDEN_NORMALIZED_KEYS = {
+    "dburl",
+    "freqai",
+    "freqaimodel",
+    "futuresfundingrate",
+    "protections",
+    "telegram",
+}
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    """Return sorted, compact UTF-8 JSON with exactly one final LF."""
+
+    try:
+        text = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ContractError("json_value_not_canonicalizable") from exc
+    return (text + "\n").encode("utf-8")
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, nested in pairs:
+        if key in value:
+            raise ContractError("json_duplicate_key")
+        value[key] = nested
+    return value
+
+
+def _reject_nonfinite_constant(value: str) -> None:
+    raise ContractError(f"json_nonfinite_constant:{value}")
+
+
+def load_canonical_json_bytes(raw: bytes) -> object:
+    """Parse bytes only when they already use this contract's canonical representation."""
+
+    if type(raw) is not bytes:
+        raise ContractError("json_bytes_required")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise ContractError("json_utf8_bom_forbidden")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        value = json.loads(
+            text,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except ContractError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ContractError("json_parse_failed") from exc
+    if raw != canonical_json_bytes(value):
+        raise ContractError("json_bytes_not_canonical")
+    return value
+
+
+def sha256_size(raw: bytes) -> tuple[str, int]:
+    if type(raw) is not bytes:
+        raise ContractError("hash_bytes_required")
+    return hashlib.sha256(raw).hexdigest(), len(raw)
+
+
+def file_sha256_size(path: str | Path) -> tuple[str, int]:
+    candidate = Path(path)
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ContractError("hash_normal_file_required")
+    return sha256_size(candidate.read_bytes())
+
+
+def _same_json_type_and_value(actual: object, expected: object) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _same_json_type_and_value(actual[key], nested)
+            for key, nested in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _same_json_type_and_value(left, right)
+            for left, right in zip(actual, expected, strict=True)
+        )
+    return actual == expected
+
+
+def _require_exact(value: object, expected: object, label: str) -> None:
+    if not _same_json_type_and_value(value, expected):
+        raise ContractError(f"{label}_does_not_match_frozen_contract")
+
+
+def _scan_forbidden_keys(value: object) -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+            if normalized in _FORBIDDEN_NORMALIZED_KEYS or "proxy" in normalized:
+                raise ContractError(f"forbidden_key:{key}")
+            _scan_forbidden_keys(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _scan_forbidden_keys(nested)
+
+
+def validate_effective_config(value: object) -> None:
+    _scan_forbidden_keys(value)
+    _require_exact(value, EXPECTED_EFFECTIVE_CONFIG, "effective_config")
+
+
+def validate_b_request(value: object) -> None:
+    _scan_forbidden_keys(value)
+    _require_exact(value, EXPECTED_B_REQUEST, "b_request")
+
+
+def validate_c_request_template(value: object) -> None:
+    _scan_forbidden_keys(value)
+    _require_exact(value, EXPECTED_C_REQUEST_TEMPLATE, "c_request_template")
+
+
+def validate_result_stem(value: object) -> str:
+    if type(value) is not str:
+        raise ContractError("b_result_stem_string_required")
+    if "/" in value or "\\" in value or ".." in value:
+        raise ContractError("b_result_stem_path_forbidden")
+    match = RESULT_STEM_PATTERN.fullmatch(value)
+    if match is None:
+        raise ContractError("b_result_stem_grammar_mismatch")
+    timestamp = match.group("timestamp")
+    try:
+        parsed = datetime.strptime(timestamp, RESULT_STEM_TIMESTAMP_FORMAT)
+    except ValueError as exc:
+        raise ContractError("b_result_stem_timestamp_invalid") from exc
+    if parsed.strftime(RESULT_STEM_TIMESTAMP_FORMAT) != timestamp:
+        raise ContractError("b_result_stem_timestamp_not_canonical")
+    return value
+
+
+def validate_bound_c_request(value: object) -> None:
+    _scan_forbidden_keys(value)
+    if not isinstance(value, dict):
+        raise ContractError("bound_c_request_object_required")
+    replay = value.get("replay_data_snapshot")
+    if not isinstance(replay, dict):
+        raise ContractError("bound_c_replay_object_required")
+    stem = validate_result_stem(replay.get("filename"))
+    expected = copy.deepcopy(EXPECTED_C_REQUEST_TEMPLATE)
+    expected["replay_data_snapshot"]["filename"] = stem
+    _require_exact(value, expected, "bound_c_request")
+
+
+def bind_c_request(template_bytes: bytes, sealed_b_result_stem: str) -> bytes:
+    """Bind one caller-attested newly sealed B stem into the untouched C template."""
+
+    template = load_canonical_json_bytes(template_bytes)
+    placeholder_bytes = json.dumps(B_RESULT_STEM_PLACEHOLDER).encode("ascii")
+    if (
+        template_bytes.count(placeholder_bytes) != 1
+        or template_bytes.count(B_RESULT_STEM_PLACEHOLDER.encode("ascii")) != 1
+    ):
+        raise ContractError("b_result_stem_placeholder_count_mismatch")
+    validate_c_request_template(template)
+    stem = validate_result_stem(sealed_b_result_stem)
+    bound = copy.deepcopy(template)
+    bound["replay_data_snapshot"]["filename"] = stem
+    validate_bound_c_request(bound)
+    return canonical_json_bytes(bound)
+
+
+def _annotated_class_fields(tree: ast.Module, class_name: str) -> set[str]:
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    ]
+    if len(matches) != 1:
+        raise ContractError(f"source_class_count_mismatch:{class_name}")
+    fields = {
+        statement.target.id
+        for statement in matches[0].body
+        if isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+    }
+    return fields
+
+
+def _read_python_source(path: str | Path, label: str) -> str:
+    source_path = Path(path)
+    if source_path.is_symlink() or not source_path.is_file():
+        raise ContractError(f"source_normal_file_required:{label}")
+    raw = source_path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise ContractError(f"source_utf8_bom_forbidden:{label}")
+    try:
+        return raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ContractError(f"source_utf8_required:{label}") from exc
+
+
+def validate_source_compatibility(
+    api_schemas_path: str | Path,
+    api_backtest_path: str | Path,
+    bt_storage_path: str | Path,
+) -> None:
+    """Fail closed against request fields and the API-to-storage output-stem path."""
+
+    schema_source = _read_python_source(api_schemas_path, "api_schemas")
+    backtest_source = _read_python_source(api_backtest_path, "api_backtest")
+    storage_source = _read_python_source(bt_storage_path, "bt_storage")
+    try:
+        schema_tree = ast.parse(schema_source, filename=str(api_schemas_path))
+        ast.parse(backtest_source, filename=str(api_backtest_path))
+        ast.parse(storage_source, filename=str(bt_storage_path))
+    except SyntaxError as exc:
+        raise ContractError("source_python_parse_failed") from exc
+
+    if _annotated_class_fields(schema_tree, "BacktestRequest") != _BACKTEST_REQUEST_FIELDS:
+        raise ContractError("backtest_request_source_fields_changed")
+    if (
+        _annotated_class_fields(schema_tree, "BacktestDataSnapshotReplaySource")
+        != _REPLAY_SOURCE_FIELDS
+    ):
+        raise ContractError("replay_source_fields_changed")
+
+    required_fragments = (
+        'datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")',
+        'remove_exchange_credentials(btconfig["exchange"], True)',
+        'settings["backtest_cache"] = "none"',
+        'btconfig["export"] = "trades"',
+        'experiment_request["backtest_cache"] = "none"',
+        'experiment_request["capture_data_snapshot"] = True',
+        'replay_data_snapshot_request = settings.pop("replay_data_snapshot", None)',
+    )
+    for fragment in required_fragments:
+        if fragment not in backtest_source:
+            raise ContractError(f"api_backtest_source_contract_changed:{fragment}")
+
+    storage_required_fragments = (
+        "def _generate_filename(recordfilename: Path, appendix: str, suffix: str) -> Path:",
+        'filename = (recordfilename / f"backtest-result-{appendix}").with_suffix(suffix)',
+        "if data_snapshot_replay_payload is not None or context_bound_strategies:\n"
+        '        dtappendix = f"{dtappendix}-{uuid4().hex}"',
+    )
+    for fragment in storage_required_fragments:
+        if fragment not in storage_source:
+            raise ContractError(f"bt_storage_source_contract_changed:{fragment}")
+
+
+__all__ = [
+    "B_EXPERIMENT_ID",
+    "B_RESULT_STEM_PLACEHOLDER",
+    "C_EXPERIMENT_ID",
+    "ContractError",
+    "EXPECTED_B_REQUEST",
+    "EXPECTED_C_REQUEST_TEMPLATE",
+    "EXPECTED_EFFECTIVE_CONFIG",
+    "RESULT_STEM_PATTERN",
+    "SECRET_FILE_SENTINEL",
+    "STRATEGY_NAME",
+    "bind_c_request",
+    "canonical_json_bytes",
+    "file_sha256_size",
+    "load_canonical_json_bytes",
+    "sha256_size",
+    "validate_b_request",
+    "validate_bound_c_request",
+    "validate_c_request_template",
+    "validate_effective_config",
+    "validate_result_stem",
+    "validate_source_compatibility",
+]

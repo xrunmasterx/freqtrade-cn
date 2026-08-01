@@ -1,0 +1,2391 @@
+"""Fail-closed standard-archive validator for the bounded true-range B/C screen.
+
+The only input document is one controller-authored canonical manifest.  It binds the
+untouched standard B and C results and the exact preregistered provenance inputs by
+absolute path, byte count, and SHA-256.  B is the sole retained DataSnapshot authority;
+C proves its selection and snapshot identity through standard result metadata and never
+duplicates B's replay payload.
+
+Funding validation is deliberately narrow.  It reconstructs aggregate historical
+funding for the frozen one-hour study lifecycle from each trade's causal nested orders,
+using the pinned backend replay loader and Exchange helpers.  It does not claim an
+independent runtime attestation of callback phase.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+import re
+import stat
+import sys
+import zipfile
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Iterable, Mapping, Sequence
+
+from freqtrade.data.btanalysis import (
+    BT_DATA_COLUMNS,
+    load_backtest_data_snapshot_replay,
+)
+from freqtrade.exceptions import OperationalException
+from freqtrade.exchange import Exchange
+from freqtrade.util import FtPrecise
+
+
+def _load_shared_contract():
+    local = Path(__file__).resolve().parent.parent / "contract" / "contract.py"
+    mounted = tuple(
+        path
+        for path in Path(__file__).resolve().parent.glob("*-contract_source")
+        if path.is_file()
+    )
+    candidates = (local,) if local.is_file() else mounted
+    if len(candidates) != 1:
+        raise RuntimeError("shared contract source is unavailable or ambiguous")
+    loader = importlib.machinery.SourceFileLoader(
+        "bounded_tr_shared_contract", str(candidates[0])
+    )
+    specification = importlib.util.spec_from_loader(loader.name, loader)
+    if specification is None:
+        raise RuntimeError("cannot load shared contract source")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+contract = _load_shared_contract()
+
+
+HOUR_MS = 3_600_000
+THREE_HOURS_MS = 3 * HOUR_MS
+STRATEGY = "VolatilitySystem"
+PAIR = "BTC/USDT:USDT"
+STARTING_BALANCE = 1_000.0
+PROPOSED_STAKE = 100.0
+EXPECTED_INITIAL_STAKE = 50.0
+LEVERAGE = 2.0
+FEE_RATE = 0.0005
+ABS_TOLERANCE = 1e-8
+
+CLASS_INVALID = "INVALID"
+CLASS_INSUFFICIENT = "INSUFFICIENT"
+CLASS_REJECTED = "REJECTED"
+CLASS_PENDING = "METRIC-SURVIVOR_PENDING_ANALYSES"
+
+COUNTER_FIELDS = (
+    "timedout_entry_orders",
+    "canceled_trade_entries",
+    "canceled_entry_orders",
+    "replaced_entry_orders",
+    "timedout_exit_orders",
+    "rejected_signals",
+)
+
+MANIFEST_CONTRACT = "volatility-bounded-true-range-validator-input-v1"
+REPORT_CONTRACT = "volatility-bounded-true-range-validator-report-v1"
+FILE_KINDS = frozenset(
+    {
+        "b_result_zip",
+        "b_metadata",
+        "b_pointer",
+        "b_request",
+        "b_strategy_source",
+        "c_result_zip",
+        "c_metadata",
+        "c_pointer",
+        "c_request",
+        "c_strategy_source",
+        "effective_config",
+        "research_receipt",
+        "data_admission",
+        "restart_receipt",
+        "image_identity",
+        "backend_source_manifest",
+        "controller_source",
+        "validator_source",
+        "contract_source",
+    }
+)
+RECEIPT_INPUTS = frozenset(
+    {
+        "admission",
+        "restart",
+        "image_identity",
+        "contract",
+        "config",
+        "b_request",
+        "c_template",
+        "b_strategy",
+        "b_strategy_mirror",
+        "c_strategy",
+        "validator",
+        "controller",
+        "backend_source_manifest",
+    }
+)
+ADMITTED_DATA_FILES = {
+    "futures": "futures/BTC_USDT_USDT-1h-futures.feather",
+    "mark": "futures/BTC_USDT_USDT-1h-mark.feather",
+    "funding": "futures/BTC_USDT_USDT-1h-funding_rate.feather",
+    "leverage": "futures/leverage_tiers_USDT.json",
+}
+
+_HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
+_SHA256_ID = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
+_CORE_ID = re.compile(r"\Acore-runtime-[0-9a-f]{64}\Z")
+_EFFECTIVE_ID = re.compile(r"\Aeffective-config-[0-9a-f]{64}\Z")
+_EXCHANGE_ID = re.compile(r"\Aexchange-simulation-[0-9a-f]{64}\Z")
+_EVIDENCE_ID = re.compile(r"\Aexecution-context-evidence-[0-9a-f]{64}\Z")
+_STRATEGY_EVIDENCE_ID = re.compile(r"\Astrategy-evidence-[0-9a-f]{64}\Z")
+_STRATEGY_SOURCE_ID = re.compile(r"\Astrategy-source-[0-9a-f]{64}\Z")
+_STRATEGY_PARAMETERS_ID = re.compile(r"\Astrategy-parameters-[0-9a-f]{64}\Z")
+_STRATEGY_PARAMETERS_DOMAIN = b"freqtrade-backtest-strategy-parameters-v2\0"
+_STRATEGY_EVIDENCE_DOMAIN = b"freqtrade-backtest-strategy-evidence-id-v2\0"
+_EXECUTION_EVIDENCE_DOMAIN = b"freqtrade-backtest-execution-context-evidence-id-v1\0"
+
+_MAX_MANIFEST_BYTES = 1_000_000
+_MAX_JSON_BYTES = 32_000_000
+_MAX_SOURCE_BYTES = 2_000_000
+_MAX_ZIP_BYTES = 128_000_000
+_MAX_ZIP_MEMBER_BYTES = 64_000_000
+_MAX_ZIP_TOTAL_BYTES = 192_000_000
+_MAX_BOUND_INPUT_BYTES = 320_000_000
+
+_SECRET_VALUE_KEYS = frozenset(
+    {
+        "apikey",
+        "api_key",
+        "authorization",
+        "jwt_secret_key",
+        "key",
+        "password",
+        "passphrase",
+        "private_key",
+        "secret",
+        "token",
+        "ws_token",
+    }
+)
+_ALLOWED_REDACTED_VALUES = frozenset(
+    {"", "***", "__SET_VIA_SECRET_FILE__", "<redacted>", "REDACTED", "redacted"}
+)
+
+
+def _epoch_ms(value: str) -> int:
+    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+
+
+@dataclass(frozen=True)
+class WindowSpec:
+    name: str
+    timerange: str
+    start_ms: int
+    end_ms: int
+    prefix_start_ms: int
+
+
+WINDOWS = {
+    "development": WindowSpec(
+        "development",
+        "20240701-20250701",
+        _epoch_ms("2024-07-01T00:00:00Z"),
+        _epoch_ms("2025-07-01T00:00:00Z"),
+        _epoch_ms("2024-06-10T05:00:00Z"),
+    ),
+    "prospective": WindowSpec(
+        "prospective",
+        "20261001-20271001",
+        _epoch_ms("2026-10-01T00:00:00Z"),
+        _epoch_ms("2027-10-01T00:00:00Z"),
+        _epoch_ms("2026-09-10T05:00:00Z"),
+    ),
+}
+
+
+class InvalidArtifact(Exception):
+    """A deterministic invalidity code, never artifact-controlled prose."""
+
+
+def _invalid(code: str) -> None:
+    raise InvalidArtifact(code)
+
+
+def _need(condition: bool, code: str) -> None:
+    if not condition:
+        _invalid(code)
+
+
+def _canonical_payload(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise InvalidArtifact("json_value_not_canonicalizable") from exc
+
+
+def _canonical_json(value: object) -> bytes:
+    return _canonical_payload(value) + b"\n"
+
+
+def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            _invalid("json_duplicate_key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> None:
+    _invalid(f"json_nonfinite_constant:{value}")
+
+
+def _load_json_bytes(
+    raw: bytes,
+    *,
+    code: str,
+    canonical: bool = False,
+    backend_canonical: bool = False,
+) -> object:
+    _need(type(raw) is bytes, f"{code}_bytes")
+    _need(not raw.startswith(b"\xef\xbb\xbf"), f"{code}_bom")
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except InvalidArtifact:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise InvalidArtifact(f"{code}_json") from exc
+    if canonical:
+        _need(raw == _canonical_json(value), f"{code}_noncanonical")
+    if backend_canonical:
+        _need(raw == _canonical_payload(value), f"{code}_noncanonical")
+    _walk_finite(value, code)
+    return value
+
+
+def _walk_finite(value: object, code: str) -> None:
+    if type(value) is float:
+        _need(math.isfinite(value), f"{code}_nonfinite")
+    elif isinstance(value, dict):
+        for nested in value.values():
+            _walk_finite(nested, code)
+    elif isinstance(value, list):
+        for nested in value:
+            _walk_finite(nested, code)
+
+
+def _exact_keys(value: object, keys: Iterable[str], code: str) -> Mapping[str, Any]:
+    expected = set(keys)
+    _need(isinstance(value, dict) and set(value) == expected, code)
+    return value
+
+
+def _validate_runtime_security(value: object) -> Mapping[str, Any]:
+    security = _exact_keys(value, {"bridge", "roles"}, "runtime_security_schema")
+    bridge = _exact_keys(
+        security["bridge"],
+        {"driver", "internal", "network_isolation", "residual_access"},
+        "runtime_security_bridge_schema",
+    )
+    _need(bridge["driver"] == "bridge", "runtime_security_bridge_driver")
+    _need(bridge["internal"] is False, "runtime_security_bridge_internal")
+    _need(
+        bridge["network_isolation"] is False,
+        "runtime_security_bridge_isolation",
+    )
+    _need(
+        bridge["residual_access"]
+        == ["attempt-peer", "host-gateway", "lan", "outbound"],
+        "runtime_security_bridge_residual_access",
+    )
+    roles = _exact_keys(security["roles"], {"B", "C"}, "runtime_security_roles")
+    role_keys = {
+        "image_id",
+        "user",
+        "workdir",
+        "read_only_root",
+        "cap_drop",
+        "no_new_privileges",
+        "published_ports",
+        "tmpfs",
+    }
+    for name in ("B", "C"):
+        role = _exact_keys(
+            roles[name],
+            role_keys,
+            f"runtime_security_role_{name}_schema",
+        )
+        _need(
+            _SHA256_ID.fullmatch(_string(role["image_id"], "runtime_security_image"))
+            is not None,
+            f"runtime_security_role_{name}_image",
+        )
+        _need(role["user"] == "1000:1000", f"runtime_security_role_{name}_user")
+        _need(role["workdir"] == "/freqtrade", f"runtime_security_role_{name}_workdir")
+        _need(
+            role["read_only_root"] is True,
+            f"runtime_security_role_{name}_read_only_root",
+        )
+        _need(role["cap_drop"] == ["ALL"], f"runtime_security_role_{name}_cap_drop")
+        _need(
+            role["no_new_privileges"] is True,
+            f"runtime_security_role_{name}_no_new_privileges",
+        )
+        _need(
+            role["published_ports"] is False,
+            f"runtime_security_role_{name}_published_ports",
+        )
+        _need(
+            role["tmpfs"] == "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            f"runtime_security_role_{name}_tmpfs",
+        )
+    return security
+
+
+def _finite(value: object, code: str) -> float:
+    _need(type(value) in (int, float), code)
+    result = float(value)
+    _need(math.isfinite(result), code)
+    return result
+
+
+def _integer(value: object, code: str, *, minimum: int | None = None) -> int:
+    _need(type(value) is int, code)
+    if minimum is not None:
+        _need(value >= minimum, code)
+    return value
+
+
+def _string(value: object, code: str) -> str:
+    _need(type(value) is str and bool(value), code)
+    return value
+
+
+def _same_float(actual: object, expected: float, code: str) -> None:
+    _need(abs(_finite(actual, code) - expected) <= ABS_TOLERANCE, code)
+
+
+def _scan_secret_values(value: object, parent: str = "") -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = key.casefold().replace("-", "_")
+            compact = normalized.replace("_", "")
+            if (
+                normalized in _SECRET_VALUE_KEYS
+                or compact in {item.replace("_", "") for item in _SECRET_VALUE_KEYS}
+            ):
+                if nested not in (None, False) and not (
+                    isinstance(nested, str) and nested in _ALLOWED_REDACTED_VALUES
+                ):
+                    _invalid(f"credential_value_forbidden:{parent}{key}")
+            _scan_secret_values(nested, f"{parent}{key}.")
+    elif isinstance(value, list):
+        for nested in value:
+            _scan_secret_values(nested, parent)
+
+
+def _scan_secret_bytes(raw: bytes, *, code: str) -> None:
+    lowered = raw.lower()
+    for marker in (
+        b"-----begin private key-----",
+        b"-----begin rsa private key-----",
+        b"authorization: bearer ",
+        b"aws_secret_access_key",
+    ):
+        _need(marker not in lowered, f"{code}_secret_bytes")
+    _need(
+        re.search(rb"https?://[^/\s:@]+:[^/\s@]+@", lowered) is None,
+        f"{code}_credential_uri",
+    )
+
+
+def _is_reparse(file_stat: os.stat_result) -> bool:
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(getattr(file_stat, "st_file_attributes", 0) & flag)
+
+
+def _file_identity(file_stat: os.stat_result) -> tuple[int, ...]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_mode,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+    )
+
+
+def _read_regular_file(path: Path, *, maximum: int, code: str) -> bytes:
+    try:
+        before = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise InvalidArtifact(f"{code}_unavailable") from exc
+    _need(stat.S_ISREG(before.st_mode) and not _is_reparse(before), f"{code}_not_regular")
+    _need(0 <= before.st_size <= maximum, f"{code}_size")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise InvalidArtifact(f"{code}_open") from exc
+    try:
+        opened = os.fstat(descriptor)
+        _need(_file_identity(opened) == _file_identity(before), f"{code}_identity")
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1_048_576, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        _need(len(raw) == before.st_size and len(raw) <= maximum, f"{code}_size")
+        after = os.fstat(descriptor)
+        _need(_file_identity(after) == _file_identity(opened), f"{code}_changed")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _path_is_absolute(value: str) -> bool:
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
+@dataclass(frozen=True)
+class BoundFile:
+    kind: str
+    path: Path
+    raw: bytes
+    sha256: str
+
+
+@dataclass(frozen=True)
+class LoadedManifest:
+    path: Path
+    sha256: str
+    window: WindowSpec
+    files: Mapping[str, BoundFile]
+    runtime_security: Mapping[str, Any]
+
+
+def _file_limit(kind: str) -> int:
+    if kind.endswith("_result_zip"):
+        return _MAX_ZIP_BYTES
+    if kind.endswith("_source") or kind in {
+        "controller_source",
+        "validator_source",
+        "contract_source",
+    }:
+        return _MAX_SOURCE_BYTES
+    return _MAX_JSON_BYTES
+
+
+def _load_manifest(path_value: str | os.PathLike[str]) -> LoadedManifest:
+    path = Path(path_value)
+    _need(path.is_absolute(), "manifest_path_absolute")
+    try:
+        _need(path.resolve(strict=True) == path, "manifest_path_canonical")
+    except OSError as exc:
+        raise InvalidArtifact("manifest_path_unavailable") from exc
+    raw = _read_regular_file(path, maximum=_MAX_MANIFEST_BYTES, code="manifest")
+    value = _load_json_bytes(raw, code="manifest", canonical=True)
+    value = _exact_keys(
+        value,
+        {"schema_version", "contract", "window", "files", "runtime_security"},
+        "manifest_schema",
+    )
+    _need(type(value["schema_version"]) is int and value["schema_version"] == 1, "manifest_version")
+    _need(value["contract"] == MANIFEST_CONTRACT, "manifest_contract")
+    _need(value["window"] in WINDOWS, "manifest_window")
+    runtime_security = _validate_runtime_security(value["runtime_security"])
+    records = value["files"]
+    _need(isinstance(records, list) and len(records) == len(FILE_KINDS), "manifest_inventory")
+    loaded: dict[str, BoundFile] = {}
+    total = 0
+    seen_paths: set[Path] = set()
+    for record_value in records:
+        record = _exact_keys(
+            record_value,
+            {"kind", "path", "bytes", "sha256"},
+            "manifest_file_schema",
+        )
+        kind = _string(record["kind"], "manifest_file_kind")
+        _need(kind in FILE_KINDS and kind not in loaded, "manifest_file_kind")
+        path_text = _string(record["path"], "manifest_file_path")
+        _need(_path_is_absolute(path_text), "manifest_file_path_absolute")
+        candidate = Path(path_text)
+        try:
+            _need(candidate.resolve(strict=True) == candidate, "manifest_file_path_canonical")
+        except OSError as exc:
+            raise InvalidArtifact("manifest_file_unavailable") from exc
+        _need(candidate not in seen_paths, "manifest_file_path_duplicate")
+        seen_paths.add(candidate)
+        expected_size = _integer(record["bytes"], "manifest_file_bytes", minimum=0)
+        expected_sha = _string(record["sha256"], "manifest_file_sha256")
+        _need(_HEX64.fullmatch(expected_sha) is not None, "manifest_file_sha256")
+        file_raw = _read_regular_file(candidate, maximum=_file_limit(kind), code=f"file_{kind}")
+        _need(len(file_raw) == expected_size, f"file_{kind}_bytes_mismatch")
+        actual_sha = hashlib.sha256(file_raw).hexdigest()
+        _need(actual_sha == expected_sha, f"file_{kind}_hash_mismatch")
+        total += len(file_raw)
+        _need(total <= _MAX_BOUND_INPUT_BYTES, "manifest_resource_budget")
+        loaded[kind] = BoundFile(kind, candidate, file_raw, actual_sha)
+    _need(set(loaded) == FILE_KINDS, "manifest_inventory")
+    manifest_paths = [item["path"] for item in records]
+    _need(manifest_paths == sorted(manifest_paths), "manifest_file_order")
+    return LoadedManifest(
+        path,
+        hashlib.sha256(raw).hexdigest(),
+        WINDOWS[value["window"]],
+        loaded,
+        runtime_security,
+    )
+
+
+def _iso_hour(timestamp_ms: int) -> str:
+    value = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass(frozen=True)
+class ValidationOutcome:
+    classification: str
+    reasons: tuple[str, ...] = ()
+    audit: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GateFacts:
+    b_closed_trades: int
+    c_closed_trades: int
+    b_long_trades: int
+    b_short_trades: int
+    c_long_trades: int
+    c_short_trades: int
+    c_armed_episodes: int
+    c_long_episodes: int
+    c_short_episodes: int
+    c_stop_exits: int
+    c_long_stops: int
+    c_short_stops: int
+    c_open_same_edges: int
+    c_post_stop_exercises: int
+    c_mechanism_failures: int
+    c_adjustment_orders: int
+    c_max_initial_stake: float
+    c_stake_tolerance: float
+    c_all_initial_stakes_half: bool
+    c_all_leverage_2x: bool
+    c_liquidations: int
+    c_min_profit_ratio: float
+    c_profit_total: float
+    b_profit_total: float
+    c_profit_factor: float
+    c_expectancy: float
+    c_long_profit: float
+    c_short_profit: float
+    c_max_drawdown: float
+    b_max_drawdown: float
+    c_zero_counters: tuple[int, int, int, int, int, int]
+    restart_parity: bool
+    normalized_c_profit_total: float
+    normalized_b_profit_total: float
+    normalized_c_long_profit: float
+    normalized_c_short_profit: float
+
+    @classmethod
+    def passing(cls) -> "GateFacts":
+        return cls(
+            20,
+            20,
+            10,
+            10,
+            10,
+            10,
+            20,
+            10,
+            10,
+            5,
+            2,
+            3,
+            1,
+            1,
+            0,
+            0,
+            50.0,
+            ABS_TOLERANCE,
+            True,
+            True,
+            0,
+            -0.05,
+            0.03,
+            0.01,
+            1.2,
+            0.1,
+            10.0,
+            10.0,
+            0.05,
+            0.06,
+            (0, 0, 0, 0, 0, 0),
+            True,
+            0.03,
+            0.01,
+            10.0,
+            10.0,
+        )
+
+
+def classify_gate(
+    facts: GateFacts,
+    *,
+    invalid_reasons: Sequence[str] = (),
+) -> ValidationOutcome:
+    if invalid_reasons:
+        return ValidationOutcome(CLASS_INVALID, tuple(invalid_reasons))
+    finite_fields = (
+        "c_max_initial_stake",
+        "c_stake_tolerance",
+        "c_min_profit_ratio",
+        "c_profit_total",
+        "b_profit_total",
+        "c_expectancy",
+        "c_long_profit",
+        "c_short_profit",
+        "c_max_drawdown",
+        "b_max_drawdown",
+        "normalized_c_profit_total",
+        "normalized_b_profit_total",
+        "normalized_c_long_profit",
+        "normalized_c_short_profit",
+    )
+    nonfinite = [name for name in finite_fields if not math.isfinite(float(getattr(facts, name)))]
+    if math.isnan(float(facts.c_profit_factor)) or facts.c_profit_factor == -math.inf:
+        nonfinite.append("c_profit_factor")
+    if nonfinite:
+        return ValidationOutcome(CLASS_INVALID, tuple(f"nonfinite:{name}" for name in nonfinite))
+
+    insufficient: list[str] = []
+    for condition, reason in (
+        (facts.b_closed_trades < 20, "B closed trades < 20"),
+        (facts.c_closed_trades < 20, "C closed trades < 20"),
+        (facts.b_long_trades < 5, "B long trades < 5"),
+        (facts.b_short_trades < 5, "B short trades < 5"),
+        (facts.c_long_trades < 5, "C long trades < 5"),
+        (facts.c_short_trades < 5, "C short trades < 5"),
+        (facts.c_armed_episodes < 20, "C armed episodes < 20"),
+        (facts.c_long_episodes < 5, "C long episodes < 5"),
+        (facts.c_short_episodes < 5, "C short episodes < 5"),
+        (facts.c_stop_exits < 5, "C stop exits < 5"),
+        (facts.c_long_stops < 1, "C long stop exits < 1"),
+        (facts.c_short_stops < 1, "C short stop exits < 1"),
+        (facts.c_open_same_edges < 1, "C open_same_side edges < 1"),
+        (facts.c_post_stop_exercises < 1, "C post-stop exercise < 1"),
+    ):
+        if condition:
+            insufficient.append(reason)
+    if insufficient:
+        return ValidationOutcome(CLASS_INSUFFICIENT, tuple(insufficient))
+
+    rejected: list[str] = []
+    for condition, reason in (
+        (not facts.restart_parity, "restart parity"),
+        (facts.c_mechanism_failures != 0, "mechanism failures"),
+        (facts.c_adjustment_orders != 0, "adjustment orders"),
+        (
+            not facts.c_all_initial_stakes_half
+            or abs(facts.c_max_initial_stake - EXPECTED_INITIAL_STAKE)
+            > facts.c_stake_tolerance,
+            "initial stake",
+        ),
+        (not facts.c_all_leverage_2x, "leverage"),
+        (facts.c_liquidations != 0, "liquidation"),
+        (facts.c_min_profit_ratio < -0.105, "trade risk"),
+        (facts.c_profit_total <= 0, "total profit"),
+        (facts.c_profit_total - facts.b_profit_total < 0.01, "improvement"),
+        (facts.c_profit_factor < 1.10, "profit factor"),
+        (facts.c_expectancy <= 0, "expectancy"),
+        (facts.c_long_profit <= 0, "long profit"),
+        (facts.c_short_profit <= 0, "short profit"),
+        (facts.c_max_drawdown >= 0.10, "drawdown ceiling"),
+        (facts.c_max_drawdown > facts.b_max_drawdown, "drawdown worse than B"),
+    ):
+        if condition:
+            rejected.append(reason)
+    for name, count in zip(COUNTER_FIELDS, facts.c_zero_counters, strict=True):
+        if count != 0:
+            rejected.append(name)
+    if rejected:
+        return ValidationOutcome(CLASS_REJECTED, tuple(rejected))
+
+    boundary_sensitive = (
+        facts.normalized_c_profit_total <= 0
+        or facts.normalized_c_profit_total - facts.normalized_b_profit_total < 0.01
+        or facts.normalized_c_long_profit <= 0
+        or facts.normalized_c_short_profit <= 0
+    )
+    if boundary_sensitive:
+        return ValidationOutcome(CLASS_INSUFFICIENT, ("BOUNDARY-SENSITIVE",))
+    return ValidationOutcome(CLASS_PENDING)
+
+
+@dataclass(frozen=True)
+class OhlcvRow:
+    timestamp_ms: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+@dataclass(frozen=True)
+class IndicatorState:
+    completion_ms: int
+    valid: bool
+    long_eligible: bool
+    short_eligible: bool
+    bucket_start_ms: int = 0
+    bucket_ok: bool = True
+    true_range: float | None = None
+    rolling_mean_true_range: float | None = None
+    volatility_threshold: float | None = None
+    delta: float | None = None
+
+
+@dataclass(frozen=True)
+class Episode:
+    side: str
+    episode_id: str
+    first_completion_ms: int
+    last_completion_ms: int
+    kind: str
+
+
+@dataclass(frozen=True)
+class EpisodeLedger:
+    episodes: tuple[Episode, ...]
+    scored_armed: tuple[str, ...]
+    boundary_unknown: tuple[str, ...]
+    prefix_active: tuple[str, ...]
+    state_episode_ids: Mapping[tuple[str, int], str] = field(default_factory=dict)
+
+
+def derive_episode_ledger(
+    states: Sequence[IndicatorState],
+    scored_start_ms: int,
+    scored_end_ms: int,
+) -> EpisodeLedger:
+    ordered = sorted(states, key=lambda item: item.completion_ms)
+    episodes: list[Episode] = []
+    state_ids: dict[tuple[str, int], str] = {}
+    for side in ("long", "short"):
+        active_id: str | None = None
+        active_kind: str | None = None
+        active_first = active_last = 0
+        previous: IndicatorState | None = None
+        for state in ordered:
+            eligible = state.long_eligible if side == "long" else state.short_eligible
+            previous_eligible = bool(
+                previous is not None
+                and (previous.long_eligible if side == "long" else previous.short_eligible)
+            )
+            continuation = bool(
+                active_id
+                and previous is not None
+                and previous.valid
+                and previous_eligible
+                and state.valid
+                and eligible
+            )
+            if state.valid and eligible:
+                if not continuation:
+                    if active_id is not None:
+                        episodes.append(
+                            Episode(side, active_id, active_first, active_last, active_kind or "")
+                        )
+                    active_first = active_last = state.completion_ms
+                    active_id = f"{side}:{_iso_hour(active_first)}"
+                    active_kind = (
+                        "armed"
+                        if previous is not None and previous.valid and not previous_eligible
+                        else "boundary_unknown"
+                    )
+                else:
+                    active_last = state.completion_ms
+                state_ids[(side, state.completion_ms)] = active_id
+            elif active_id is not None:
+                episodes.append(Episode(side, active_id, active_first, active_last, active_kind or ""))
+                active_id = active_kind = None
+            previous = state
+        if active_id is not None:
+            episodes.append(Episode(side, active_id, active_first, active_last, active_kind or ""))
+    episodes.sort(key=lambda item: (item.first_completion_ms, item.side))
+    scored = tuple(
+        item.episode_id
+        for item in episodes
+        if item.kind == "armed" and scored_start_ms <= item.first_completion_ms < scored_end_ms
+    )
+    boundary = tuple(item.episode_id for item in episodes if item.kind == "boundary_unknown")
+    prefix = tuple(
+        item.episode_id
+        for item in episodes
+        if item.kind == "armed"
+        and item.first_completion_ms < scored_start_ms
+        and item.last_completion_ms + THREE_HOURS_MS > scored_start_ms
+    )
+    return EpisodeLedger(tuple(episodes), scored, boundary, prefix, state_ids)
+
+
+def build_indicator_states(rows: Sequence[OhlcvRow]) -> tuple[IndicatorState, ...]:
+    _need(bool(rows), "primary_rows_empty")
+    ordered = sorted(rows, key=lambda item: item.timestamp_ms)
+    _need(len({item.timestamp_ms for item in ordered}) == len(ordered), "primary_row_duplicate")
+    first_slot = ordered[0].timestamp_ms - ordered[0].timestamp_ms % THREE_HOURS_MS
+    last_slot = ordered[-1].timestamp_ms - ordered[-1].timestamp_ms % THREE_HOURS_MS
+    by_timestamp = {item.timestamp_ms: item for item in ordered}
+    buckets: list[tuple[int, bool, float | None, float | None, float | None, float | None]] = []
+    for slot in range(first_slot, last_slot + 1, THREE_HOURS_MS):
+        required = [by_timestamp.get(slot + offset * HOUR_MS) for offset in range(3)]
+        bucket_ok = all(item is not None for item in required)
+        if bucket_ok:
+            candles = [item for item in required if item is not None]
+            bucket_ok = all(
+                item.low <= min(item.open, item.close)
+                <= max(item.open, item.close)
+                <= item.high
+                for item in candles
+            )
+        if bucket_ok:
+            candles = [item for item in required if item is not None]
+            buckets.append(
+                (
+                    slot,
+                    True,
+                    candles[0].open,
+                    max(item.high for item in candles),
+                    min(item.low for item in candles),
+                    candles[-1].close,
+                )
+            )
+        else:
+            buckets.append((slot, False, None, None, None, None))
+    true_ranges: list[float | None] = [None] * len(buckets)
+    for index in range(1, len(buckets)):
+        current, previous = buckets[index], buckets[index - 1]
+        if current[1] and previous[1] and current[0] - previous[0] == THREE_HOURS_MS:
+            high, low, previous_close = float(current[3]), float(current[4]), float(previous[5])
+            true_ranges[index] = max(high - low, abs(high - previous_close), abs(low - previous_close))
+    states: list[IndicatorState] = []
+    for index, bucket in enumerate(buckets):
+        rolling: float | None = None
+        if index >= 14:
+            prior = true_ranges[index - 14 : index]
+            if len(prior) == 14 and all(item is not None and math.isfinite(item) for item in prior):
+                rolling = math.fsum(float(item) for item in prior) / 14
+        delta = (
+            float(bucket[5]) - float(buckets[index - 1][5])
+            if index > 0 and bucket[1] and buckets[index - 1][1]
+            else None
+        )
+        threshold = 2.0 * rolling if rolling is not None else None
+        valid = bool(
+            bucket[1]
+            and delta is not None
+            and threshold is not None
+            and math.isfinite(delta)
+            and math.isfinite(threshold)
+        )
+        states.append(
+            IndicatorState(
+                completion_ms=bucket[0] + 2 * HOUR_MS,
+                valid=valid,
+                long_eligible=bool(valid and delta > threshold),
+                short_eligible=bool(valid and -delta > threshold),
+                bucket_start_ms=bucket[0],
+                bucket_ok=bucket[1],
+                true_range=true_ranges[index],
+                rolling_mean_true_range=rolling,
+                volatility_threshold=threshold,
+                delta=delta,
+            )
+        )
+    return tuple(states)
+
+
+def _zip_info_safe(info: zipfile.ZipInfo) -> bool:
+    name = info.filename
+    pure = PurePosixPath(name)
+    mode = (info.external_attr >> 16) & 0xFFFF
+    return bool(
+        name
+        and "\\" not in name
+        and not name.startswith("/")
+        and not pure.is_absolute()
+        and ".." not in pure.parts
+        and not name.endswith("/")
+        and not (info.flag_bits & 0x1)
+        and info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+        and (stat.S_IFMT(mode) == 0 or stat.S_ISREG(mode))
+        and 0 <= info.file_size <= _MAX_ZIP_MEMBER_BYTES
+    )
+
+
+def _read_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, code: str) -> bytes:
+    _need(info.file_size <= _MAX_ZIP_MEMBER_BYTES, f"{code}_size")
+    with archive.open(info) as stream:
+        raw = stream.read(_MAX_ZIP_MEMBER_BYTES + 1)
+    _need(len(raw) == info.file_size and len(raw) <= _MAX_ZIP_MEMBER_BYTES, f"{code}_size")
+    return raw
+
+
+@dataclass(frozen=True)
+class StandardArchive:
+    role: str
+    stem: str
+    path: Path
+    result: Mapping[str, Any]
+    metadata: Mapping[str, Any]
+    revision: Mapping[str, Any]
+    config: Mapping[str, Any]
+    source: bytes
+    parameter_payload: Mapping[str, Any]
+    parameter_bytes: bytes
+    replay_member_names: tuple[str, ...]
+
+
+def _validate_archive_config(value: object, window: WindowSpec) -> Mapping[str, Any]:
+    _need(isinstance(value, dict), "archive_config_schema")
+    expected_config = contract.EXPECTED_EFFECTIVE_CONFIG
+    for key, expected in expected_config.items():
+        if key not in {"api_server", "exchange"}:
+            _need(value.get(key) == expected, f"archive_config_binding_{key}")
+            continue
+        actual_section = value.get(key)
+        _need(isinstance(actual_section, dict), f"archive_config_binding_{key}")
+        secret_keys = (
+            {"jwt_secret_key", "password", "ws_token"}
+            if key == "api_server"
+            else {"key", "secret", "password"}
+        )
+        for nested_key, nested_expected in expected.items():
+            if nested_key in secret_keys:
+                _need(
+                    actual_section.get(nested_key) in _ALLOWED_REDACTED_VALUES,
+                    f"archive_config_binding_{key}_{nested_key}",
+                )
+            else:
+                _need(
+                    actual_section.get(nested_key) == nested_expected,
+                    f"archive_config_binding_{key}_{nested_key}",
+                )
+    exchange = value.get("exchange")
+    _need(isinstance(exchange, dict), "archive_config_exchange")
+    _need(str(exchange.get("name", "")).casefold() == "okx", "archive_config_exchange_name")
+    _need(exchange.get("pair_whitelist") == [PAIR], "archive_config_pair_whitelist")
+    for key in ("key", "secret", "password"):
+        _need(exchange.get(key, "") in _ALLOWED_REDACTED_VALUES, "archive_config_credential")
+    for key, expected in (
+        ("timeframe", "1h"),
+        ("timerange", window.timerange),
+        ("trading_mode", "futures"),
+        ("margin_mode", "isolated"),
+        ("backtest_cache", "none"),
+    ):
+        _need(value.get(key) == expected, f"archive_config_{key}")
+    for key, expected in (
+        ("stake_amount", PROPOSED_STAKE),
+        ("dry_run_wallet", STARTING_BALANCE),
+        ("fee", FEE_RATE),
+        ("max_open_trades", 1.0),
+    ):
+        _same_float(value.get(key), expected, f"archive_config_{key}")
+    _need(value.get("enable_protections") is False, "archive_config_protections")
+    _need(value.get("futures_funding_rate") is None, "archive_config_funding_fallback")
+    _need(not value.get("timeframe_detail"), "archive_config_detail_timeframe")
+    _need(not value.get("freqaimodel"), "archive_config_freqai")
+    _need(
+        not (isinstance(value.get("freqai"), dict) and value["freqai"].get("enabled")),
+        "archive_config_freqai",
+    )
+    _scan_secret_values(value)
+    return value
+
+
+def _validate_execution_evidence(value: object) -> Mapping[str, Any]:
+    evidence = _exact_keys(
+        value,
+        {
+            "schema_version",
+            "canonicalization",
+            "hash_algorithm",
+            "core_runtime_scope",
+            "effective_config_scope",
+            "exchange_simulation_scope",
+            "core_runtime_id",
+            "effective_config_id",
+            "exchange_simulation_id",
+            "evidence_id",
+        },
+        "execution_evidence_schema",
+    )
+    _need(
+        type(evidence["schema_version"]) is int and evidence["schema_version"] == 1,
+        "execution_evidence_version",
+    )
+    _need(
+        evidence["canonicalization"] == "freqtrade-backtest-execution-context-evidence-v1",
+        "execution_evidence_canonicalization",
+    )
+    _need(evidence["hash_algorithm"] == "sha256", "execution_evidence_hash")
+    _need(
+        evidence["core_runtime_scope"] == "freqtrade_python_numeric_exchange_versions_v1",
+        "execution_evidence_core_scope",
+    )
+    _need(
+        evidence["effective_config_scope"] == "standard_backtest_effective_config_v1",
+        "execution_evidence_config_scope",
+    )
+    _need(
+        evidence["exchange_simulation_scope"] == "admitted_pair_exchange_simulation_v1",
+        "execution_evidence_exchange_scope",
+    )
+    _need(_CORE_ID.fullmatch(str(evidence["core_runtime_id"])) is not None, "execution_evidence_core_id")
+    _need(_EFFECTIVE_ID.fullmatch(str(evidence["effective_config_id"])) is not None, "execution_evidence_effective_id")
+    _need(_EXCHANGE_ID.fullmatch(str(evidence["exchange_simulation_id"])) is not None, "execution_evidence_exchange_id")
+    _need(_EVIDENCE_ID.fullmatch(str(evidence["evidence_id"])) is not None, "execution_evidence_id")
+    identity = {key: item for key, item in evidence.items() if key != "evidence_id"}
+    expected = "execution-context-evidence-" + hashlib.sha256(
+        _EXECUTION_EVIDENCE_DOMAIN + _canonical_payload(identity)
+    ).hexdigest()
+    _need(evidence["evidence_id"] == expected, "execution_evidence_id")
+    return evidence
+
+
+def _validate_strategy_evidence(
+    value: object,
+    *,
+    source: bytes,
+    parameter_payload: object,
+    parameter_bytes: bytes,
+) -> Mapping[str, Any]:
+    parameters = _exact_keys(
+        parameter_payload,
+        {"schema_version", "strategy", "parameter_scope", "resolved_parameters"},
+        "strategy_parameter_payload_schema",
+    )
+    evidence = _exact_keys(
+        value,
+        {
+            "schema_version",
+            "canonicalization",
+            "hash_algorithm",
+            "strategy",
+            "source_scope",
+            "parameter_scope",
+            "source_digest",
+            "parameters_digest",
+            "evidence_id",
+        },
+        "strategy_evidence_schema",
+    )
+    _need(
+        type(evidence["schema_version"]) is int and evidence["schema_version"] == 2,
+        "strategy_evidence_version",
+    )
+    _need(
+        evidence["canonicalization"] == "freqtrade-backtest-strategy-evidence-v2",
+        "strategy_evidence_canonicalization",
+    )
+    _need(evidence["hash_algorithm"] == "sha256", "strategy_evidence_hash")
+    _need(evidence["strategy"] == STRATEGY, "strategy_evidence_strategy")
+    _need(evidence["source_scope"] == "primary_strategy_module", "strategy_evidence_source_scope")
+    _need(
+        evidence["parameter_scope"] == "resolved_freqtrade_strategy_parameters_v2",
+        "strategy_evidence_parameter_scope",
+    )
+    expected_source = "strategy-source-" + hashlib.sha256(source).hexdigest()
+    _need(evidence["source_digest"] == expected_source, "strategy_evidence_source_digest")
+    expected_parameters = "strategy-parameters-" + hashlib.sha256(
+        _STRATEGY_PARAMETERS_DOMAIN + parameter_bytes
+    ).hexdigest()
+    _need(evidence["parameters_digest"] == expected_parameters, "strategy_evidence_parameters_digest")
+    identity = {key: item for key, item in evidence.items() if key != "evidence_id"}
+    expected_evidence = "strategy-evidence-" + hashlib.sha256(
+        _STRATEGY_EVIDENCE_DOMAIN + _canonical_payload(identity)
+    ).hexdigest()
+    _need(evidence["evidence_id"] == expected_evidence, "strategy_evidence_id")
+    _need(
+        type(parameters["schema_version"]) is int and parameters["schema_version"] == 2,
+        "strategy_parameter_payload_version",
+    )
+    _need(parameters["strategy"] == STRATEGY, "strategy_parameter_payload_strategy")
+    _need(parameters["parameter_scope"] == evidence["parameter_scope"], "strategy_parameter_payload_scope")
+    _need(isinstance(parameters["resolved_parameters"], dict), "strategy_resolved_parameters")
+    return evidence
+
+
+def _validate_revision(
+    metadata: object,
+    *,
+    role: str,
+    request: Mapping[str, Any],
+    source: bytes,
+    parameter_payload: Mapping[str, Any],
+    parameter_bytes: bytes,
+) -> Mapping[str, Any]:
+    metadata = _exact_keys(metadata, {STRATEGY}, "metadata_strategy_inventory")
+    strategy_metadata = metadata[STRATEGY]
+    _need(isinstance(strategy_metadata, dict), "metadata_strategy_schema")
+    revision_value = strategy_metadata.get("experiment_revision")
+    keys = {
+        "revision_id",
+        "schema_version",
+        "experiment_id",
+        "engine",
+        "engine_version",
+        "strategy",
+        "strategy_run_id",
+        "backtest_request",
+        "strategy_evidence",
+        "execution_context_evidence",
+        "data_snapshot_id",
+        "data_snapshot",
+        "identity_scope",
+    }
+    if role == "B":
+        keys.add("data_snapshot_replay")
+    revision = _exact_keys(revision_value, keys, "experiment_revision_schema")
+    _need(
+        type(revision["schema_version"]) is int and revision["schema_version"] == 2,
+        "experiment_revision_version",
+    )
+    expected_request = dict(request)
+    experiment_id = expected_request.pop("experiment_id")
+    _need(revision["experiment_id"] == experiment_id, "experiment_revision_experiment")
+    _need(revision["backtest_request"] == expected_request, "experiment_revision_request")
+    _need(revision["engine"] == "freqtrade", "experiment_revision_engine")
+    _string(revision["engine_version"], "experiment_revision_engine_version")
+    _need(revision["strategy"] == STRATEGY, "experiment_revision_strategy")
+    _string(revision["strategy_run_id"], "experiment_revision_run_id")
+    if "run_id" in strategy_metadata:
+        _need(strategy_metadata["run_id"] == revision["strategy_run_id"], "experiment_revision_run_binding")
+    _need(
+        revision["identity_scope"] == "strategy_config_and_data_content",
+        "experiment_revision_identity_scope",
+    )
+    _need(revision["data_snapshot_id"] == revision["data_snapshot"].get("snapshot_id"), "experiment_revision_snapshot_id")
+    _validate_strategy_evidence(
+        revision["strategy_evidence"],
+        source=source,
+        parameter_payload=parameter_payload,
+        parameter_bytes=parameter_bytes,
+    )
+    _validate_execution_evidence(revision["execution_context_evidence"])
+    payload = {key: item for key, item in revision.items() if key != "revision_id"}
+    expected_revision = "experiment-revision-" + hashlib.sha256(_canonical_payload(payload)).hexdigest()
+    _need(revision["revision_id"] == expected_revision, "experiment_revision_id")
+    return revision
+
+
+def _parse_archive(
+    *,
+    role: str,
+    result_file: BoundFile,
+    metadata_file: BoundFile,
+    pointer_file: BoundFile,
+    request: Mapping[str, Any],
+    source_file: BoundFile,
+    window: WindowSpec,
+) -> StandardArchive:
+    pointer = _exact_keys(
+        _load_json_bytes(pointer_file.raw, code=f"{role}_pointer", canonical=True),
+        {"latest_backtest"},
+        f"{role}_pointer_schema",
+    )
+    latest = _string(pointer["latest_backtest"], f"{role}_pointer_latest")
+    _need(PurePosixPath(latest).name == latest and "\\" not in latest, f"{role}_pointer_latest")
+    _need(latest.endswith(".zip"), f"{role}_result_suffix")
+    stem = latest.removesuffix(".zip")
+    contract.validate_result_stem(stem)
+    try:
+        with zipfile.ZipFile(result_file.path) as archive:
+            _need(not archive.comment, f"{role}_zip_comment")
+            infos = archive.infolist()
+            names = [item.filename for item in infos]
+            _need(len(names) == len(set(names)), f"{role}_zip_duplicate_member")
+            _need(all(_zip_info_safe(item) for item in infos), f"{role}_zip_unsafe_member")
+            _need(sum(item.file_size for item in infos) <= _MAX_ZIP_TOTAL_BYTES, f"{role}_zip_total_size")
+            source_name = f"{stem}_{STRATEGY}.py"
+            parameter_name = f"{stem}_{STRATEGY}_evidence.json"
+            required = {f"{stem}.json", f"{stem}_config.json", source_name, parameter_name}
+            _need(required.issubset(names), f"{role}_zip_required_member")
+            replay_names = tuple(sorted(name for name in names if name.startswith("data_snapshot/")))
+            if role == "B":
+                _need("data_snapshot/manifest.json" in replay_names, "baseline_replay_missing")
+            else:
+                _need(not replay_names, "candidate_replay_member_forbidden")
+            optional = {
+                f"{stem}_{STRATEGY}.json",
+                f"{stem}_market_change.feather",
+                f"{stem}_{STRATEGY}_wallet.feather",
+            }
+            allowed = required | optional | set(replay_names)
+            _need(set(names).issubset(allowed), f"{role}_zip_unexpected_member")
+            info_by_name = {item.filename: item for item in infos}
+            result_raw = _read_zip_member(archive, info_by_name[f"{stem}.json"], f"{role}_result")
+            config_raw = _read_zip_member(archive, info_by_name[f"{stem}_config.json"], f"{role}_config")
+            source = _read_zip_member(archive, info_by_name[source_name], f"{role}_source")
+            parameter_bytes = _read_zip_member(archive, info_by_name[parameter_name], f"{role}_parameters")
+    except InvalidArtifact:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise InvalidArtifact(f"{role}_zip_invalid") from exc
+    _need(source == source_file.raw, f"{role}_source_binding")
+    config = _validate_archive_config(_load_json_bytes(config_raw, code=f"{role}_config"), window)
+    parameter_payload = _load_json_bytes(
+        parameter_bytes,
+        code=f"{role}_parameters",
+        backend_canonical=True,
+    )
+    _need(isinstance(parameter_payload, dict), f"{role}_parameters_schema")
+    metadata = _load_json_bytes(metadata_file.raw, code=f"{role}_metadata")
+    _scan_secret_values(metadata)
+    result = _load_json_bytes(result_raw, code=f"{role}_result")
+    _need(isinstance(result, dict) and "metadata" not in result, f"{role}_history_schema")
+    _need(set(result).issuperset({"strategy", "strategy_comparison"}), f"{role}_history_schema")
+    history = {**result, "metadata": metadata}
+    revision = _validate_revision(
+        metadata,
+        role=role,
+        request=request,
+        source=source,
+        parameter_payload=parameter_payload,
+        parameter_bytes=parameter_bytes,
+    )
+    return StandardArchive(
+        role,
+        stem,
+        result_file.path,
+        history,
+        metadata,
+        revision,
+        config,
+        source,
+        parameter_payload,
+        parameter_bytes,
+        replay_names,
+    )
+
+
+def _route_frames(archive: StandardArchive):
+    binding = archive.revision["data_snapshot_replay"]
+    try:
+        replay = load_backtest_data_snapshot_replay(
+            archive.path,
+            binding,
+        )
+    except (OperationalException, OSError, TypeError, ValueError) as exc:
+        raise InvalidArtifact("baseline_replay_load") from exc
+    routes = replay.routes
+    _need(len(routes) == 3, "admission_route_inventory")
+    route_map = {route["source_role"]: route for route in routes}
+    _need(set(route_map) == {"primary", "mark", "funding"}, "admission_route_inventory")
+    expected = {
+        "primary": "futures",
+        "mark": "mark",
+        "funding": "funding_rate",
+    }
+    for role, candle_type in expected.items():
+        route = route_map[role]
+        _need(
+            (route["pair"], route["timeframe"], route["candle_type"])
+            == (PAIR, "1h", candle_type),
+            f"{role}_admission_route",
+        )
+    primary = replay.require_ohlcv("primary", PAIR, "1h", "futures")
+    funding = replay.require_ohlcv("funding", PAIR, "1h", "funding_rate")
+    mark = replay.require_ohlcv("mark", PAIR, "1h", "mark")
+    replay.assert_complete()
+    _need(not mark.empty, "mark_rows_empty")
+    _need(not funding.empty, "funding_rows_empty")
+    combined = Exchange.combine_funding_and_mark(funding, mark, None)
+    _need(not combined.empty, "funding_mark_intersection_empty")
+    return replay, primary, combined
+
+def _validate_primary_rows(frame: Any, window: WindowSpec) -> tuple[OhlcvRow, ...]:
+    required = ["date", "open", "high", "low", "close", "volume"]
+    _need(list(frame.columns) == required, "primary_columns")
+    rows: list[OhlcvRow] = []
+    for value in frame.itertuples(index=False):
+        timestamp = int(value.date.timestamp() * 1000)
+        numbers = [float(value.open), float(value.high), float(value.low), float(value.close), float(value.volume)]
+        _need(all(math.isfinite(item) for item in numbers), "primary_row_nonfinite")
+        rows.append(OhlcvRow(timestamp, *numbers))
+    expected_count = (window.end_ms - window.prefix_start_ms) // HOUR_MS + 1
+    _need(len(rows) == expected_count, "primary_row_count")
+    _need(rows[0].timestamp_ms == window.prefix_start_ms, "primary_prefix_start")
+    _need(rows[-1].timestamp_ms == window.end_ms, "primary_exact_end_sentinel")
+    _need(sum(item.timestamp_ms < window.start_ms for item in rows) == 499, "primary_prefix_count")
+    for index, row in enumerate(rows):
+        _need(row.timestamp_ms == window.prefix_start_ms + index * HOUR_MS, "primary_row_continuity")
+        _need(
+            row.low <= min(row.open, row.close) <= max(row.open, row.close) <= row.high,
+            "primary_ohlc_geometry",
+        )
+    return tuple(rows)
+
+
+def _filled_orders(trade: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    orders = trade.get("orders")
+    _need(isinstance(orders, list) and bool(orders), "trade_orders_schema")
+    result: list[Mapping[str, Any]] = []
+    previous: int | None = None
+    for order_value in orders:
+        order = _exact_keys(
+            order_value,
+            {
+                "amount",
+                "safe_price",
+                "ft_order_side",
+                "order_filled_timestamp",
+                "ft_is_entry",
+                "ft_order_tag",
+                "cost",
+            },
+            "order_schema",
+        )
+        amount = _finite(order["amount"], "order_amount")
+        price = _finite(order["safe_price"], "order_safe_price")
+        _need(amount > 0 and price > 0, "order_amount_or_price")
+        _need(order["ft_order_side"] in {"buy", "sell"}, "order_side")
+        _need(type(order["ft_is_entry"]) is bool, "order_entry_flag")
+        _need(order["ft_order_tag"] is None or type(order["ft_order_tag"]) is str, "order_tag")
+        cost = _finite(order["cost"], "order_cost")
+        _need(cost >= 0, "order_cost")
+        timestamp = _integer(order["order_filled_timestamp"], "order_filled_timestamp", minimum=0)
+        _need(timestamp % HOUR_MS == 0, "order_filled_hour_alignment")
+        if previous is not None:
+            _need(timestamp >= previous, "order_fill_order")
+        previous = timestamp
+        result.append(order)
+    return tuple(result)
+
+
+def _precise_add(left: FtPrecise, right: FtPrecise) -> FtPrecise:
+    return FtPrecise(left + right)
+
+
+def _recompute_trade_funding(
+    trade: Mapping[str, Any],
+    funding_rates: Any,
+) -> tuple[float, tuple[Mapping[str, Any], ...]]:
+    orders = _filled_orders(trade)
+    entries = [order for order in orders if order["ft_is_entry"]]
+    exits = [order for order in orders if not order["ft_is_entry"]]
+    _need(entries and len(exits) == 1, "trade_funding_sequence")
+    position = FtPrecise(0)
+    total = FtPrecise(0)
+    intervals: list[Mapping[str, Any]] = []
+    for index, order in enumerate(orders[:-1]):
+        _need(order["ft_is_entry"], "trade_funding_sequence")
+        position = _precise_add(position, FtPrecise(order["amount"]))
+        following = orders[index + 1]
+        open_ms = _integer(order["order_filled_timestamp"], "funding_open_timestamp")
+        close_ms = _integer(following["order_filled_timestamp"], "funding_close_timestamp")
+        amount = float(position)
+        _need(math.isfinite(amount) and amount > 0, "funding_interval_amount")
+        value = Exchange.calculate_funding_fees(
+            None,
+            funding_rates,
+            amount=amount,
+            is_short=bool(trade["is_short"]),
+            open_date=datetime.fromtimestamp(open_ms / 1000, tz=UTC),
+            close_date=datetime.fromtimestamp(close_ms / 1000, tz=UTC),
+        )
+        _need(math.isfinite(value), "funding_interval_nonfinite")
+        total = _precise_add(total, FtPrecise(value))
+        intervals.append(
+            {
+                "order_ordinal": index,
+                "from_ms": open_ms,
+                "to_ms": close_ms,
+                "amount": amount,
+                "is_short": bool(trade["is_short"]),
+                "funding_fees": value,
+            }
+        )
+    return float(total), tuple(intervals)
+
+
+@dataclass(frozen=True)
+class AuditedTrade:
+    trade_ordinal: int
+    side: str
+    open_timestamp: int
+    close_timestamp: int
+    exit_reason: str
+    profit_ratio: float
+    funding_fees: float
+    raw_cashflow_abs: float
+    derived_profit_abs: float
+    initial_entry_timestamp: int
+    successful_entry_count: int
+    successful_exit_count: int
+    initial_stake: float
+    stake_tolerance: float
+    leverage: float
+    orders: tuple[Mapping[str, Any], ...]
+    funding_intervals: tuple[Mapping[str, Any], ...]
+    raw: Mapping[str, Any]
+
+
+def _audit_trade(
+    trade_value: object,
+    *,
+    role: str,
+    trade_ordinal: int,
+    window: WindowSpec,
+    funding_rates: Any,
+) -> AuditedTrade:
+    _need(isinstance(trade_value, dict), "trade_schema")
+    trade = trade_value
+    _need(set(trade) == set(BT_DATA_COLUMNS), "trade_standard_schema")
+    _need(trade["pair"] == PAIR, "trade_pair")
+    _need(trade["is_open"] is False, "trade_not_closed")
+    _need(type(trade["is_short"]) is bool, "trade_direction")
+    side = "short" if trade["is_short"] else "long"
+    open_timestamp = _integer(trade["open_timestamp"], "trade_open_timestamp", minimum=0)
+    close_timestamp = _integer(trade["close_timestamp"], "trade_close_timestamp", minimum=0)
+    _need(open_timestamp % HOUR_MS == 0 and close_timestamp % HOUR_MS == 0, "trade_timestamp_alignment")
+    _need(window.start_ms <= open_timestamp < close_timestamp <= window.end_ms, "trade_scored_window")
+    for date_key, timestamp in (("open_date", open_timestamp), ("close_date", close_timestamp)):
+        date_value = _string(trade[date_key], f"trade_{date_key}")
+        try:
+            parsed = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise InvalidArtifact(f"trade_{date_key}") from exc
+        _need(parsed.tzinfo is not None and int(parsed.timestamp() * 1000) == timestamp, f"trade_{date_key}_mismatch")
+    _need(
+        _integer(trade["trade_duration"], "trade_duration", minimum=0)
+        == (close_timestamp - open_timestamp) // 60_000,
+        "trade_duration_mismatch",
+    )
+    fee_open = _finite(trade["fee_open"], "trade_fee_open")
+    fee_close = _finite(trade["fee_close"], "trade_fee_close")
+    _need(fee_open == FEE_RATE and fee_close == FEE_RATE, "trade_fee_rate")
+    leverage = _finite(trade["leverage"], "trade_leverage")
+    _need(leverage > 0, "trade_leverage")
+    exported_funding = _finite(trade["funding_fees"], "trade_funding")
+    computed_funding, intervals = _recompute_trade_funding(trade, funding_rates)
+    _need(abs(exported_funding - computed_funding) <= ABS_TOLERANCE, "trade_funding_mismatch")
+    profit_ratio = _finite(trade["profit_ratio"], "trade_profit_ratio")
+    exported_profit = _finite(trade["profit_abs"], "trade_profit_abs")
+    exit_reason = _string(trade["exit_reason"], "trade_exit_reason")
+    for key in (
+        "stake_amount",
+        "max_stake_amount",
+        "amount",
+        "open_rate",
+        "close_rate",
+        "initial_stop_loss_abs",
+        "initial_stop_loss_ratio",
+        "stop_loss_abs",
+        "stop_loss_ratio",
+        "min_rate",
+        "max_rate",
+    ):
+        _finite(trade[key], f"trade_{key}")
+    filled = _filled_orders(trade)
+    entry_orders = tuple(order for order in filled if order["ft_is_entry"])
+    exit_orders = tuple(order for order in filled if not order["ft_is_entry"])
+    expected_entries = 1 if role == "C" else len(entry_orders)
+    _need(
+        len(entry_orders) == expected_entries
+        and 1 <= len(entry_orders) <= (1 if role == "C" else 2),
+        "trade_entry_cardinality",
+    )
+    _need(len(exit_orders) == 1, "trade_exit_cardinality")
+    _need(all(order["ft_is_entry"] for order in filled[:-1]) and not filled[-1]["ft_is_entry"], "trade_order_sequence")
+    if len(entry_orders) == 2:
+        _need(
+            entry_orders[1]["order_filled_timestamp"] > entry_orders[0]["order_filled_timestamp"],
+            "trade_adjustment_not_later",
+        )
+    expected_entry_side = "sell" if side == "short" else "buy"
+    expected_exit_side = "buy" if side == "short" else "sell"
+    _need(all(order["ft_order_side"] == expected_entry_side for order in entry_orders), "trade_entry_side")
+    _need(exit_orders[0]["ft_order_side"] == expected_exit_side, "trade_exit_side")
+    _need(entry_orders[0]["order_filled_timestamp"] == open_timestamp, "trade_open_fill_mismatch")
+    _need(exit_orders[0]["order_filled_timestamp"] == close_timestamp, "trade_close_fill_mismatch")
+    total_amount = FtPrecise(0)
+    for order in entry_orders:
+        total_amount = _precise_add(total_amount, FtPrecise(order["amount"]))
+    _need(
+        abs(float(total_amount) - float(exit_orders[0]["amount"])) <= ABS_TOLERANCE,
+        "trade_full_exit_amount",
+    )
+    _need(
+        abs(float(total_amount) - _finite(trade["amount"], "trade_amount"))
+        <= ABS_TOLERANCE,
+        "trade_amount_reconciliation",
+    )
+
+    direction = -1.0 if side == "short" else 1.0
+    signed_cashflows: list[float] = []
+    fees: list[float] = []
+    stakes: list[float] = []
+    for order in filled:
+        amount, price = float(order["amount"]), float(order["safe_price"])
+        notional = amount * price
+        _need(math.isfinite(notional) and notional > 0, "trade_order_notional")
+        action = -1.0 if order["ft_is_entry"] else 1.0
+        signed_cashflows.append(direction * action * notional)
+        fees.append(notional * (fee_open if order["ft_is_entry"] else fee_close))
+        if order["ft_is_entry"]:
+            stake = notional / leverage
+            _need(math.isfinite(stake) and stake > 0, "trade_entry_stake")
+            stakes.append(stake)
+    raw_cashflow = math.fsum(signed_cashflows) - math.fsum(fees) + computed_funding
+    _need(math.isfinite(raw_cashflow), "trade_cashflow_nonfinite")
+    derived_profit = float(f"{raw_cashflow:.8f}")
+    _need(abs(exported_profit - derived_profit) <= ABS_TOLERANCE, "trade_profit_reconciliation")
+    initial_stake = stakes[0]
+    total_stake = math.fsum(stakes)
+    _need(initial_stake > 0, "trade_initial_stake")
+    if role == "C":
+        _need(
+            abs(initial_stake - EXPECTED_INITIAL_STAKE) <= ABS_TOLERANCE,
+            "trade_initial_stake",
+        )
+    _need(
+        abs(_finite(trade["stake_amount"], "trade_stake_amount") - total_stake)
+        <= ABS_TOLERANCE,
+        "trade_stake_reconciliation",
+    )
+    _need(
+        abs(_finite(trade["max_stake_amount"], "trade_max_stake_amount") - total_stake)
+        <= ABS_TOLERANCE,
+        "trade_max_stake_reconciliation",
+    )
+    if role == "C":
+        entry_notional = float(entry_orders[0]["amount"]) * float(entry_orders[0]["safe_price"])
+        open_value = entry_notional * (1 - fee_open if side == "short" else 1 + fee_open)
+        derived_ratio = float(f"{(derived_profit / open_value) * leverage:.8f}")
+        _need(abs(profit_ratio - derived_ratio) <= ABS_TOLERANCE, "trade_profit_ratio_reconciliation")
+    return AuditedTrade(
+        trade_ordinal,
+        side,
+        open_timestamp,
+        close_timestamp,
+        exit_reason,
+        profit_ratio,
+        computed_funding,
+        raw_cashflow,
+        derived_profit,
+        open_timestamp,
+        len(entry_orders),
+        1,
+        initial_stake,
+        ABS_TOLERANCE,
+        leverage,
+        filled,
+        intervals,
+        trade,
+    )
+
+
+@dataclass(frozen=True)
+class RoleAudit:
+    role: str
+    trades: tuple[AuditedTrade, ...]
+    profit_total_abs: float
+    profit_total: float
+    long_profit_abs: float
+    short_profit_abs: float
+    normalized_profit_total_abs: float
+    normalized_profit_total: float
+    normalized_long_profit_abs: float
+    normalized_short_profit_abs: float
+    gross_profit: float
+    gross_loss_abs: float
+    audited_profit_factor: float
+    expectancy: float
+    max_drawdown: float
+    long_count: int
+    short_count: int
+    counters: tuple[int, int, int, int, int, int]
+    adjustment_orders: int
+    liquidations: int
+    max_initial_stake: float
+    all_initial_stakes_half: bool
+    all_leverage_2x: bool
+    min_profit_ratio: float
+    stop_count: int
+    long_stop_count: int
+    short_stop_count: int
+
+
+def _calculate_expectancy(profits: Sequence[float]) -> float:
+    wins = [item for item in profits if item > 0]
+    losses = [item for item in profits if item < 0]
+    if not profits:
+        return 0.0
+    average_win = math.fsum(wins) / len(wins) if wins else 0.0
+    average_loss = -math.fsum(losses) / len(losses) if losses else 0.0
+    return (len(wins) / len(profits)) * average_win - (len(losses) / len(profits)) * average_loss
+
+
+def _calculate_drawdown(trades: Sequence[AuditedTrade]) -> float:
+    cumulative = high = worst_abs = worst_relative = 0.0
+    for trade in sorted(trades, key=lambda item: (item.close_timestamp, item.trade_ordinal)):
+        cumulative += trade.derived_profit_abs
+        high = max(high, cumulative)
+        drawdown = cumulative - high
+        if drawdown < worst_abs:
+            worst_abs = drawdown
+            worst_relative = -drawdown / (STARTING_BALANCE + high)
+    return worst_relative
+
+
+def _compare_summary_float(stats: Mapping[str, Any], key: str, expected: float) -> None:
+    _need(key in stats, f"result_missing_{key}")
+    _same_float(stats[key], expected, f"result_mismatch_{key}")
+
+
+def _audit_role(
+    *,
+    role: str,
+    archive: StandardArchive,
+    window: WindowSpec,
+    funding_rates: Any,
+) -> RoleAudit:
+    strategy_results = archive.result.get("strategy")
+    _need(isinstance(strategy_results, dict) and set(strategy_results) == {STRATEGY}, "result_strategy_inventory")
+    stats = strategy_results[STRATEGY]
+    _need(isinstance(stats, dict), "result_strategy_schema")
+    trades_value = stats.get("trades")
+    _need(isinstance(trades_value, list), "result_trades")
+    _need(
+        len(trades_value) <= (window.end_ms - window.start_ms) // HOUR_MS,
+        "result_trade_count_bound",
+    )
+    trades = tuple(
+        _audit_trade(
+            trade,
+            role=role,
+            trade_ordinal=ordinal,
+            window=window,
+            funding_rates=funding_rates,
+        )
+        for ordinal, trade in enumerate(trades_value)
+    )
+    profits = [trade.derived_profit_abs for trade in trades]
+    total_abs = math.fsum(profits)
+    total = total_abs / STARTING_BALANCE
+    long_abs = math.fsum(item.derived_profit_abs for item in trades if item.side == "long")
+    short_abs = math.fsum(item.derived_profit_abs for item in trades if item.side == "short")
+    normalized = [0.0 if item.exit_reason == "force_exit" else item.derived_profit_abs for item in trades]
+    normalized_total_abs = math.fsum(normalized)
+    normalized_long = math.fsum(
+        value for value, trade in zip(normalized, trades, strict=True) if trade.side == "long"
+    )
+    normalized_short = math.fsum(
+        value for value, trade in zip(normalized, trades, strict=True) if trade.side == "short"
+    )
+    gross_profit = math.fsum(max(item, 0.0) for item in profits)
+    gross_loss_abs = -math.fsum(min(item, 0.0) for item in profits)
+    audited_pf = gross_profit / gross_loss_abs if gross_loss_abs > 0 else math.inf if gross_profit > 0 else 0.0
+    expectancy = _calculate_expectancy(profits)
+    drawdown = _calculate_drawdown(trades)
+    long_count = sum(item.side == "long" for item in trades)
+    short_count = len(trades) - long_count
+    _need(_integer(stats.get("total_trades"), "result_total_trades", minimum=0) == len(trades), "result_total_trades_mismatch")
+    _need(_integer(stats.get("trade_count_long"), "result_long_count", minimum=0) == long_count, "result_long_count_mismatch")
+    _need(_integer(stats.get("trade_count_short"), "result_short_count", minimum=0) == short_count, "result_short_count_mismatch")
+    for key, expected in (
+        ("starting_balance", STARTING_BALANCE),
+        ("stake_amount", PROPOSED_STAKE),
+        ("profit_total_abs", total_abs),
+        ("profit_total", total),
+        ("profit_total_long_abs", long_abs),
+        ("profit_total_short_abs", short_abs),
+        ("profit_total_long", long_abs / STARTING_BALANCE),
+        ("profit_total_short", short_abs / STARTING_BALANCE),
+        ("expectancy", expectancy),
+        ("max_drawdown_account", drawdown),
+    ):
+        _compare_summary_float(stats, key, expected)
+    exported_pf = _finite(stats.get("profit_factor"), "result_profit_factor")
+    if gross_loss_abs > 0:
+        _need(abs(exported_pf - audited_pf) <= ABS_TOLERANCE, "result_profit_factor_mismatch")
+    else:
+        _need(exported_pf == 0.0, "result_profit_factor_zero_loss_sentinel")
+    counters = tuple(
+        _integer(stats.get(name), f"result_{name}", minimum=0) for name in COUNTER_FIELDS
+    )
+    comparison = archive.result.get("strategy_comparison")
+    _need(isinstance(comparison, list) and len(comparison) == 1, "result_comparison_inventory")
+    _need(isinstance(comparison[0], dict) and comparison[0].get("key") == STRATEGY, "result_comparison_key")
+    stop_trades = [
+        item
+        for item in trades
+        if item.exit_reason == "stop_loss"
+        and item.profit_ratio < 0
+        and item.orders[-1].get("ft_order_tag") == "stop_loss"
+    ]
+    return RoleAudit(
+        role,
+        trades,
+        total_abs,
+        total,
+        long_abs,
+        short_abs,
+        normalized_total_abs,
+        normalized_total_abs / STARTING_BALANCE,
+        normalized_long,
+        normalized_short,
+        gross_profit,
+        gross_loss_abs,
+        audited_pf,
+        expectancy,
+        drawdown,
+        long_count,
+        short_count,
+        counters,
+        sum(max(item.successful_entry_count - 1, 0) for item in trades),
+        sum(item.exit_reason == "liquidation" for item in trades),
+        max((item.initial_stake for item in trades), default=0.0),
+        all(
+            abs(item.initial_stake - EXPECTED_INITIAL_STAKE) <= ABS_TOLERANCE
+            for item in trades
+        ),
+        all(item.leverage == LEVERAGE for item in trades),
+        min((item.profit_ratio for item in trades), default=0.0),
+        len(stop_trades),
+        sum(item.side == "long" for item in stop_trades),
+        sum(item.side == "short" for item in stop_trades),
+    )
+
+
+@dataclass(frozen=True)
+class Opportunity:
+    episode_id: str
+    side: str
+    edge_completion_ms: int
+    execution_ms: int
+    classification: str
+    failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OpportunityAudit:
+    opportunities: tuple[Opportunity, ...]
+    free: int
+    open_same_side: int
+    open_opposite_side: int
+    end_boundary_censored: int
+    opportunity_failures: int
+    lifecycle_violations: int
+    mechanism_failures: int
+    post_stop_exercises: int
+
+
+def _entry_fills_at(
+    trades: Sequence[AuditedTrade], timestamp: int
+) -> list[tuple[AuditedTrade, Mapping[str, Any]]]:
+    return [
+        (trade, order)
+        for trade in trades
+        for order in trade.orders
+        if order["ft_is_entry"] and order["order_filled_timestamp"] == timestamp
+    ]
+
+
+def _exit_fill_at(trade: AuditedTrade, timestamp: int) -> bool:
+    return any(
+        not order["ft_is_entry"] and order["order_filled_timestamp"] == timestamp
+        for order in trade.orders
+    )
+
+
+def _hour_episode_id(
+    side: str,
+    timestamp: int,
+    states: Sequence[IndicatorState],
+    ledger: EpisodeLedger,
+) -> str | None:
+    candidates = [
+        state for state in states if state.completion_ms <= timestamp < state.completion_ms + THREE_HOURS_MS
+    ]
+    if not candidates:
+        return None
+    state = max(candidates, key=lambda item: item.completion_ms)
+    eligible = state.long_eligible if side == "long" else state.short_eligible
+    if not state.valid or not eligible:
+        return None
+    return ledger.state_episode_ids.get((side, state.completion_ms))
+
+
+def reconcile_opportunities(
+    *,
+    states: Sequence[IndicatorState],
+    episode_ledger: EpisodeLedger,
+    trades: Sequence[AuditedTrade],
+    primary_timestamps: set[int],
+    scored_start_ms: int,
+    scored_end_ms: int,
+) -> OpportunityAudit:
+    del scored_start_ms
+    by_id = {item.episode_id: item for item in episode_ledger.episodes}
+    opportunities: list[Opportunity] = []
+    opportunity_failures = 0
+    expected_initials: set[tuple[int, str]] = set()
+    for episode_id in episode_ledger.scored_armed:
+        episode = by_id[episode_id]
+        execution = episode.first_completion_ms + HOUR_MS
+        if execution >= scored_end_ms or execution not in primary_timestamps:
+            opportunities.append(
+                Opportunity(episode_id, episode.side, episode.first_completion_ms, execution, "end_boundary_censored", ())
+            )
+            continue
+        occupants = [trade for trade in trades if trade.open_timestamp < execution <= trade.close_timestamp]
+        initial_trades = [trade for trade in trades if trade.initial_entry_timestamp == execution]
+        entry_fills = _entry_fills_at(trades, execution)
+        failures: list[str] = []
+        if not occupants:
+            classification = "free"
+            expected = [trade for trade in initial_trades if trade.side == episode.side]
+            if len(initial_trades) != 1 or len(expected) != 1:
+                failures.append("free_entry")
+            else:
+                expected_initials.add((execution, episode.side))
+        elif len(occupants) == 1 and occupants[0].side == episode.side:
+            classification = "open_same_side"
+            if entry_fills:
+                failures.append("open_same_fill")
+        elif len(occupants) == 1 and occupants[0].side != episode.side:
+            classification = "open_opposite_side"
+            old = occupants[0]
+            expected = [trade for trade in initial_trades if trade.side == episode.side]
+            if (
+                old.close_timestamp != execution
+                or not _exit_fill_at(old, execution)
+                or len(initial_trades) != 1
+                or len(expected) != 1
+            ):
+                failures.append("reversal")
+            else:
+                expected_initials.add((execution, episode.side))
+        else:
+            classification = "outside_exhaustive_classes"
+            failures.append("outside_exhaustive_classes")
+        opportunity_failures += len(failures)
+        opportunities.append(
+            Opportunity(episode_id, episode.side, episode.first_completion_ms, execution, classification, tuple(failures))
+        )
+    lifecycle = sum(max(trade.successful_entry_count - 1, 0) for trade in trades)
+    seen_initials: set[tuple[int, str]] = set()
+    for trade in trades:
+        key = (trade.initial_entry_timestamp, trade.side)
+        if key not in expected_initials:
+            lifecycle += 1
+        if key in seen_initials:
+            lifecycle += 1
+        seen_initials.add(key)
+        if trade.initial_entry_timestamp == scored_end_ms:
+            lifecycle += 1
+    opportunity_by_initial = {
+        (item.execution_ms, item.side): item
+        for item in opportunities
+        if item.classification in ("free", "open_opposite_side") and not item.failures
+    }
+    post_stop = 0
+    for trade in (item for item in trades if item.exit_reason == "stop_loss"):
+        opportunity = opportunity_by_initial.get((trade.initial_entry_timestamp, trade.side))
+        if opportunity is None:
+            continue
+        next_timestamp = trade.close_timestamp + HOUR_MS
+        if next_timestamp < scored_end_ms and (
+            _hour_episode_id(trade.side, next_timestamp, states, episode_ledger)
+            == opportunity.episode_id
+        ):
+            post_stop += 1
+    return OpportunityAudit(
+        tuple(opportunities),
+        sum(item.classification == "free" for item in opportunities),
+        sum(item.classification == "open_same_side" for item in opportunities),
+        sum(item.classification == "open_opposite_side" for item in opportunities),
+        sum(item.classification == "end_boundary_censored" for item in opportunities),
+        opportunity_failures,
+        lifecycle,
+        opportunity_failures + lifecycle,
+        post_stop,
+    )
+
+
+def _parse_provenance(manifest: LoadedManifest) -> tuple[bool, Mapping[str, str]]:
+    files = manifest.files
+    for kind in (
+        "research_receipt",
+        "data_admission",
+        "restart_receipt",
+        "image_identity",
+        "backend_source_manifest",
+    ):
+        _scan_secret_bytes(files[kind].raw, code=kind)
+    research = _load_json_bytes(files["research_receipt"].raw, code="research_receipt", canonical=True)
+    admission = _load_json_bytes(files["data_admission"].raw, code="data_admission", canonical=True)
+    restart = _load_json_bytes(files["restart_receipt"].raw, code="restart_receipt", canonical=True)
+    image = _load_json_bytes(files["image_identity"].raw, code="image_identity", canonical=True)
+    backend = _load_json_bytes(files["backend_source_manifest"].raw, code="backend_source_manifest", canonical=True)
+    for value in (research, admission, restart, image, backend):
+        _need(isinstance(value, dict), "provenance_schema")
+        _scan_secret_values(value)
+
+    research = _exact_keys(
+        research,
+        {"schema", "image_id", "files"},
+        "research_receipt_schema",
+    )
+    _need(research["schema"] == "bounded-tr-performance-receipt-v1", "research_receipt_version")
+    receipt_image_id = _string(research["image_id"], "research_receipt_image")
+    _need(_SHA256_ID.fullmatch(receipt_image_id) is not None, "research_receipt_image")
+    receipt_files = research["files"]
+    _need(
+        isinstance(receipt_files, dict) and set(receipt_files) == RECEIPT_INPUTS,
+        "research_receipt_inventory",
+    )
+    for name, entry_value in receipt_files.items():
+        entry = _exact_keys(
+            entry_value,
+            {"bytes", "sha256"},
+            "research_receipt_file_schema",
+        )
+        _integer(entry["bytes"], "research_receipt_file_bytes", minimum=0)
+        _need(
+            _HEX64.fullmatch(_string(entry["sha256"], "research_receipt_file_sha256"))
+            is not None,
+            "research_receipt_file_sha256",
+        )
+    receipt_bindings = {
+        "admission": "data_admission",
+        "restart": "restart_receipt",
+        "image_identity": "image_identity",
+        "contract": "contract_source",
+        "config": "effective_config",
+        "b_request": "b_request",
+        "b_strategy": "b_strategy_source",
+        "b_strategy_mirror": "b_strategy_source",
+        "c_strategy": "c_strategy_source",
+        "validator": "validator_source",
+        "controller": "controller_source",
+        "backend_source_manifest": "backend_source_manifest",
+    }
+    for receipt_name, manifest_kind in receipt_bindings.items():
+        bound = manifest.files[manifest_kind]
+        entry = receipt_files[receipt_name]
+        _need(
+            entry == {"bytes": len(bound.raw), "sha256": bound.sha256},
+            f"research_receipt_binding_{receipt_name}",
+        )
+    c_template = contract.canonical_json_bytes(contract.EXPECTED_C_REQUEST_TEMPLATE)
+    _need(
+        receipt_files["c_template"]
+        == {
+            "bytes": len(c_template),
+            "sha256": hashlib.sha256(c_template).hexdigest(),
+        },
+        "research_receipt_binding_c_template",
+    )
+
+    _need(admission.get("command") == "admit", "admission_command")
+    admission_inputs = admission.get("inputs")
+    _need(
+        isinstance(admission_inputs, dict)
+        and set(admission_inputs) == set(ADMITTED_DATA_FILES),
+        "admission_inventory",
+    )
+    admitted_hashes: dict[str, str] = {}
+    for name, relative_path in ADMITTED_DATA_FILES.items():
+        item = admission_inputs[name]
+        _need(isinstance(item, dict), "admission_input_schema")
+        _need(item.get("relative_path") == relative_path, f"admission_{name}_path")
+        _integer(item.get("raw_size"), f"admission_{name}_size", minimum=0)
+        item_hash = _string(item.get("raw_sha256"), f"admission_{name}_sha256")
+        _need(_HEX64.fullmatch(item_hash) is not None, f"admission_{name}_sha256")
+        admitted_hashes[name] = item_hash
+    admission_id = _string(admission.get("summary_sha256"), "admission_identity")
+    _need(_HEX64.fullmatch(admission_id) is not None, "admission_identity")
+
+    _need(restart.get("command") == "verify-merge", "restart_command")
+    restart_complete = (
+        restart.get("complete") is True
+        and _integer(restart.get("mismatch_count"), "restart_mismatch_count", minimum=0) == 0
+    )
+    for key, expected in (
+        ("comparison_count", 35040),
+        ("record_count", 43800),
+        ("resolver_calls", 43800),
+        ("shard_count", 8),
+    ):
+        _need(
+            _integer(restart.get(key), f"restart_{key}", minimum=0) == expected,
+            f"restart_{key}",
+        )
+    global_identity = restart.get("global_identity")
+    _need(isinstance(global_identity, dict), "restart_identity")
+    _need(global_identity.get("admission_sha256") == admission_id, "restart_admission_binding")
+    end_rehashes = restart.get("end_rehashes")
+    _need(
+        isinstance(end_rehashes, dict)
+        and set(end_rehashes) == {f"raw_{name}" for name in ADMITTED_DATA_FILES},
+        "restart_rehash_inventory",
+    )
+    for name, expected_hash in admitted_hashes.items():
+        _need(end_rehashes[f"raw_{name}"] == expected_hash, f"restart_rehash_{name}")
+
+    _need(backend.get("schema") == "freqtrade-cn.backend-source-manifest.v1", "backend_source_schema")
+    backend_head = _string(backend.get("backend_commit"), "backend_source_commit")
+    _need(re.fullmatch(r"[0-9a-f]{40}", backend_head) is not None, "backend_source_commit")
+    _need(backend.get("backend_commit") == backend_head, "backend_source_commit")
+    _need(
+        isinstance(backend.get("verified_equal"), dict)
+        and backend["verified_equal"].get("expected_git_head_files") is True
+        and backend["verified_equal"].get("observed_immutable_image_files") is True,
+        "backend_source_verification",
+    )
+    repositories = image.get("repositories")
+    _need(image.get("schema") == "freqtrade-cn.execution-image-identity.v2", "image_identity_version")
+    _need(
+        isinstance(repositories, dict)
+        and isinstance(repositories.get("backend"), dict)
+        and repositories["backend"].get("commit") == backend_head,
+        "image_backend_binding",
+    )
+    image_value = image.get("image")
+    _need(isinstance(image_value, dict), "image_identity_schema")
+    _need(image_value.get("platform") == "linux/amd64", "image_platform")
+    image_id = _string(image_value.get("immutable_id"), "image_immutable_id")
+    _need(_SHA256_ID.fullmatch(image_id) is not None, "image_immutable_id")
+    _need(receipt_image_id == image_id, "research_receipt_image_binding")
+    for role in ("B", "C"):
+        _need(
+            manifest.runtime_security["roles"][role]["image_id"] == image_id,
+            f"runtime_security_role_{role}_image_binding",
+        )
+    image_artifacts = image.get("artifacts")
+    _need(isinstance(image_artifacts, dict), "image_artifact_schema")
+    backend_artifact = image_artifacts.get("backend-source-manifest.json")
+    _need(
+        backend_artifact
+        == {
+            "bytes": len(files["backend_source_manifest"].raw),
+            "sha256": files["backend_source_manifest"].sha256,
+        },
+        "image_backend_manifest_binding",
+    )
+    return restart_complete, {"admission_sha256": admission_id, "backend_head": backend_head, "image_id": image_id}
+
+
+def _validate_tool_bindings(manifest: LoadedManifest) -> None:
+    own = manifest.files["validator_source"]
+    _need(own.raw == Path(__file__).read_bytes(), "validator_source_binding")
+    contract_file = manifest.files["contract_source"]
+    _need(contract_file.raw == Path(contract.__file__).read_bytes(), "contract_source_binding")
+    for kind in (
+        "b_strategy_source",
+        "c_strategy_source",
+        "controller_source",
+    ):
+        _scan_secret_bytes(manifest.files[kind].raw, code=kind)
+
+
+def _artifact_audit(
+    manifest: LoadedManifest,
+    baseline: StandardArchive,
+    candidate: StandardArchive,
+    primary_rows: Sequence[OhlcvRow],
+    funding_rates: Any,
+    restart_parity: bool,
+    provenance: Mapping[str, str],
+) -> ValidationOutcome:
+    baseline_role = _audit_role(role="B", archive=baseline, window=manifest.window, funding_rates=funding_rates)
+    candidate_role = _audit_role(role="C", archive=candidate, window=manifest.window, funding_rates=funding_rates)
+    states = build_indicator_states(primary_rows)
+    sentinel_states = [
+        state
+        for state in states
+        if state.bucket_start_ms <= manifest.window.end_ms <= state.bucket_start_ms + 2 * HOUR_MS
+    ]
+    _need(
+        len(sentinel_states) == 1
+        and not sentinel_states[0].bucket_ok
+        and not sentinel_states[0].valid
+        and not sentinel_states[0].long_eligible
+        and not sentinel_states[0].short_eligible,
+        "sentinel_completed_indicator",
+    )
+    episodes = derive_episode_ledger(states, manifest.window.start_ms, manifest.window.end_ms)
+    opportunity = reconcile_opportunities(
+        states=states,
+        episode_ledger=episodes,
+        trades=candidate_role.trades,
+        primary_timestamps={item.timestamp_ms for item in primary_rows},
+        scored_start_ms=manifest.window.start_ms,
+        scored_end_ms=manifest.window.end_ms,
+    )
+    scored_ids = set(episodes.scored_armed)
+    scored_episodes = [item for item in episodes.episodes if item.episode_id in scored_ids]
+    facts = GateFacts(
+        len(baseline_role.trades),
+        len(candidate_role.trades),
+        baseline_role.long_count,
+        baseline_role.short_count,
+        candidate_role.long_count,
+        candidate_role.short_count,
+        len(scored_episodes),
+        sum(item.side == "long" for item in scored_episodes),
+        sum(item.side == "short" for item in scored_episodes),
+        candidate_role.stop_count,
+        candidate_role.long_stop_count,
+        candidate_role.short_stop_count,
+        opportunity.open_same_side,
+        opportunity.post_stop_exercises,
+        opportunity.mechanism_failures,
+        candidate_role.adjustment_orders,
+        candidate_role.max_initial_stake,
+        ABS_TOLERANCE,
+        candidate_role.all_initial_stakes_half,
+        candidate_role.all_leverage_2x,
+        candidate_role.liquidations,
+        candidate_role.min_profit_ratio,
+        candidate_role.profit_total,
+        baseline_role.profit_total,
+        candidate_role.audited_profit_factor,
+        candidate_role.expectancy,
+        candidate_role.long_profit_abs,
+        candidate_role.short_profit_abs,
+        candidate_role.max_drawdown,
+        baseline_role.max_drawdown,
+        candidate_role.counters,
+        restart_parity,
+        candidate_role.normalized_profit_total,
+        baseline_role.normalized_profit_total,
+        candidate_role.normalized_long_profit_abs,
+        candidate_role.normalized_short_profit_abs,
+    )
+    outcome = classify_gate(facts)
+    audit = {
+        "runtime_security": manifest.runtime_security,
+        "manifest_sha256": manifest.sha256,
+        "window": manifest.window.name,
+        "snapshot_id": baseline.revision["data_snapshot_id"],
+        "replay_payload_id": baseline.revision["data_snapshot_replay"]["replay_payload_id"],
+        "execution_context_evidence_id": baseline.revision["execution_context_evidence"]["evidence_id"],
+        "strategy_evidence": {
+            "B": baseline.revision["strategy_evidence"]["evidence_id"],
+            "C": candidate.revision["strategy_evidence"]["evidence_id"],
+        },
+        "provenance": dict(provenance),
+        "funding_boundary": "pinned-engine-causal-nested-orders-aggregate-only",
+        "restart_parity": restart_parity,
+        "episodes": {
+            "scored_armed": len(scored_episodes),
+            "long": sum(item.side == "long" for item in scored_episodes),
+            "short": sum(item.side == "short" for item in scored_episodes),
+            "boundary_unknown": list(episodes.boundary_unknown),
+            "prefix_active": list(episodes.prefix_active),
+        },
+        "opportunities": {
+            "free": opportunity.free,
+            "open_same_side": opportunity.open_same_side,
+            "open_opposite_side": opportunity.open_opposite_side,
+            "end_boundary_censored": opportunity.end_boundary_censored,
+            "mechanism_failures": opportunity.mechanism_failures,
+            "post_stop_exercises": opportunity.post_stop_exercises,
+        },
+        "roles": {
+            role.role: {
+                "trades": len(role.trades),
+                "profit_total": role.profit_total,
+                "normalized_profit_total": role.normalized_profit_total,
+                "profit_factor": "Infinity" if role.audited_profit_factor == math.inf else role.audited_profit_factor,
+                "max_drawdown": role.max_drawdown,
+                "funding": [
+                    {
+                        "trade_ordinal": trade.trade_ordinal,
+                        "computed": trade.funding_fees,
+                        "exported": _finite(trade.raw["funding_fees"], "trade_funding"),
+                        "absolute_delta": abs(trade.funding_fees - float(trade.raw["funding_fees"])),
+                        "intervals": list(trade.funding_intervals),
+                    }
+                    for trade in role.trades
+                ],
+            }
+            for role in (baseline_role, candidate_role)
+        },
+        "input_files": {
+            kind: {"bytes": len(item.raw), "sha256": item.sha256}
+            for kind, item in sorted(manifest.files.items())
+        },
+    }
+    return ValidationOutcome(outcome.classification, outcome.reasons, audit)
+
+
+def validate_manifest(path_value: str | os.PathLike[str]) -> ValidationOutcome:
+    manifest: LoadedManifest | None = None
+    try:
+        manifest = _load_manifest(path_value)
+        _validate_tool_bindings(manifest)
+        files = manifest.files
+        config = _load_json_bytes(files["effective_config"].raw, code="effective_config", canonical=True)
+        contract.validate_effective_config(config)
+        b_request = _load_json_bytes(files["b_request"].raw, code="b_request", canonical=True)
+        c_request = _load_json_bytes(files["c_request"].raw, code="c_request", canonical=True)
+        contract.validate_b_request(b_request)
+        contract.validate_bound_c_request(c_request)
+        _need(isinstance(b_request, dict) and isinstance(c_request, dict), "request_schema")
+        restart_parity, provenance = _parse_provenance(manifest)
+        baseline = _parse_archive(
+            role="B",
+            result_file=files["b_result_zip"],
+            metadata_file=files["b_metadata"],
+            pointer_file=files["b_pointer"],
+            request=b_request,
+            source_file=files["b_strategy_source"],
+            window=manifest.window,
+        )
+        candidate = _parse_archive(
+            role="C",
+            result_file=files["c_result_zip"],
+            metadata_file=files["c_metadata"],
+            pointer_file=files["c_pointer"],
+            request=c_request,
+            source_file=files["c_strategy_source"],
+            window=manifest.window,
+        )
+        _need(candidate.config == baseline.config, "cross_config")
+        _need(c_request["replay_data_snapshot"]["filename"] == baseline.stem, "candidate_replay_source")
+        _need(c_request["replay_data_snapshot"]["strategy"] == STRATEGY, "candidate_replay_strategy")
+        _need(candidate.revision["data_snapshot_id"] == baseline.revision["data_snapshot_id"], "cross_snapshot_id")
+        _need(candidate.revision["data_snapshot"] == baseline.revision["data_snapshot"], "cross_snapshot")
+        _need(
+            candidate.revision["execution_context_evidence"]
+            == baseline.revision["execution_context_evidence"],
+            "cross_execution_context",
+        )
+        _need(
+            candidate.revision["strategy_evidence"]["evidence_id"]
+            != baseline.revision["strategy_evidence"]["evidence_id"],
+            "cross_strategy_evidence_not_different",
+        )
+        replay, primary_frame, funding_rates = _route_frames(baseline)
+        _need(replay.binding == baseline.revision["data_snapshot_replay"], "baseline_replay_binding")
+        primary_rows = _validate_primary_rows(primary_frame, manifest.window)
+        return _artifact_audit(
+            manifest,
+            baseline,
+            candidate,
+            primary_rows,
+            funding_rates,
+            restart_parity,
+            provenance,
+        )
+    except InvalidArtifact as exc:
+        audit = {} if manifest is None else {"runtime_security": manifest.runtime_security}
+        return ValidationOutcome(CLASS_INVALID, (str(exc),), audit)
+    except contract.ContractError as exc:
+        audit = {} if manifest is None else {"runtime_security": manifest.runtime_security}
+        return ValidationOutcome(CLASS_INVALID, (f"contract:{exc}",), audit)
+    except (
+        OperationalException,
+        KeyError,
+        OSError,
+        OverflowError,
+        TypeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ) as exc:
+        audit = {} if manifest is None else {"runtime_security": manifest.runtime_security}
+        return ValidationOutcome(
+            CLASS_INVALID,
+            (f"validator_parse_failure:{type(exc).__name__}",),
+            audit,
+        )
+
+
+def _write_report_once(path: Path, outcome: ValidationOutcome) -> None:
+    _need(path.is_absolute(), "report_path_absolute")
+    _need(not path.exists(), "report_already_exists")
+    parent = path.parent
+    _need(parent.is_dir(), "report_parent_missing")
+    try:
+        _need(parent.resolve(strict=True) == parent, "report_parent_canonical")
+    except OSError as exc:
+        raise InvalidArtifact("report_parent_unavailable") from exc
+    payload = {
+        "schema_version": 1,
+        "contract": REPORT_CONTRACT,
+        "classification": outcome.classification,
+        "reasons": list(outcome.reasons),
+        "audit": outcome.audit,
+    }
+    raw = _canonical_json(payload)
+    temporary = parent / f".{path.name}.{os.getpid()}.tmp"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        offset = 0
+        while offset < len(raw):
+            offset += os.write(descriptor, raw[offset:])
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        _need(not path.exists(), "report_already_exists")
+        os.link(temporary, path)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--report", required=True)
+    try:
+        args = parser.parse_args(argv)
+        outcome = validate_manifest(args.manifest)
+        _write_report_once(Path(args.report), outcome)
+        sys.stdout.buffer.write((outcome.classification + "\n").encode("ascii"))
+        sys.stdout.buffer.flush()
+        return 0
+    except Exception:
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(_main())
