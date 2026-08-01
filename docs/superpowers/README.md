@@ -180,6 +180,28 @@ not an active backlog.
   [acceptance report](reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md).
   It does not change the backend or claim that current recomputation reproduces a
   historical Backtest.
+- The active bounded implementation is
+  [Phase 1 Backtest Chart Source Disclosure](plans/2026-08-01-phase1-backtest-chart-source-disclosure.md).
+  The existing Backtest chart combines selected-result Trades with candles loaded from the
+  current local data store and indicators, strategy Signals, and annotations recalculated
+  with the currently installed strategy. On API 2.57+, the bounded implementation binds
+  the six selected-result-owned weak context fields—strategy, timeframe, timerange,
+  FreqAI model, trading mode, and margin mode—to the selected result, keeps the basic chart and
+  Trade markers, and permanently discloses that it is a reference rather than an exact
+  replay. Pair remains user-selected, columns remain Plot-Config-selected, and exchange
+  remains Webserver-owned. The existing `freqaimodel` field now distinguishes inheritance,
+  an explicit model, and an explicit no-model request; only the per-request deep copy may
+  be disabled. Backend API 2.57 advertises that meaning, and the Backtest chart forces the
+  existing POST Pair-History transport even when the global reduced-call setting is off;
+  GET cannot carry the selected result's trading and margin modes. Updated FreqUI connected to an
+  older backend does not request the recalculated chart for a no-model result and instead
+  requires an upgrade; a non-empty result model retains legacy chart compatibility, but
+  only the API 2.57+ POST path carries the complete six-field ownership contract. The
+  packaged local FreqUI/backend pair must be updated together because old FreqUI behavior
+  cannot be corrected retroactively. Merely unverified identity retains markers; an
+  explicitly detected strategy or timeframe mismatch remains fail-closed. Implementation
+  is complete; the exact-SHA acceptance receipt is pending. No new API field, route,
+  exact-replay artifact, or workload is in scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -253,7 +275,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md` | Accepted operator-navigation receipt |
 | Latest completed implementation | `plans/2026-08-01-phase1-pair-history-context-truth.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md` | Accepted historic-chart context receipt |
-| Active implementation | None | No bounded implementation is active |
+| Active implementation | `plans/2026-08-01-phase1-backtest-chart-source-disclosure.md` | Implemented; acceptance receipt pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

@@ -26,8 +26,27 @@ SHAs are unchanged. Its
 [acceptance report](reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md)
 is the deterministic historic-chart request/display evidence authority.
 
-**Active bounded implementation:** None. The accepted context repair adds no backend,
-market-data, strategy, Backtest execution, Runtime, Paper, Live, or AI-worker scope.
+**Active bounded implementation:**
+[Phase 1 Backtest Chart Source Disclosure](plans/2026-08-01-phase1-backtest-chart-source-disclosure.md).
+It permanently discloses that selected-result Trades are overlaid on current
+`/pair_history` data and, on API 2.57+, removes form-state drift by making the selected
+result the sole authority for its six weak context fields: strategy, timeframe, timerange,
+FreqAI model, trading mode, and margin mode. Pair remains user-selected, columns remain selected by
+Plot Config, and exchange remains Webserver-owned. The existing `freqaimodel` field has a
+minimal three-state presence contract so a result without FreqAI cannot inherit the
+Webserver's current model; this changes only a per-request deep copy and adds no schema
+field or route. API 2.57 advertises the explicit no-model meaning. The Backtest chart
+forces the existing POST Pair-History transport on that API even when the global
+reduced-call setting is off, because GET cannot apply result-owned trading and margin
+modes. Updated FreqUI fails
+closed with an upgrade message when a no-model result is viewed through an older backend,
+while a non-empty result model retains legacy chart compatibility without promising the
+complete six-field contract; the packaged local FreqUI/backend pair must be updated
+together. Merely unverified exact identity retains Trade markers with the
+warning; an explicitly detected strategy or timeframe mismatch remains fail-closed.
+Implementation is complete; the exact-SHA acceptance receipt is pending. It adds no
+market-data, strategy, Backtest execution, result snapshot, Runtime, Paper, Live, or
+AI-worker scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a
@@ -309,12 +328,25 @@ remains available without letting mismatched data render. The repair reuses the 
 `/chart_candles` generation pattern and does not create a generalized request or evidence
 platform.
 
-The next bounded slice should permanently distinguish
-selected historical Backtest Trades from current `/pair_history` candle/indicator/signal
-recomputation. It must not claim exact historical reproduction or execute archived
-strategy code. Doing that disclosure first would be premature because the current cache
-previously could contain a different strategy or timerange than the visible selection;
-that prerequisite is now closed.
+The active bounded slice permanently distinguishes selected Backtest-result
+Trades from current `/pair_history` candles loaded from local data and the
+indicators, Signals, and annotations calculated with the strategy installed now. It must
+not claim exact historical reproduction or execute archived strategy code. On API 2.57+,
+the selected result becomes the sole authority for its six weak context fields so later
+edits to the Backtest form cannot change those fields under selected-result Trades. The
+Backtest chart forces POST on that supported path even when the global reduced-call
+setting is off; GET remains available to other callers but cannot carry result-owned
+trading and margin modes. On API 2.57+, a
+missing/null result FreqAI model is sent as an explicit no-model request; GET/POST omission
+remains backward-compatible inheritance for other clients, while the explicit empty value
+disables only an existing request-local FreqAI copy. Updated FreqUI hides this chart and
+shows an upgrade requirement for no-model results on older backends rather than assuming
+the new meaning. A non-empty result model retains legacy chart compatibility, but that
+fallback does not claim the complete six-field ownership contract. The
+design keeps the basic chart and Trade markers when exact identity is merely unverified,
+preserves fail-closed hiding for an explicit context mismatch, and adds no backend identity
+comparison, API field, or route. Implementation is complete; the exact-SHA acceptance
+receipt is pending.
 
 Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
 holdout is retired, and no replacement holdout or formal release chain exists.
