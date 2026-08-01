@@ -98,8 +98,18 @@ not an active backlog.
   minimum. Its
   [rejection report](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
   is the evidence authority. B/S/C performance, safety analysis, holdout, tracked
-  strategy edits, Paper, and Live were not opened during that study; no strategy
-  candidate is active.
+  strategy edits, Paper, and Live were not opened during that study; it left no strategy
+  candidate active at completion.
+- The
+  [VolatilitySystem Bounded True-Range Episode Development Screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md)
+  is the active preregistered strategy research. It freezes one adaptive, integrated,
+  B/C-only development hypothesis and the exact restart, episode, accounting, and failure
+  rules before any workload. No market data, Backtest, strategy edit, or result has been
+  opened under it. Its only prospective interval is
+  `[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)`, with the immutable research receipt due
+  before `2026-08-28T18:00:00Z`. A result can be only a development or prospective
+  survivor, not a significance or profit claim; tracked strategy changes, Runtime, Paper,
+  and Live remain prohibited.
 - The preceding completed product slice is
   [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md).
   It makes the existing 8083 Recursive Analysis evaluate every materialized startup
@@ -273,6 +283,7 @@ not an active backlog.
 | Preceding strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
 | Latest strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Completed; candidate rejected before performance |
 | Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
+| Active strategy research | `plans/2026-08-01-volatility-bounded-true-range-episode-screen.md` | Preregistered; no workload or result yet |
 | Preceding completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Preceding acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
 | Preceding completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |

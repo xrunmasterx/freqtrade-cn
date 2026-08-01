@@ -19,6 +19,9 @@
 **Latest strategy-research evidence:**
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
 
+**Active strategy research:**
+[VolatilitySystem Bounded True-Range Episode Development Screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md)
+
 **Latest completed bounded implementation:**
 [Phase 1 Backtest Effective Window Binding](plans/2026-08-01-phase1-backtest-effective-window-binding.md).
 It is accepted at Root `30793b22` and frontend `820bcc81`; backend `38232052` and
@@ -34,9 +37,13 @@ Runtime, Paper, Live, or AI-worker scope.
 
 **Active bounded implementation:** None; no next bounded implementation has been selected.
 
-**Active strategy candidate:** None; the latest candidate was rejected before
-performance. Its former `20250702-20260702` holdout was later contaminated by a
-final-row indicator acceptance run and is retired.
+**Active strategy candidate:** One preregistered development-only candidate exists, but no
+strategy workload or result exists yet. It is an adaptive third hypothesis on reused
+development history, has no calibrated significance claim, and can become at most
+`DEVELOPMENT-SURVIVOR` before the separately sealed
+`[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)` spend. Its former
+`20250702-20260702` holdout remains retired. Tracked strategy changes and Paper remain
+blocked.
 
 ## Product purpose
 
@@ -346,8 +353,9 @@ other result/user/Webserver source boundaries remain unchanged. Root `30793b22`,
 by the
 [exact-SHA report](reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md).
 
-Dynamic Paper remains a NO-GO because no strategy candidate is active, the former
-holdout is retired, and no replacement holdout or formal release chain exists.
+Dynamic Paper remains a NO-GO because the active preregistered candidate has no result,
+its prospective window is unspent, no formal release chain exists, and the known GTC
+signal/order lifecycle non-equivalence remains unresolved.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without
@@ -363,11 +371,13 @@ search for a failure witness, but each witness must be confirmed by the real str
 it may never sign a full-window PASS unless exact-domain equivalence is proved exhaustively
 or formally. No number of final-candle samples can be accumulated into that PASS.
 
-No new candidate, viewed-window performance rerun, or holdout spend is active. The
-former `20250702-20260702` holdout is retired and must not be used for fresh validation.
-A future candidate needs a separately preregistered window that has not already been
-used for strategy indicator, signal, trade, or metric inspection; no replacement window
-is assigned now.
+One new development-only candidate is preregistered by the
+[bounded true-range episode screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md);
+no viewed-window performance run or prospective spend has started. Its B/C sources,
+deterministic tests, data routes, and receipt must be frozen before performance. The former
+`20250702-20260702` holdout is retired and must not be used for fresh validation. The only
+replacement interval is `[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)` under that
+one-shot protocol; inspecting any candidate output consumes it.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate
