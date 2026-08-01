@@ -168,7 +168,7 @@ not an active backlog.
   Its
   [acceptance report](reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md)
   is the exact-SHA, static route/documentation evidence authority.
-- The latest completed bounded implementation is
+- The preceding completed bounded implementation is
   [Phase 1 Pair-History Context Truth](plans/2026-08-01-phase1-pair-history-context-truth.md).
   Static review proved that `/pair_history` responses share a `pair + timeframe` display
   slot even when strategy, timerange, exchange/modes, FreqAI model, live mode, or columns
@@ -180,7 +180,7 @@ not an active backlog.
   [acceptance report](reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md).
   It does not change the backend or claim that current recomputation reproduces a
   historical Backtest.
-- The active bounded implementation is
+- The latest completed bounded implementation is
   [Phase 1 Backtest Chart Source Disclosure](plans/2026-08-01-phase1-backtest-chart-source-disclosure.md).
   The existing Backtest chart combines selected-result Trades with candles loaded from the
   current local data store and indicators, strategy Signals, and annotations recalculated
@@ -199,9 +199,11 @@ not an active backlog.
   only the API 2.57+ POST path carries the complete six-field ownership contract. The
   packaged local FreqUI/backend pair must be updated together because old FreqUI behavior
   cannot be corrected retroactively. Merely unverified identity retains markers; an
-  explicitly detected strategy or timeframe mismatch remains fail-closed. Implementation
-  is complete; the exact-SHA acceptance receipt is pending. No new API field, route,
-  exact-replay artifact, or workload is in scope.
+  explicitly detected strategy or timeframe mismatch remains fail-closed. Root
+  `8daa1625`, backend `38232052`, and frontend `410018a1` are accepted by the
+  [exact-SHA acceptance report](reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md);
+  the strategy submodule is unchanged. No new API field, route, exact-replay artifact, or
+  workload is in scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -273,9 +275,11 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-backtest-poll-lifecycle-acceptance.md` | Accepted frontend lifecycle receipt |
 | Preceding completed implementation | `plans/2026-08-01-phase1-operator-entrypoint-truth.md` | Completed; exact-SHA accepted |
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-operator-entrypoint-truth-acceptance.md` | Accepted operator-navigation receipt |
-| Latest completed implementation | `plans/2026-08-01-phase1-pair-history-context-truth.md` | Completed; exact-SHA accepted |
-| Latest acceptance evidence | `reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md` | Accepted historic-chart context receipt |
-| Active implementation | `plans/2026-08-01-phase1-backtest-chart-source-disclosure.md` | Implemented; acceptance receipt pending |
+| Preceding completed implementation | `plans/2026-08-01-phase1-pair-history-context-truth.md` | Completed; exact-SHA accepted |
+| Preceding acceptance evidence | `reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md` | Accepted historic-chart context receipt |
+| Latest completed implementation | `plans/2026-08-01-phase1-backtest-chart-source-disclosure.md` | Completed; exact-SHA accepted |
+| Latest acceptance evidence | `reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md` | Accepted Backtest-chart source/context receipt |
+| Active implementation | None | No next bounded implementation selected |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

@@ -1,6 +1,8 @@
 # Phase 1 Backtest Chart Source Disclosure
 
-**Status:** Implemented; acceptance receipt pending
+**Status:** Accepted at Root `8daa16253de23487c79bcd0bd5a6c8ec13bad71b`, backend
+`3823205239281af56c34f4ff07f1674edddbe6db`, and frontend
+`410018a1de9a65e97d8b8b3e12bdfb4d3926d404`
 
 **Scope:** FreqUI selected-result chart ownership, Backtest-result chart title,
 permanent source warning, exact locale copy, existing `/pair_history` `freqaimodel`
