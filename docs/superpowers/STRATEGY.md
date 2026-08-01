@@ -44,7 +44,13 @@ warning; an explicitly detected strategy or timeframe mismatch remains fail-clos
 adds no market-data, strategy, Backtest execution, result snapshot, Runtime, Paper, Live,
 or AI-worker scope.
 
-**Active bounded implementation:** None; no next bounded implementation has been selected.
+**Active bounded implementation:**
+[Phase 1 Backtest Effective Window Binding](plans/2026-08-01-phase1-backtest-effective-window-binding.md).
+The selected result's actual effective timestamps now own both the current-reference chart
+request and a timezone-explicit header only when both are unambiguous, second-aligned 13-digit
+milliseconds. Invalid or legacy values preserve the existing requested timerange and legacy
+label. This is a frontend-only review-correctness repair; it does not add historical analyzed
+output, an API, a data run, a strategy candidate, Runtime, Paper, Live, or AI scope.
 
 **Active strategy candidate:** None; the latest candidate was rejected before
 performance. Its former `20250702-20260702` holdout was later contaminated by a

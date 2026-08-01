@@ -204,6 +204,13 @@ not an active backlog.
   [exact-SHA acceptance report](reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md);
   the strategy submodule is unchanged. No new API field, route, exact-replay artifact, or
   workload is in scope.
+- The active bounded implementation is
+  [Phase 1 Backtest Effective Window Binding](plans/2026-08-01-phase1-backtest-effective-window-binding.md).
+  It makes the selected result's valid, second-aligned 13-digit effective timestamps own both
+  the existing current-reference Pair-History request and a timezone-explicit actual-window
+  label. Ambiguous or legacy timestamps preserve the original result timerange and are never
+  labelled actual. The slice is frontend-only and does not change the permanent mixed-source
+  warning, API, Backtest artifacts, strategy, market data, Runtime, Paper, Live, or AI scope.
 - The baseline is one product Gate across existing compatibility services: 8081
   `/graph` and `/trade` own live watch/runtime observation; 8083 `/backtest`,
   `/lookahead_analysis`, and `/recursive_analysis` own standard Freqtrade offline
@@ -279,7 +286,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-pair-history-context-truth-acceptance.md` | Accepted historic-chart context receipt |
 | Latest completed implementation | `plans/2026-08-01-phase1-backtest-chart-source-disclosure.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md` | Accepted Backtest-chart source/context receipt |
-| Active implementation | None | No next bounded implementation selected |
+| Active implementation | `plans/2026-08-01-phase1-backtest-effective-window-binding.md` | Implemented; acceptance receipt pending |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |
