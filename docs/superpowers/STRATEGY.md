@@ -4,8 +4,11 @@
 
 **Current status authority:** [README.md](README.md)
 
-**Latest completed execution plan:**
-[Phase 1 Backtest Effective Window Binding](plans/2026-08-01-phase1-backtest-effective-window-binding.md)
+**Latest closed execution plan:**
+[Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md)
+
+**Latest diagnostic evidence:**
+[Phase 1 Backtest Execution Control Diagnostic Receipt](reports/2026-08-02-backtest-execution-control-diagnostic-receipt.md)
 
 **Latest accepted implementation evidence:**
 [Phase 1 Backtest Effective Window Binding Acceptance](reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md)
@@ -34,15 +37,14 @@ mixed-source disclosure, selected-result Trades, and all other source authoritie
 unchanged. It adds no backend, API, artifact, market-data run, strategy candidate,
 Runtime, Paper, Live, or AI-worker scope.
 
-**Active bounded implementation:**
-[Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md).
-It is a baseline-only reliability slice implemented as a temporary external probe, not a
-new product subsystem. Preregistration v2, staged immutable inputs, strict control-state
-validation, owned cleanup, and the host receipt now pass 11 focused P1 tests, all 37 tests,
-the 26-test legacy set, and isolated compilation. The real Backtest has not run; an
-independent re-Gate must clear all P0/P1 findings first. The slice may then submit exactly
-one isolated standard Backtest and observe only background control state; it may not inspect
-result content or activate a strategy candidate.
+**Active bounded implementation:** None. The
+[Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md)
+is terminally closed. Its source/design re-Gate passed, but the sole real attempt ended
+`DIAGNOSTIC_INVALID` at `container_inspect_failed` before container start or POST.
+Owned cleanup, quarantine, and secret disposal succeeded; zero Backtest requests were
+submitted. The result neither validates nor disproves the existing background-job API
+contract, authorizes no retry or candidate, and promotes no temporary probe or product
+subsystem.
 
 **Active strategy candidate:** None. The latest candidate is closed as protocol `INVALID`
 for completeness/evidence failure after its one permitted development attempt was spent
@@ -313,23 +315,20 @@ acceptance.
 
 ### Next
 
-The active Backtest Execution Control Diagnostic addresses the demonstrated opacity of
-the closed bounded-true-range study before another candidate is allowed to spend a
-development interval. The temporary external implementation reuses the existing standard
-POST, background-job, and abort contracts from one fresh dedicated container. Its
-preregistration v2 identity envelope, eight staged read-only inputs, three input-hash
-checkpoints, exact secret ownership, 30-second inspect-only late-create adoption,
-post-deadline response rejection, strict child-to-host verdict promotion, post-container
-evidence read, 7,200-second deadline, one-POST rule, result-free polling, 120-second abort
-grace, explicit termination/cleanup evidence, and no-automatic-retry rule are frozen.
-Deterministic implementation verification is green; the next actions are to commit this
-truthful documentation, independently re-Gate the exact probe/test/request/doc hashes, and
-only then preregister and run one baseline diagnostic. The real diagnostic has not started.
-One non-blocking P2 remains explicit: bounded Docker lifecycle output is capped after each
-bounded process returns rather than while its temporary files are growing. Backend and
-FreqUI changes remain blocked unless the real diagnostic proves a concrete contract gap; a
-new scheduler, endpoint,
-or job system is not justified.
+The Backtest Execution Control Diagnostic is now closed after its one permitted real
+attempt. Deterministic verification and the source/design re-Gate passed, but created
+container validation failed before start, so the attempt produced a durable
+`DIAGNOSTIC_INVALID` receipt and zero POSTs. It proved that owned container/network
+cleanup, intact external quarantine, and ephemeral-secret disposal work on this failure
+path; it did not reach the API and therefore provides no evidence for changing the
+Backtest or background-job contract.
+
+No active implementation, strategy candidate, or automatic retry follows. A future
+user-authorized plan may investigate the created-container inspection boundary without
+spending a Backtest and may improve field-specific sanitized control evidence, but it
+must not inspect either quarantine or promote the temporary probe by default. The
+deferred Docker lifecycle-output P2 remains relevant only if a reusable tool is later
+proposed. A new scheduler, endpoint, or job system is not justified.
 
 The preceding accepted slice closed the demonstrated `BacktestingView` polling leak and
 preserves observation when the user returns to a still-running job. It does not redesign

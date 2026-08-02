@@ -117,18 +117,20 @@ not an active backlog.
   [credential-free research receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md)
   and its [pre-performance report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md)
   remain unchanged historical evidence.
-- The active bounded implementation is the
-  [Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md).
-  Its temporary external probe now implements preregistration v2, eight-input staging and
-  three hash checkpoints, strict child/host verdict separation, deadline-after-return
-  rejection, owned ephemeral secrets, bounded late-create adoption, post-container safe
-  evidence reading, and a complete host-authored receipt. Independent coordinator tests
-  are green (11 focused P1, 37 total, 26 legacy-only, plus isolated compilation), but the
-  real baseline diagnostic has not run and the independent source/design re-Gate is still
-  pending. One Docker temporary-output growth P2 is explicitly deferred for this one-shot
-  local diagnostic. No product API or repository implementation changed, the closed study
-  remains untouched, and no strategy-performance, Runtime, Paper, Live, or deployment work
-  is authorized.
+- The bounded
+  [Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md)
+  is terminally closed and not accepted for another strategy-candidate spend. Its
+  source/design re-Gate passed (`P0 = 0`, `P1 = 0`, `P2 = 1`) after 11 focused,
+  37 total, and 26 legacy-only tests plus isolated compilation. The one real attempt then
+  ended `DIAGNOSTIC_INVALID` at `container_inspect_failed` before container start or
+  POST. Its [terminal receipt](reports/2026-08-02-backtest-execution-control-diagnostic-receipt.md)
+  records the exact preregistration and host-receipt hashes, zero POSTs, successful owned
+  cleanup, intact external quarantine, and successful secret disposal. No retry, product
+  API change, strategy-performance conclusion, Runtime, Paper, Live, or deployment work is
+  authorized, and no new active implementation is selected by this closeout. A manual
+  closeout fact audit found no P0/P1 documentation error, but the independently dispatched
+  final-documentation Gate was unavailable before file access; combined with zero POSTs,
+  the diagnostic remains explicitly unaccepted.
 - The preceding completed product slice is
   [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md).
   It makes the existing 8083 Recursive Analysis evaluate every materialized startup
@@ -322,7 +324,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md` | Accepted Backtest-chart source/context receipt |
 | Latest completed implementation | `plans/2026-08-01-phase1-backtest-effective-window-binding.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md` | Accepted Backtest effective-window receipt |
-| Active implementation | `plans/2026-08-02-backtest-execution-control-diagnostic.md` | External probe implemented/unit-verified; independent re-Gate and one real baseline diagnostic pending; product code unchanged |
+| Latest closed diagnostic | `plans/2026-08-02-backtest-execution-control-diagnostic.md` | Terminal `DIAGNOSTIC_INVALID` before start/POST; zero POSTs; cleanup/quarantine/secrets confirmed; no retry or product change |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

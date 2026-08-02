@@ -1,13 +1,19 @@
 # Phase 1 Backtest Execution Control Diagnostic
 
-**Status:** Active; design frozen, temporary external probe implemented and unit-verified;
-real diagnostic not started
+**Status:** Closed terminal; the sole real attempt ended `DIAGNOSTIC_INVALID` at
+`container_inspect_failed` before container start or POST. Cleanup, quarantine, and
+secret disposal succeeded. No retry is authorized, and the slice is not accepted for
+another strategy-candidate spend.
 
 **Gate history:** Initial Design Gate `PASS` (`P0 = 0`, `P1 = 0`, `P2 = 0`). The
 first implementation Source Gate returned `REQUIRE-CHANGE` (`P0 = 0`, `P1 = 7`,
-`P2 = 1`). All seven P1 groups now have focused regression tests and a corrected
-implementation; the independent source/design re-Gate is still pending. The P2 is
-explicitly deferred below and is not represented as closed.
+`P2 = 1`). All seven P1 groups were corrected, and the source/design re-Gate returned
+`PASS` (`P0 = 0`, `P1 = 0`, `P2 = 1`). The P2 remains explicitly deferred and
+the real outcome is recorded in the
+[terminal receipt](../reports/2026-08-02-backtest-execution-control-diagnostic-receipt.md).
+The independently dispatched final-documentation Gate could not run because its provider
+exhausted all service retries before file access. A manual closeout fact audit found no
+P0/P1 documentation error but does not satisfy the independent-Gate criterion.
 
 **Scope:** Root-only research-control probe and one isolated, baseline-only local
 diagnostic; no backend, frontend, strategy, Backtest-engine, API, market-data, Runtime,
@@ -231,12 +237,12 @@ promoted into a product or maintained Root tool. Its current exact artifacts are
 | `test_probe.py` | 92,826 | `9adc741f45f0de0d057b2acc3fa8b1be7f0696b4fd323f08687d2e7ef4941f8a` |
 | `request.json` | 382 | `5de919af1057b22135d073b4e6f835087554ca61671ec9fdd173070e043d9f8a` |
 
-The request remains the frozen baseline payload. Independent coordinator reruns pass the
+The request remains the frozen baseline payload. Independent read-only reruns passed the
 11 focused P1 test methods, all 37 test methods, the isolated 26-method legacy contract
-set, and isolated `py_compile`. No Docker command, HTTP request, Backtest, market-data
-execution, result access, planned run-root creation, or planned quarantine creation has
-occurred during implementation or verification. The historical spent-attempt quarantine
-has not been inspected, enumerated, changed, or deleted.
+set, and isolated `py_compile` before the real attempt. No Docker mutation, HTTP
+request, Backtest, market-data execution, result access, planned run-root creation, or
+planned quarantine creation occurred during implementation verification. The historical
+spent-attempt quarantine was not inspected, enumerated, changed, or deleted.
 
 The seven corrected P1 groups are: complete host-authored receipt binding; strict child
 success and fail-closed classification; rejection of late HTTP responses; staged and
@@ -250,6 +256,29 @@ the files themselves are not size-limited while that bounded process is running.
 long-running child probe discards stdout/stderr. This is accepted only for this trusted,
 one-shot local diagnostic with 30-second lifecycle-command bounds; it must be repaired or
 re-evaluated before any promotion to a reusable product tool.
+
+## Real diagnostic outcome
+
+The exact preregistration is 5,012 bytes with SHA-256
+`582a62ad870cbc6e0fc0cd50bfdcef2092cee9932c3a8004145bbe91807550ed`.
+It passed the probe's Docker-backed preflight, after which the one authorized host
+invocation ran from `2026-08-02T07:07:02.402264+00:00` to
+`2026-08-02T07:07:06.593283+00:00`.
+
+The host created the exact labelled network and container, then failed closed while
+validating the created-but-not-started container. The final verdict is
+`DIAGNOSTIC_INVALID`, primary code `container_inspect_failed`, error type
+`EvidenceError`. The container never started, no HTTP request or Backtest POST
+occurred, no job was bound, no abort was attempted, and no child control receipt exists.
+The final 4,436-byte host receipt has SHA-256
+`563dfe95534c662ab2e129b6828d09fee87251f300351a6a759a7356478a2da6`.
+
+Owned container and network removal were confirmed, the run tree was moved intact to
+`C:\Users\dezhengu\AppData\Local\Temp\freqtrade-cn-backtest-control-quarantine-3f0eb24`,
+and all ephemeral secrets plus their exact directory were removed. The quarantine
+contents were not enumerated or opened. The stage code is durable, but the receipt does
+not retain the field-specific validator message, so this plan does not guess the exact
+container fact that differed.
 
 ## RED test requirements
 
@@ -277,20 +306,29 @@ pass for the minimal implementation:
 
 ## Acceptance criteria
 
-1. The active plan is committed before any real POST, and the external probe/test hashes
-   plus exact diagnostic request hash are recorded before execution.
-2. All deterministic probe tests pass without Docker, market data, or strategy execution.
-   This criterion is currently satisfied at the exact hashes above.
-3. One fresh isolated baseline diagnostic produces one durable control receipt and exactly
-   one POST.
-4. The receipt proves either `RELIABILITY_PASS` or a specific bounded failure; literal
-   catch-all output alone is not acceptable.
-5. No result-bearing endpoint or output artifact is opened, no trade/performance metric is
-   reported, and the old quarantined attempt remains untouched.
-6. Owned container/network cleanup and external state-output quarantine are confirmed.
-7. Root, backend, frontend, and strategy repositories are clean after the diagnostic.
-8. Independent design, implementation/control-evidence, and final documentation Gates
-   report no unresolved P0/P1 findings.
+1. Satisfied: the active plan and exact external probe/test/request hashes were committed
+   before the real attempt.
+2. Satisfied: all deterministic tests passed without Docker, market data, or strategy
+   execution.
+3. **Not satisfied:** one fresh isolated diagnostic produced one durable control receipt,
+   but it failed before container start and produced zero POSTs.
+4. Satisfied: the receipt proves the bounded `container_inspect_failed` stage rather than
+   only a catch-all controller failure.
+5. Satisfied: no result-bearing endpoint or output artifact was opened, no
+   trade/performance metric was reported, and the old quarantined attempt remained
+   untouched.
+6. Satisfied: owned container/network cleanup, external quarantine, and secret disposal
+   were confirmed.
+7. Satisfied before closeout documentation: Root, backend, frontend, and strategy
+   repositories were clean after the real diagnostic.
+8. **Not fully satisfied:** the source/design re-Gate passed, but the independently
+   dispatched final-documentation Gate exhausted 10 of 10 provider retries before file
+   access. A manual closeout fact audit found `P0 = 0` and `P1 = 0`, but it is not
+   represented as independent.
+
+Because criteria 3 and 8 failed, the diagnostic is terminally closed but is not accepted
+as evidence that the existing API control contract works. The plan forbids retrying this
+attempt.
 
 ## Decision after the diagnostic
 
@@ -333,7 +371,7 @@ git -C frequi status --short --branch
 git -C freqtrade-strategies status --short --branch
 ```
 
-The probe/test/request hashes above are implementation evidence. The final
-preregistration hash, exact Docker invocation, control-receipt hash, cleanup result, and
-quarantine outcome remain future acceptance evidence and will be recorded only after the
-independent re-Gate passes and the single real diagnostic actually runs.
+The probe/test/request hashes above remain implementation evidence. The final
+preregistration, real outcome, control-receipt hash, cleanup result, quarantine outcome,
+and acceptance gap are recorded in the
+[terminal receipt](../reports/2026-08-02-backtest-execution-control-diagnostic-receipt.md).
