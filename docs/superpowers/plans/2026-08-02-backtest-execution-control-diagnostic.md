@@ -1,8 +1,13 @@
 # Phase 1 Backtest Execution Control Diagnostic
 
-**Status:** Active; design frozen, implementation not started
+**Status:** Active; design frozen, temporary external probe implemented and unit-verified;
+real diagnostic not started
 
-**Design Gate:** PASS; P0 = 0, P1 = 0, P2 = 0
+**Gate history:** Initial Design Gate `PASS` (`P0 = 0`, `P1 = 0`, `P2 = 0`). The
+first implementation Source Gate returned `REQUIRE-CHANGE` (`P0 = 0`, `P1 = 7`,
+`P2 = 1`). All seven P1 groups now have focused regression tests and a corrected
+implementation; the independent source/design re-Gate is still pending. The P2 is
+explicitly deferred below and is not represented as closed.
 
 **Scope:** Root-only research-control probe and one isolated, baseline-only local
 diagnostic; no backend, frontend, strategy, Backtest-engine, API, market-data, Runtime,
@@ -74,6 +79,21 @@ background-job discovery contract cannot bind the new job safely.
     `BTC/USDT:USDT` pair, `backtest_cache = none`, and the accepted evidence-capture and
     retained-snapshot switches. Only `experiment_id` changes to
     `backtest-control-diagnostic-20260802-b`.
+12. The host is a trusted local orchestration boundary. This one-shot diagnostic detects
+    path replacement, reparse/symlink use, changed file identities, unexpected Docker
+    identity, and direct credential environment variables, but it is not a defense
+    against an administrator or same-user process intentionally racing every local
+    filesystem operation.
+13. A Docker create whose command outcome is ambiguous may materialize late. The probe
+    therefore has one fixed 30-second adoption horizon for each attempted network or
+    container create. It adopts only a resource whose complete preregistered identity,
+    label, topology, image, command, mounts, environment, and isolation settings match;
+    it never issues a second create.
+14. Secret files are exclusively created in one exact fresh directory. POSIX execution
+    additionally requires mode `0600`; Windows execution relies on exclusive creation,
+    non-reparse regular-file checks, and stable object identity because POSIX mode bits
+    are not an ACL guarantee on Windows. This temporary local diagnostic does not claim
+    cross-user Windows ACL hardening.
 
 The committed historical bounded-true-range receipt is immutable and is only the source
 of already admitted baseline/configuration identities. Its controller and request bytes
@@ -103,6 +123,7 @@ defaults:
 | progress and final control receipt | at most 1,048,576 bytes each |
 | abort grace | 120 seconds |
 | one Docker image/network/container create, inspect, start, or remove command | at most 30 seconds |
+| ambiguous Docker create adoption | at most 30 seconds per attempted create; inspect-only and no retry |
 | host watchdog around the complete probe subprocess | 7,800 seconds |
 
 Every call computes `min(5 seconds, remaining phase time)` immediately before opening
@@ -111,43 +132,66 @@ consume the transient-GET budget. A change-only sample is retained when phase, s
 running state, progress-task description, or integer five-percentage-point progress
 bucket changes. After 512 samples, the probe retains the first sample, latest terminal or
 failure sample, and an explicit truncation count within the same 512-entry ceiling.
-The 7,800-second host watchdog covers readiness, the 7,200-second execution budget, the
-120-second abort grace, and bounded return to host cleanup. If it fires, the host still
-enters the same unconditional cleanup path; it does not authorize another POST.
+The 7,800-second watchdog bounds the child `docker exec` that contains readiness, the
+7,200-second execution budget, and the 120-second abort grace. Host preflight and Docker
+lifecycle calls have their separate bounds; cleanup starts after child return or failure.
+If the watchdog fires, the host still enters the same unconditional cleanup path and it
+does not authorize another POST.
 
-1. Verify the exact image, baseline, configuration, and four data-file hashes before any
-   server start.
-2. Create one attempt-labelled network and start one identically labelled, read-only,
+1. Load canonical preregistration schema
+   `freqtrade.backtest-control-diagnostic.preregistration.v2`, bind its own byte count and
+   SHA-256, and verify the exact plan, probe, test, request, baseline, configuration, four
+   data-file hashes, Docker executable, and immutable image before any server start.
+2. Create the exact fresh attempt tree, then copy all eight runtime inputs (probe,
+   request, strategy, configuration, and four market-data files) from already verified
+   file handles into that tree. Verify every copy while staging, then verify the complete
+   staged manifest at three checkpoints: before container create, before container start,
+   and after container removal. The container mounts only these staged copies; it never
+   mounts the original registered files.
+3. Create one attempt-labelled network and start one identically labelled, read-only,
    capability-dropped container with only the declared read-only inputs, separate
    read-write state and control-output directories, loopback API, and ephemeral secret
-   files. Exact names and labels are frozen in the preregistration evidence before start.
-3. Wait for `/ping`, then snapshot `/background`. Require zero Backtest-category jobs.
-4. Start the end-to-end monotonic deadline immediately before the sole POST. Require HTTP
+   files. Exact names, labels, paths, and the 30-second inspect-only adoption horizon are
+   frozen in preregistration before start. A create error or malformed create response is
+   never retried; a late resource is adopted only after complete validation.
+4. Wait for `/ping`, then snapshot `/background`. Require zero Backtest-category jobs.
+5. Start the end-to-end monotonic deadline immediately before the sole POST. Require HTTP
    200 and a JSON object whose `status` is `running`.
-5. Discover exactly one new Backtest-category job and bind its `job_id`. Zero or multiple
+6. Discover exactly one new Backtest-category job and bind its `job_id`. Zero or multiple
    new matching jobs after the bounded discovery window is an ambiguous failure.
-6. Poll only `/background/{job_id}` every five seconds. Persist timestamped, bounded,
+7. Poll only `/background/{job_id}` every five seconds. Persist timestamped, bounded,
    allowlisted control samples when phase, status, running state, progress value, progress
    task, or sanitized error changes. Never call `GET /backtest` after submission.
-7. Treat `success` plus `running == false` as control success and `failed` plus
+8. Reject an HTTP response if it returns after its phase deadline, and check the deadline
+   again after bounded JSON decoding. A late execution or abort response is not consumed
+   as valid evidence.
+9. Treat `success` plus `running == false` as control success and `failed` plus
    `running == false` as control failure. A terminal-looking status with `running == true`
    remains non-terminal until a later sample. Neither outcome says anything about
    profitability or strategy quality.
-8. Enforce a 7,200-second end-to-end execution deadline. On deadline or a terminal
+10. Enforce a 7,200-second end-to-end execution deadline. On deadline or a terminal
    control failure that leaves execution ownership uncertain, call the existing abort
    route exactly once. Poll the bound job for at most 120 additional seconds, with each
    abort or poll call capped by the remaining grace time.
-9. Enter one unconditional host `finally` cleanup on every success, failure, exception,
+11. Enter one unconditional host finalization path on every success, failure, exception,
    or interruption path. Before acting, inspect exact names and require the frozen attempt
    label; a name/label mismatch is a cleanup failure and is never removed. Force-remove
    the exact owned container when it still exists, then remove the exact owned network
    when it still exists, and confirm both are absent. Cleanup is attempted even when
    server start, readiness, POST, discovery, polling, or abort failed.
-10. Still inside cleanup, move the untouched state/output directory to its preregistered
+12. Do not read `inner-control.json` until the owned container is confirmed absent and the
+    staged inputs pass their post-stop hash check. Then require one regular, non-reparse,
+    single-link, size-bounded file in the exact evidence directory, read it without
+    following links, and accept only canonical JSON matching the complete child-control
+    schema. A child can emit only `CONTROL_SUCCEEDED`, `RELIABILITY_FAIL`, or
+    `DIAGNOSTIC_INVALID`; only the host may promote strict child success plus successful
+    finalization to `RELIABILITY_PASS`.
+13. Still inside cleanup, move the untouched state/output directory to its preregistered
     recoverable quarantine without enumerating or opening contents, then dispose of the
-    three ephemeral secret files. Record move/disposal failures separately and do not
+    three ephemeral secret files only while their recorded identities still match. Record
+    move/disposal failures separately, preserve any mismatched foreign object, and do not
     hide the primary diagnostic outcome.
-11. Only after container/network absence, quarantine, and secret disposal have been
+14. Only after container/network absence, quarantine, and secret disposal have been
     attempted, atomically finalize one capped control receipt containing identities, UTC
     and monotonic-relative timestamps, POST count, bound job ID, allowlisted samples,
     primary outcome, abort acknowledgement, termination confirmation, quarantine outcome,
@@ -175,6 +219,37 @@ never persisted.
 
 These verdicts do not reuse the strategy-study meanings `DEVELOPMENT-SURVIVOR`,
 `REJECTED`, or `INVALID` and cannot promote a strategy to Paper.
+
+## Implemented temporary probe evidence
+
+The implementation is intentionally external to the repository and has not been
+promoted into a product or maintained Root tool. Its current exact artifacts are:
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| `probe.py` | 133,310 | `b107130d888265bdafcfd731e75158e117115765a59b512d0a6db07f0adb1579` |
+| `test_probe.py` | 92,826 | `9adc741f45f0de0d057b2acc3fa8b1be7f0696b4fd323f08687d2e7ef4941f8a` |
+| `request.json` | 382 | `5de919af1057b22135d073b4e6f835087554ca61671ec9fdd173070e043d9f8a` |
+
+The request remains the frozen baseline payload. Independent coordinator reruns pass the
+11 focused P1 test methods, all 37 test methods, the isolated 26-method legacy contract
+set, and isolated `py_compile`. No Docker command, HTTP request, Backtest, market-data
+execution, result access, planned run-root creation, or planned quarantine creation has
+occurred during implementation or verification. The historical spent-attempt quarantine
+has not been inspected, enumerated, changed, or deleted.
+
+The seven corrected P1 groups are: complete host-authored receipt binding; strict child
+success and fail-closed classification; rejection of late HTTP responses; staged and
+three-times-hashed runtime inputs; exact fresh secret ownership and file-only credential
+bindings; bounded full-validation adoption of ambiguously created Docker resources; and
+safe post-container inner-control reading.
+
+One Source-Gate P2 remains deliberately deferred: ordinary Docker lifecycle stdout and
+stderr are redirected to host temporary files and capped when the process returns, so
+the files themselves are not size-limited while that bounded process is running. The
+long-running child probe discards stdout/stderr. This is accepted only for this trusted,
+one-shot local diagnostic with 30-second lifecycle-command bounds; it must be repaired or
+re-evaluated before any promotion to a reusable product tool.
 
 ## RED test requirements
 
@@ -205,6 +280,7 @@ pass for the minimal implementation:
 1. The active plan is committed before any real POST, and the external probe/test hashes
    plus exact diagnostic request hash are recorded before execution.
 2. All deterministic probe tests pass without Docker, market data, or strategy execution.
+   This criterion is currently satisfied at the exact hashes above.
 3. One fresh isolated baseline diagnostic produces one durable control receipt and exactly
    one POST.
 4. The receipt proves either `RELIABILITY_PASS` or a specific bounded failure; literal
@@ -257,6 +333,7 @@ git -C frequi status --short --branch
 git -C freqtrade-strategies status --short --branch
 ```
 
-The exact Docker invocation, probe/test paths and hashes, diagnostic request hash, control
-receipt hash, cleanup result, and quarantine path are acceptance evidence, not assumptions,
-and will be recorded only after they exist.
+The probe/test/request hashes above are implementation evidence. The final
+preregistration hash, exact Docker invocation, control-receipt hash, cleanup result, and
+quarantine outcome remain future acceptance evidence and will be recorded only after the
+independent re-Gate passes and the single real diagnostic actually runs.

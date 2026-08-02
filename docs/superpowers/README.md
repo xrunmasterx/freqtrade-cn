@@ -119,11 +119,16 @@ not an active backlog.
   remain unchanged historical evidence.
 - The active bounded implementation is the
   [Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md).
-  It uses one new isolated, baseline-only standard Backtest to prove one-POST job binding,
-  result-free background polling, a finite deadline, abort/termination handling, and owned
-  cleanup before any new strategy candidate is selected. It does not reopen the closed
-  study, inspect result content, change product APIs, or authorize strategy-performance,
-  Runtime, Paper, Live, or deployment work.
+  Its temporary external probe now implements preregistration v2, eight-input staging and
+  three hash checkpoints, strict child/host verdict separation, deadline-after-return
+  rejection, owned ephemeral secrets, bounded late-create adoption, post-container safe
+  evidence reading, and a complete host-authored receipt. Independent coordinator tests
+  are green (11 focused P1, 37 total, 26 legacy-only, plus isolated compilation), but the
+  real baseline diagnostic has not run and the independent source/design re-Gate is still
+  pending. One Docker temporary-output growth P2 is explicitly deferred for this one-shot
+  local diagnostic. No product API or repository implementation changed, the closed study
+  remains untouched, and no strategy-performance, Runtime, Paper, Live, or deployment work
+  is authorized.
 - The preceding completed product slice is
   [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md).
   It makes the existing 8083 Recursive Analysis evaluate every materialized startup
@@ -317,7 +322,7 @@ not an active backlog.
 | Preceding acceptance evidence | `reports/2026-08-01-phase1-backtest-chart-source-disclosure-acceptance.md` | Accepted Backtest-chart source/context receipt |
 | Latest completed implementation | `plans/2026-08-01-phase1-backtest-effective-window-binding.md` | Completed; exact-SHA accepted |
 | Latest acceptance evidence | `reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md` | Accepted Backtest effective-window receipt |
-| Active implementation | `plans/2026-08-02-backtest-execution-control-diagnostic.md` | Root-only baseline control diagnostic; product code unchanged unless a real contract gap is proven |
+| Active implementation | `plans/2026-08-02-backtest-execution-control-diagnostic.md` | External probe implemented/unit-verified; independent re-Gate and one real baseline diagnostic pending; product code unchanged |
 | Data identity decision | `decisions/2026-07-31-logical-data-snapshot-identity.md` | Accepted |
 | Replay boundary decision | `decisions/2026-07-31-retained-data-snapshot-replay-boundary.md` | Accepted |
 | Strategy evidence decision | `decisions/2026-07-31-backtest-strategy-evidence-boundary.md` | Accepted |

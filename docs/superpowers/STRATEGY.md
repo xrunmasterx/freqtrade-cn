@@ -36,9 +36,13 @@ Runtime, Paper, Live, or AI-worker scope.
 
 **Active bounded implementation:**
 [Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md).
-It is a Root-only, baseline-only reliability slice. It may submit exactly one new isolated
-standard Backtest and observe only background control state; it may not inspect result
-content or activate a strategy candidate.
+It is a baseline-only reliability slice implemented as a temporary external probe, not a
+new product subsystem. Preregistration v2, staged immutable inputs, strict control-state
+validation, owned cleanup, and the host receipt now pass 11 focused P1 tests, all 37 tests,
+the 26-test legacy set, and isolated compilation. The real Backtest has not run; an
+independent re-Gate must clear all P0/P1 findings first. The slice may then submit exactly
+one isolated standard Backtest and observe only background control state; it may not inspect
+result content or activate a strategy candidate.
 
 **Active strategy candidate:** None. The latest candidate is closed as protocol `INVALID`
 for completeness/evidence failure after its one permitted development attempt was spent
@@ -311,11 +315,20 @@ acceptance.
 
 The active Backtest Execution Control Diagnostic addresses the demonstrated opacity of
 the closed bounded-true-range study before another candidate is allowed to spend a
-development interval. It first reuses the existing standard POST, background-job, and
-abort contracts from one fresh dedicated container. Its 7,200-second deadline, one-POST
-rule, result-free polling, 120-second abort grace, explicit termination/cleanup evidence,
-and no-automatic-retry rule are frozen before execution. Backend and FreqUI changes remain
-blocked unless this diagnostic proves a concrete contract gap; a new scheduler, endpoint,
+development interval. The temporary external implementation reuses the existing standard
+POST, background-job, and abort contracts from one fresh dedicated container. Its
+preregistration v2 identity envelope, eight staged read-only inputs, three input-hash
+checkpoints, exact secret ownership, 30-second inspect-only late-create adoption,
+post-deadline response rejection, strict child-to-host verdict promotion, post-container
+evidence read, 7,200-second deadline, one-POST rule, result-free polling, 120-second abort
+grace, explicit termination/cleanup evidence, and no-automatic-retry rule are frozen.
+Deterministic implementation verification is green; the next actions are to commit this
+truthful documentation, independently re-Gate the exact probe/test/request/doc hashes, and
+only then preregister and run one baseline diagnostic. The real diagnostic has not started.
+One non-blocking P2 remains explicit: bounded Docker lifecycle output is capped after each
+bounded process returns rather than while its temporary files are growing. Backend and
+FreqUI changes remain blocked unless the real diagnostic proves a concrete contract gap; a
+new scheduler, endpoint,
 or job system is not justified.
 
 The preceding accepted slice closed the demonstrated `BacktestingView` polling leak and
