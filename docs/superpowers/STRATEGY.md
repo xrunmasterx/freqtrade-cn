@@ -4,6 +4,14 @@
 
 **Current status authority:** [README.md](README.md)
 
+**Manual-acceptance dev baseline:**
+[Phase 1 Dev Branch Integration Closeout](reports/2026-08-02-phase1-dev-branch-integration-closeout.md)
+on `xrunmasterx/phase1-complete-development`. Its integrated code-state anchor is Root
+`32cb20819`, backend `382320523`, frontend `820bcc81d`, and public upstream strategies
+`dbd5b0b21`. The Root/backend/frontend work remains outside `main` pending user manual
+acceptance. This integration activates no new implementation, Paper, Live, or strategy
+candidate.
+
 **Latest closed execution plan:**
 [Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md)
 

@@ -8,6 +8,15 @@ not an active backlog.
 
 ## Current development state
 
+- The manual-acceptance dev baseline is integrated on branch
+  `xrunmasterx/phase1-complete-development`. Its pre-document code-state anchor is Root
+  `32cb20819`, backend `382320523`, frontend `820bcc81d`, and public upstream strategies
+  `dbd5b0b21`. A remote recursive clone and the focused backend/frontend/Compose checks
+  passed as recorded in the
+  [dev-branch integration closeout](reports/2026-08-02-phase1-dev-branch-integration-closeout.md).
+  Root/backend/frontend `main` were not merged or modified by that closeout. The dev
+  branch awaits user manual acceptance and is not a new product, Paper, Live, or strategy
+  acceptance.
 - Runtime Registry v2 Phases 2A, 2B, and 2C are merged into local Root `main`.
 - Phase 2C is accepted at its offline, fail-closed boundary. Production Supervisor
   assembly, online runtime acceptance, exchange writes, and live trading remain disabled.
@@ -284,6 +293,7 @@ not an active backlog.
 | Role | Document | Status |
 |---|---|---|
 | Product purpose and sequencing | `STRATEGY.md` | Governing |
+| Manual-acceptance dev baseline | `reports/2026-08-02-phase1-dev-branch-integration-closeout.md` | Integrated on dev branch; user acceptance pending; no main merge |
 | Shared domain language | `../../CONTEXT.md` | Governing glossary |
 | Previous baseline implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Completed; exact-SHA accepted |
 | Previous baseline evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
