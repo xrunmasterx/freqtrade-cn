@@ -34,7 +34,11 @@ mixed-source disclosure, selected-result Trades, and all other source authoritie
 unchanged. It adds no backend, API, artifact, market-data run, strategy candidate,
 Runtime, Paper, Live, or AI-worker scope.
 
-**Active bounded implementation:** None; no next bounded implementation has been selected.
+**Active bounded implementation:**
+[Phase 1 Backtest Execution Control Diagnostic](plans/2026-08-02-backtest-execution-control-diagnostic.md).
+It is a Root-only, baseline-only reliability slice. It may submit exactly one new isolated
+standard Backtest and observe only background control state; it may not inspect result
+content or activate a strategy candidate.
 
 **Active strategy candidate:** None. The latest candidate is closed as protocol `INVALID`
 for completeness/evidence failure after its one permitted development attempt was spent
@@ -304,6 +308,15 @@ acceptance.
   and new Research scope paused.
 
 ### Next
+
+The active Backtest Execution Control Diagnostic addresses the demonstrated opacity of
+the closed bounded-true-range study before another candidate is allowed to spend a
+development interval. It first reuses the existing standard POST, background-job, and
+abort contracts from one fresh dedicated container. Its 7,200-second deadline, one-POST
+rule, result-free polling, 120-second abort grace, explicit termination/cleanup evidence,
+and no-automatic-retry rule are frozen before execution. Backend and FreqUI changes remain
+blocked unless this diagnostic proves a concrete contract gap; a new scheduler, endpoint,
+or job system is not justified.
 
 The preceding accepted slice closed the demonstrated `BacktestingView` polling leak and
 preserves observation when the user returns to a still-running job. It does not redesign
