@@ -1,27 +1,47 @@
 # VolatilitySystem Bounded True-Range Episode Development Screen
 
-**Status:** Preregistered at Root `788d2256cc772f51e9442e3d3f25e4649aa5b4a9`
-after independent statistical/product and implementation Gates returned
-`P0=0, P1=0, P2=0`. The temporary candidate, deterministic tests, exact four-file data
-admission, and exhaustive eight-shard real-strategy restart matrix are frozen outside
-tracked paths. All 8,760 development targets, 43,800 records, and 35,040 comparisons
-passed with zero mismatch. No Backtest, performance metric, strategy edit, or result has
-been opened. One controller invocation under the superseded receipt failed closed during
-pre-attempt restart-evidence verification and created no attempt directory, spent lease,
-network, container, B output, or result. The commit containing this update reseals the
-[credential-free research receipt](../receipts/2026-08-01-volatility-bounded-true-range/README.md),
-its independently re-Gated one-shot controller/validator, and canonical runtime receipt
-SHA-256 `7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`.
-Development performance remains blocked until this package is committed and the worktree
-and Git index are independently verified clean and byte-exact. Runtime, Paper, and Live
-remain prohibited.
+**Status:** Closed as protocol `INVALID` for completeness/evidence failure. The exact
+admission and restart evidence passed before performance, but the single permitted
+development attempt spent its lease during B and ended before C or validator evidence
+existed. It cannot be retried. No comparison or metric was validated or inspected;
+Lookahead, Recursive, tracked strategy edits, the prospective spend, Runtime, Paper, and
+Live were never opened.
 
 **Decision date:** 2026-08-01
+
+**Outcome date:** 2026-08-02
+
+**Terminal evidence:**
+[VolatilitySystem Bounded True-Range Development Screen — INVALID](../reports/2026-08-02-volatility-bounded-true-range-development-invalid.md)
 
 **Governing policy:** [Product Strategy and Delivery Policy](../STRATEGY.md)
 
 **Previous falsifier:**
 [VolatilitySystem Breakout-Episode Risk Calibration Rejection](../reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
+
+## Terminal outcome
+
+The frozen pre-performance package was committed at Root
+`56b60c7a42ee9190830e6dd7843b85ee5c0a8ca9` after independent verification. The one
+fresh attempt `dev-bc-56b60c7` then ran for 3,607.2 seconds and returned only the literal
+controller token `CONTROLLER_FAILED`.
+
+Named control evidence shows the run state and B request exist, and the 74-byte
+`development.spent` lease has SHA-256
+`16085bd379bdcf629ff504c12765de5194307994c683e99e351de33153ee04f1`.
+No C request, validator manifest, or validator report exists. Under the frozen controller,
+the lease is written immediately before the B POST, while B sealing and C binding occur
+only after that POST succeeds. The run therefore stopped at the B POST boundary before C
+could run. Its 3,607.2-second duration is strongly consistent with the controller's inner
+3,600-second B POST deadline, but the controller suppresses the inner exception, so the
+exact infrastructure cause is not claimed.
+
+No B output, ZIP, metadata, pointer, log, trade, or metric was opened or inspected. The
+classification is `INVALID`, the protocol's first class for completeness/evidence failure;
+it is neither `INSUFFICIENT` nor a performance `REJECTED` result. The spent lease makes the
+attempt terminal. Matching containers and the attempt network are absent, and the partial
+run directory was moved intact to a recoverable quarantine outside the worktree without
+opening its result contents. The frozen receipt remains unchanged.
 
 ## Decision
 
@@ -362,7 +382,8 @@ re-Gate, the exact 20 non-executable durable byte copies, the exact-13 runtime b
 and the evidence deliberately left outside Git. Its canonical runtime receipt is 1,509
 bytes with SHA-256
 `7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`.
-This remains pre-performance evidence and does not classify C.
+This remains pre-performance evidence and did not itself classify C. The later spent
+attempt is classified by the terminal report linked above.
 
 The superseded receipt
 `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`

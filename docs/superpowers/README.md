@@ -1,6 +1,6 @@
 # Superpowers Documentation Index
 
-**Current status date:** 2026-08-01
+**Current status date:** 2026-08-02
 
 Read this file before selecting an implementation plan. Dated plans and specifications
 are retained as design and acceptance history; unchecked boxes in a completed plan are
@@ -102,28 +102,21 @@ not an active backlog.
   candidate active at completion.
 - The
   [VolatilitySystem Bounded True-Range Episode Development Screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md)
-  is the active preregistered strategy research. It freezes one adaptive, integrated,
-  B/C-only development hypothesis and the exact restart, episode, accounting, and failure
-  rules before performance. The exact four local OKX inputs passed a credential-free
-  admission scan, and the frozen real-strategy restart matrix covered all 8,760 development
-  targets, 43,800 fresh-strategy records, and 35,040 comparisons across eight shards with
-  zero mismatch. The first controller invocation against superseded receipt
-  `3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`
-  failed closed while comparing the restart producer's eight identity keys with the
-  controller's obsolete four-key expectation. It created no attempt directory, spent
-  lease, network, container, B output, or performance result, so it did not spend the
-  development attempt. The commit containing this update reseals the
+  is completed and closed as `INVALID` for completeness/evidence failure. Its exact local
+  data admission and exhaustive real-strategy restart matrix had passed before performance,
+  but the single permitted attempt `dev-bc-56b60c7` at Root
+  `56b60c7a42ee9190830e6dd7843b85ee5c0a8ca9` ended after 3,607.2 seconds with the literal
+  controller output `CONTROLLER_FAILED`. Named control evidence records an immutable spent
+  lease and a B request/run state, but no C request, validator manifest, or validator report.
+  C therefore never ran, no comparison or metric was validated or inspected, and the spent
+  attempt cannot be retried. This is not a performance `REJECTED` result. Lookahead,
+  Recursive, tracked strategy edits, the prospective spend, Runtime, Paper, and Live were
+  never opened. The
+  [terminal report](reports/2026-08-02-volatility-bounded-true-range-development-invalid.md)
+  is the result authority; the frozen
   [credential-free research receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md)
-  and its 1,509-byte canonical runtime receipt at SHA-256
-  `7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`;
-  the [receipt report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md)
-  is the pre-performance evidence authority. These are input-integrity,
-  deterministic-mechanics, and reproducibility checks only: no Backtest, performance
-  metric, strategy edit, or result has been opened under this study. Its only prospective interval is
-  `[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)`, with the immutable research receipt due
-  before `2026-08-28T18:00:00Z`. A result can be only a development or prospective
-  survivor, not a significance or profit claim; tracked strategy changes, Runtime, Paper,
-  and Live remain prohibited.
+  and its [pre-performance report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md)
+  remain unchanged historical evidence.
 - The preceding completed product slice is
   [Recursive Analysis Truthfulness Repair](plans/2026-08-01-recursive-analysis-truthfulness-repair.md).
   It makes the existing 8083 Recursive Analysis evaluate every materialized startup
@@ -295,10 +288,10 @@ not an active backlog.
 | Latest Futures dogfood evidence | `reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md` | Accepted workflow receipt; candidate rejected |
 | Preceding strategy research | `plans/2026-07-31-volatility-static-stop-calibration.md` | Completed; candidate rejected at calibration |
 | Preceding strategy-research evidence | `reports/2026-07-31-volatility-static-stop-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
-| Latest strategy research | `plans/2026-07-31-volatility-breakout-episode-risk-calibration.md` | Completed; candidate rejected before performance |
-| Latest strategy-research evidence | `reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md` | Rejection authority; holdout unopened then, later retired |
-| Active strategy research | `plans/2026-08-01-volatility-bounded-true-range-episode-screen.md` | Preregistered; deterministic matrix and non-executable receipt sealed; no Backtest or result yet |
-| Active strategy-research receipt | `reports/2026-08-01-volatility-bounded-true-range-research-receipt.md` | Sealed pre-performance evidence; no candidate result |
+| Latest strategy research | `plans/2026-08-01-volatility-bounded-true-range-episode-screen.md` | Completed; terminally `INVALID` after the spent B-stage attempt |
+| Latest strategy-research evidence | `reports/2026-08-02-volatility-bounded-true-range-development-invalid.md` | Terminal authority; no performance comparison was validated or inspected |
+| Frozen strategy-research receipt | `reports/2026-08-01-volatility-bounded-true-range-research-receipt.md` | Unchanged pre-performance identity and deterministic-mechanics evidence |
+| Active strategy research | None | No active strategy candidate or authorized performance spend |
 | Preceding completed implementation | `plans/2026-08-01-recursive-analysis-truthfulness-repair.md` | Completed; exact-SHA accepted |
 | Preceding acceptance evidence | `reports/2026-08-01-recursive-analysis-truthfulness-repair-acceptance.md` | Accepted bounded-diagnostic receipt |
 | Preceding completed implementation | `plans/2026-08-01-lookahead-analysis-sufficiency-truthfulness-repair.md` | Completed; exact-SHA accepted |

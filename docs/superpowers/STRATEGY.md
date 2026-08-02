@@ -14,13 +14,12 @@
 [Phase 1 Futures Validation Dogfood](reports/2026-07-31-phase1-futures-validation-dogfood-acceptance.md)
 
 **Latest completed strategy research:**
-[VolatilitySystem Breakout-Episode Risk Calibration](plans/2026-07-31-volatility-breakout-episode-risk-calibration.md)
+[VolatilitySystem Bounded True-Range Episode Development Screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md)
 
 **Latest strategy-research evidence:**
-[VolatilitySystem Breakout-Episode Risk Calibration Rejection](reports/2026-08-01-volatility-breakout-episode-risk-calibration-rejection.md)
+[VolatilitySystem Bounded True-Range Development Screen — INVALID](reports/2026-08-02-volatility-bounded-true-range-development-invalid.md)
 
-**Active strategy research:**
-[VolatilitySystem Bounded True-Range Episode Development Screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md)
+**Active strategy research:** None.
 
 **Latest completed bounded implementation:**
 [Phase 1 Backtest Effective Window Binding](plans/2026-08-01-phase1-backtest-effective-window-binding.md).
@@ -37,13 +36,10 @@ Runtime, Paper, Live, or AI-worker scope.
 
 **Active bounded implementation:** None; no next bounded implementation has been selected.
 
-**Active strategy candidate:** One preregistered development-only candidate exists, but no
-strategy workload or result exists yet. It is an adaptive third hypothesis on reused
-development history, has no calibrated significance claim, and can become at most
-`DEVELOPMENT-SURVIVOR` before the separately sealed
-`[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)` spend. Its former
-`20250702-20260702` holdout remains retired. Tracked strategy changes and Paper remain
-blocked.
+**Active strategy candidate:** None. The latest candidate is closed as protocol `INVALID`
+for completeness/evidence failure after its one permitted development attempt was spent
+during B. It did not become `DEVELOPMENT-SURVIVOR`; tracked strategy changes, the sealed
+prospective spend, Runtime, Paper, and Live remain blocked.
 
 ## Product purpose
 
@@ -353,9 +349,9 @@ other result/user/Webserver source boundaries remain unchanged. Root `30793b22`,
 by the
 [exact-SHA report](reports/2026-08-01-phase1-backtest-effective-window-binding-acceptance.md).
 
-Dynamic Paper remains a NO-GO because the active preregistered candidate has no result,
-its prospective window is unspent, no formal release chain exists, and the known GTC
-signal/order lifecycle non-equivalence remains unresolved.
+Dynamic Paper remains a NO-GO because there is no active or surviving strategy candidate,
+the closed candidate may not spend its prospective window, no formal release chain exists,
+and the known GTC signal/order lifecycle non-equivalence remains unresolved.
 
 A one-final-candle signal comparison is not implemented: the rejected study directly
 confirmed three specific intraday mismatch witnesses among 8,760 scored rows without
@@ -371,25 +367,26 @@ search for a failure witness, but each witness must be confirmed by the real str
 it may never sign a full-window PASS unless exact-domain equivalence is proved exhaustively
 or formally. No number of final-candle samples can be accumulated into that PASS.
 
-One new development-only candidate is preregistered by the
-[bounded true-range episode screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md);
-no viewed-window performance run or prospective spend has started. Its temporary candidate,
-deterministic tests, exact local data admission, and exhaustive real-strategy restart matrix
-are frozen; the development matrix passed all 8,760 targets and 35,040 comparisons with zero
-mismatch. This is deterministic-mechanics evidence, not Backtest or performance evidence.
-The first controller invocation under superseded receipt
-`3c5bffdc81d9f59c641ed2401ccb9f35379575081ac309168f030fca19191056`
-failed closed on an obsolete four-key versus real eight-key restart-evidence contract,
-before an attempt directory, spent lease, container, B output, or result existed. It did
-not spend the development attempt. The commit containing this update reseals the
-[credential-free, content-addressed receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md),
-its independently supplied runtime-receipt SHA-256
+The
+[bounded true-range episode screen](plans/2026-08-01-volatility-bounded-true-range-episode-screen.md)
+is now closed. Its temporary candidate, deterministic tests, exact local data admission,
+and exhaustive real-strategy restart matrix remain frozen as historical evidence; the
+matrix passed all 8,760 targets and 35,040 comparisons with zero mismatch. The single
+permitted development attempt `dev-bc-56b60c7` then spent its lease during B and ended
+after 3,607.2 seconds with the literal controller output `CONTROLLER_FAILED`. Run state
+and a B request exist, while the C request and validator evidence do not. No B result was
+opened, C never ran, and no comparison or performance metric was validated or inspected.
+The protocol therefore classifies the study as `INVALID` for completeness/evidence
+failure, not performance `REJECTED`; the attempt cannot be retried. The
+[terminal report](reports/2026-08-02-volatility-bounded-true-range-development-invalid.md)
+is authoritative. The
+[credential-free receipt](receipts/2026-08-01-volatility-bounded-true-range/README.md), its
+runtime-receipt SHA-256
 `7941da008c46ae1fdb3654f65e18e4769f1bb29455590ee882100438ab28d348`,
-and the [pre-performance evidence report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md).
-No Backtest or result has been opened yet. The former `20250702-20260702` holdout is retired
-and must not be used for fresh validation. The only replacement interval is
-`[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)` under that one-shot protocol; inspecting any
-candidate output consumes it.
+and the [pre-performance evidence report](reports/2026-08-01-volatility-bounded-true-range-research-receipt.md)
+remain unchanged. The former `20250702-20260702` holdout remains retired, and the unspent
+`[2026-10-01T00:00:00Z, 2027-10-01T00:00:00Z)` interval is not authorized for this closed
+candidate.
 
 Do not persist split roles, add automatic ranking/optimization, or design dynamic Paper
 until repeated use of this loop exposes a concrete missing capability and a candidate
