@@ -1,0 +1,1641 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="从真实源码逐层拆解 E10 策略的数据、候选信号、过滤、执行、退出与历史收益。">
+  <title>E10 源码拆解：从数据到交易的完整运转原理</title>
+  <style>
+    :root {
+      --navy-950: #061421;
+      --navy-900: #0a1d2c;
+      --navy-800: #123247;
+      --ink: #142a38;
+      --muted: #667783;
+      --paper: #f4f1e9;
+      --card: #fffdf8;
+      --line: #d7ddd9;
+      --teal: #0d9488;
+      --teal-dark: #08736c;
+      --teal-soft: #dff4ef;
+      --amber: #e99b32;
+      --amber-dark: #9f6515;
+      --amber-soft: #fff0d5;
+      --red: #b9564f;
+      --red-soft: #f8dfdc;
+      --blue: #3f79a1;
+      --blue-soft: #e3eff6;
+      --shadow: 0 20px 50px rgba(10, 29, 44, .09);
+      --radius: 22px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+      line-height: 1.75;
+      text-rendering: optimizeLegibility;
+    }
+    body[data-side="long"] .side-pane[data-side="short"],
+    body[data-side="short"] .side-pane[data-side="long"] { display: none; }
+    a { color: var(--teal-dark); text-underline-offset: 3px; }
+    a:hover { color: var(--teal); }
+    button { font: inherit; }
+    code, pre, .formula {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    code {
+      padding: .12em .38em;
+      border-radius: 5px;
+      background: #e9ece8;
+      color: #234052;
+      font-size: .92em;
+    }
+    strong { color: #102a39; }
+
+    .progress {
+      position: fixed;
+      z-index: 100;
+      inset: 0 auto auto 0;
+      width: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--teal), var(--amber));
+    }
+
+    .hero {
+      position: relative;
+      min-height: 780px;
+      overflow: hidden;
+      color: #f7fbff;
+      background: var(--navy-950) url("assets/e10-filter-hero.png") center / cover no-repeat;
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(4, 16, 27, .98) 0%, rgba(4, 16, 27, .91) 38%, rgba(4, 16, 27, .24) 76%, rgba(4, 16, 27, .42) 100%),
+        linear-gradient(0deg, rgba(4, 16, 27, .95), transparent 48%);
+    }
+    .hero-nav, .hero-copy, .hero-facts { position: relative; z-index: 1; }
+    .hero-nav {
+      max-width: 1260px;
+      margin: 0 auto;
+      padding: 25px 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #fff;
+      text-decoration: none;
+      font-weight: 800;
+      letter-spacing: .06em;
+    }
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 12px;
+      color: var(--amber);
+      background: rgba(255,255,255,.07);
+    }
+    .nav-links { display: flex; align-items: center; gap: 20px; }
+    .nav-links a { color: rgba(255,255,255,.67); text-decoration: none; font-size: 13px; }
+    .nav-links a:hover { color: #fff; }
+    .print {
+      padding: 8px 13px;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 999px;
+      color: #fff;
+      background: rgba(255,255,255,.07);
+      cursor: pointer;
+    }
+    .hero-copy {
+      max-width: 1260px;
+      margin: 0 auto;
+      padding: 105px 30px 170px;
+    }
+    .eyebrow {
+      margin: 0 0 15px;
+      color: var(--teal);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .hero .eyebrow { color: #7adfd6; }
+    h1, h2 {
+      font-family: Georgia, "Noto Serif SC", "Songti SC", serif;
+      font-weight: 600;
+      letter-spacing: -.04em;
+    }
+    h1 {
+      max-width: 820px;
+      margin: 0;
+      font-size: clamp(48px, 6.4vw, 82px);
+      line-height: 1.06;
+    }
+    h1 em { color: var(--amber); font-style: normal; }
+    .hero-deck {
+      max-width: 720px;
+      margin: 28px 0 0;
+      color: rgba(244,250,255,.73);
+      font-size: clamp(17px, 2vw, 22px);
+    }
+    .hero-facts {
+      position: absolute;
+      left: 50%;
+      bottom: 32px;
+      width: min(1200px, calc(100% - 60px));
+      transform: translateX(-50%);
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border: 1px solid rgba(255,255,255,.13);
+      border-radius: 18px;
+      overflow: hidden;
+      background: rgba(4,16,27,.7);
+      backdrop-filter: blur(12px);
+    }
+    .hero-fact { padding: 18px 20px; border-right: 1px solid rgba(255,255,255,.1); }
+    .hero-fact:last-child { border-right: 0; }
+    .hero-fact b { display: block; color: #fff; font-size: 16px; }
+    .hero-fact span { color: rgba(255,255,255,.48); font-size: 11px; }
+
+    .doc-shell {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 0 28px;
+      display: grid;
+      grid-template-columns: 230px minmax(0, 1fr);
+      gap: 58px;
+      align-items: start;
+    }
+    .toc {
+      position: sticky;
+      top: 28px;
+      margin-top: 82px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,253,248,.82);
+      backdrop-filter: blur(10px);
+    }
+    .toc b { display: block; margin-bottom: 11px; font-size: 12px; letter-spacing: .12em; }
+    .toc a {
+      display: block;
+      padding: 6px 0;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .toc a:hover { color: var(--teal); }
+    .toc-note { margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+
+    .doc { min-width: 0; }
+    .section {
+      padding: 96px 0;
+      border-bottom: 1px solid var(--line);
+      scroll-margin-top: 22px;
+    }
+    .section:last-child { border-bottom: 0; }
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(230px, .8fr) minmax(320px, 1.2fr);
+      gap: 50px;
+      align-items: end;
+      margin-bottom: 44px;
+    }
+    h2 {
+      margin: 0;
+      font-size: clamp(36px, 4.8vw, 57px);
+      line-height: 1.12;
+    }
+    h3 { margin: 0 0 10px; font-size: 21px; line-height: 1.35; }
+    h4 { margin: 0 0 8px; font-size: 15px; }
+    p { margin: 0 0 16px; }
+    .intro { color: var(--muted); font-size: 17px; }
+    .small { color: var(--muted); font-size: 12px; }
+    .source-ref {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 9px;
+      padding: 4px 8px;
+      border-radius: 7px;
+      color: #496170;
+      background: #e7ebe7;
+      font: 600 10px/1.4 "SFMono-Regular", Consolas, monospace;
+      text-decoration: none;
+    }
+
+    .truth {
+      padding: 34px;
+      border-radius: var(--radius);
+      color: #f7fbff;
+      background: var(--navy-900);
+      box-shadow: var(--shadow);
+    }
+    .truth strong { color: var(--amber); }
+    .truth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+    .truth blockquote {
+      margin: 0;
+      font-family: Georgia, "Noto Serif SC", serif;
+      font-size: clamp(23px, 3vw, 34px);
+      line-height: 1.45;
+    }
+    .truth-list { display: grid; gap: 12px; }
+    .truth-item {
+      padding: 14px 16px;
+      border-radius: 12px;
+      color: rgba(255,255,255,.71);
+      background: rgba(255,255,255,.055);
+      font-size: 13px;
+    }
+
+    .architecture {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: var(--card);
+    }
+    .arch-step {
+      position: relative;
+      min-height: 180px;
+      padding: 22px 18px;
+      border-right: 1px solid var(--line);
+    }
+    .arch-step:last-child { border-right: 0; }
+    .arch-step::after {
+      content: "→";
+      position: absolute;
+      z-index: 2;
+      top: 72px;
+      right: -12px;
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: var(--amber-dark);
+      background: var(--amber-soft);
+      font-weight: 900;
+    }
+    .arch-step:last-child::after { display: none; }
+    .arch-step span { color: var(--teal); font-size: 11px; font-weight: 900; }
+    .arch-step b { display: block; margin: 10px 0 6px; }
+    .arch-step small { color: var(--muted); line-height: 1.5; }
+
+    .side-switch {
+      display: inline-flex;
+      margin: 28px 0 16px;
+      padding: 4px;
+      border-radius: 999px;
+      background: #e1e5e1;
+    }
+    .side-switch button {
+      min-width: 96px;
+      padding: 8px 15px;
+      border: 0;
+      border-radius: 999px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+    }
+    .side-switch button[aria-pressed="true"] { color: #fff; background: var(--navy-800); }
+    .formula-card {
+      padding: 25px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--card);
+      overflow-x: auto;
+    }
+    .formula {
+      min-width: 690px;
+      color: #284454;
+      font-size: 13px;
+      line-height: 1.9;
+      white-space: pre-wrap;
+    }
+    .formula .a { color: var(--teal-dark); font-weight: 800; }
+    .formula .o { color: var(--amber-dark); font-weight: 800; }
+    .formula .r { color: var(--red); font-weight: 800; }
+
+    .mro {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .mro-node {
+      position: relative;
+      padding: 17px 20px;
+      display: grid;
+      grid-template-columns: minmax(280px, .8fr) 1.2fr;
+      gap: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+    }
+    .mro-node:not(:last-child)::after {
+      content: "↓";
+      position: absolute;
+      z-index: 2;
+      bottom: -18px;
+      left: 34px;
+      color: var(--amber-dark);
+      font-weight: 900;
+    }
+    .mro-node b { font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; }
+    .mro-node span { color: var(--muted); font-size: 13px; }
+    .state-row {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .state {
+      padding: 20px;
+      border-radius: 14px;
+      background: #e8ece8;
+      text-align: center;
+    }
+    .state b { display: block; font: 700 28px/1.2 "SFMono-Regular", Consolas, monospace; }
+    .state small { color: var(--muted); }
+    .callout {
+      margin-top: 22px;
+      padding: 20px 22px;
+      border-left: 4px solid var(--amber);
+      border-radius: 0 12px 12px 0;
+      color: #5d4a2a;
+      background: var(--amber-soft);
+    }
+    .callout.danger { border-left-color: var(--red); color: #74413d; background: var(--red-soft); }
+    .callout.info { border-left-color: var(--teal); color: #275a57; background: var(--teal-soft); }
+
+    .clock {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    .clock-step {
+      min-height: 210px;
+      padding: 23px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--card);
+    }
+    .clock-time { color: var(--teal); font: 800 20px/1 "SFMono-Regular", Consolas, monospace; }
+    .clock-step p { margin-top: 18px; color: var(--muted); font-size: 13px; }
+    .data-map {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    .data-source { padding: 24px; border-radius: 17px; background: #e8ece8; }
+    .data-source b { display: block; margin-bottom: 8px; }
+    .data-source span { color: var(--muted); font-size: 13px; }
+    .used-no {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .used-no > div { padding: 22px; border-radius: 16px; }
+    .used { background: var(--teal-soft); }
+    .not-used { background: #e9e8e2; }
+    .used-no ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+
+    .indicator-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+    }
+    .indicator {
+      min-height: 210px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--card);
+    }
+    .indicator h3 { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .symbol { color: var(--teal); font: 700 13px "SFMono-Regular", Consolas, monospace; }
+    .math {
+      margin: 15px 0;
+      padding: 12px 14px;
+      overflow-x: auto;
+      border-radius: 10px;
+      color: #274453;
+      background: #edf0ec;
+      font: 700 12px/1.6 "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+    .indicator p { color: var(--muted); font-size: 13px; }
+
+    .mirror-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: var(--card);
+      font-variant-numeric: tabular-nums;
+    }
+    .mirror-table th, .mirror-table td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; }
+    .mirror-table tr:last-child td { border-bottom: 0; }
+    .mirror-table th { color: var(--muted); background: #e9ece7; font-size: 12px; }
+    .mirror-table td { font-size: 13px; }
+    .pass { color: var(--teal-dark); font-weight: 800; }
+
+    .context-stack { display: grid; gap: 11px; }
+    .context-row {
+      padding: 18px 20px;
+      display: grid;
+      grid-template-columns: 90px 1fr 1fr;
+      gap: 20px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+    }
+    .context-row > b { color: var(--teal-dark); }
+    .context-row span { color: var(--muted); font-size: 13px; }
+
+    .door-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 28px; }
+    .door {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: 0 12px 32px rgba(10,29,44,.05);
+    }
+    .door-head { padding: 27px; color: #fff; background: var(--navy-800); }
+    .door-head.amber { background: #8c5919; }
+    .door-head span { color: rgba(255,255,255,.61); font-size: 11px; letter-spacing: .1em; }
+    .door-head h3 { margin-top: 8px; color: #fff; }
+    .door-body { padding: 26px; }
+    .door-flow { display: grid; gap: 9px; }
+    .door-step {
+      position: relative;
+      padding: 14px 16px 14px 46px;
+      border-radius: 12px;
+      background: #eef0eb;
+      font-size: 13px;
+    }
+    .door-step::before {
+      content: attr(data-n);
+      position: absolute;
+      left: 14px;
+      top: 13px;
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--teal);
+      font-size: 10px;
+      font-weight: 900;
+    }
+    .door:nth-child(2) .door-step::before { background: var(--amber-dark); }
+    .door-step small { display: block; color: var(--muted); }
+    .door-stat {
+      margin-top: 18px;
+      padding-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border-top: 1px solid var(--line);
+      text-align: center;
+    }
+    .door-stat b { display: block; }
+    .door-stat small { color: var(--muted); }
+
+    .cusum-pipeline {
+      margin-top: 20px;
+      padding: 25px;
+      border-radius: 17px;
+      color: #f7fbff;
+      background: var(--navy-900);
+    }
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      align-items: stretch;
+    }
+    .pipe-step {
+      position: relative;
+      padding: 16px;
+      border-radius: 11px;
+      background: rgba(255,255,255,.07);
+      color: rgba(255,255,255,.72);
+      font-size: 11px;
+    }
+    .pipe-step b { display: block; margin-bottom: 5px; color: #fff; }
+    .pipe-step:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -8px;
+      top: 50%;
+      color: var(--amber);
+      transform: translateY(-50%);
+      z-index: 2;
+    }
+
+    .gate-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .gate {
+      min-height: 280px;
+      padding: 26px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--card);
+    }
+    .gate-num { color: var(--teal); font-size: 11px; font-weight: 900; letter-spacing: .12em; }
+    .gate p { color: var(--muted); font-size: 13px; }
+    .gate-visual { margin-top: 20px; padding: 18px; border-radius: 13px; background: #edf0eb; }
+    .rv-track { height: 16px; border-radius: 999px; background: #d2d8d4; overflow: hidden; }
+    .rv-fill { width: 84%; height: 100%; background: var(--teal); }
+    .rv-labels { margin-top: 7px; display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
+    .candle-mini { height: 98px; position: relative; display: flex; justify-content: center; align-items: end; gap: 18px; }
+    .candle-mini::before { content: "前高"; position: absolute; top: 31px; left: 0; right: 0; border-top: 1px dashed #94a29f; color: var(--muted); text-align: right; font-size: 10px; }
+    .stick { position: relative; width: 16px; border-radius: 3px; background: var(--teal); }
+    .stick::after { content: ""; position: absolute; left: 7px; top: -12px; bottom: -12px; width: 2px; background: inherit; z-index: 0; }
+    .stick::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; z-index: 1; }
+    .fresh-line { display: grid; gap: 12px; }
+    .fresh-row { display: grid; grid-template-columns: 50px 1fr 48px; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; }
+    .fresh-track { height: 10px; background: #d4dad6; border-radius: 999px; overflow: hidden; }
+    .fresh-track i { display: block; height: 100%; border-radius: inherit; background: var(--teal); }
+
+    .fresh-examples {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .fresh-example { padding: 18px; border-radius: 14px; background: #e8ece8; }
+    .fresh-example b { display: block; margin-bottom: 6px; }
+    .fresh-example code { display: block; margin: 7px 0; }
+    .fresh-example span { color: var(--muted); font-size: 11px; }
+
+    .attr {
+      margin-top: 28px;
+      padding: 27px;
+      border-radius: 20px;
+      color: #fff;
+      background: var(--navy-900);
+    }
+    .attr-row {
+      display: grid;
+      grid-template-columns: 190px 1fr 190px;
+      gap: 16px;
+      align-items: center;
+      padding: 13px 0;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+    .attr-row:last-child { border-bottom: 0; }
+    .attr-row > span { color: rgba(255,255,255,.68); font-size: 12px; }
+    .attr-track { height: 13px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; }
+    .attr-track i { display: block; height: 100%; border-radius: inherit; background: var(--teal); }
+    .attr-row:first-child .attr-track i { background: var(--amber); }
+    .attr-metrics { text-align: right; font-size: 12px; }
+    .attr-metrics b { color: #fff; font-size: 16px; }
+
+    .exit-race {
+      display: grid;
+      grid-template-columns: 1fr 46px repeat(3, 1fr);
+      gap: 12px;
+      align-items: stretch;
+    }
+    .position-node, .exit-node {
+      min-height: 220px;
+      padding: 24px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--card);
+    }
+    .position-node { color: #fff; background: var(--navy-800); border-color: transparent; }
+    .position-node h3, .position-node strong { color: #fff; }
+    .race-arrow { display: grid; place-items: center; color: var(--amber-dark); font-size: 27px; }
+    .exit-node:nth-child(3) { background: var(--teal-soft); }
+    .exit-node:nth-child(4) { background: var(--amber-soft); }
+    .exit-node:nth-child(5) { background: var(--red-soft); }
+    .exit-node p { color: var(--muted); font-size: 12px; }
+    .roi-steps { display: grid; gap: 7px; margin-top: 10px; }
+    .roi-step { display: flex; justify-content: space-between; gap: 10px; padding: 7px 9px; border-radius: 8px; background: rgba(255,255,255,.55); font-size: 11px; }
+    .exit-bars { display: grid; gap: 12px; margin-top: 22px; }
+    .exit-bar { display: grid; grid-template-columns: 160px 1fr 165px; gap: 14px; align-items: center; font-size: 12px; }
+    .bar-track { height: 17px; overflow: hidden; border-radius: 999px; background: #dfe3df; }
+    .bar-track i { display: block; height: 100%; border-radius: inherit; }
+    .exit-bar:nth-child(1) i { background: var(--teal); }
+    .exit-bar:nth-child(2) i { background: var(--amber); }
+    .exit-bar:nth-child(3) i { background: var(--red); }
+
+    .execution-grid {
+      margin-top: 24px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    .execution { padding: 21px; border-radius: 16px; background: #e7ebe7; }
+    .execution b { display: block; }
+    .execution span { color: var(--muted); font-size: 12px; }
+
+    .manual-levels { margin-top: 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .manual-level { padding: 28px; border: 1px solid var(--line); border-radius: 20px; background: var(--card); }
+    .manual-level.exact { border-top: 5px solid var(--teal); }
+    .manual-level.idea { border-top: 5px solid var(--amber); }
+    .manual-level ul { padding-left: 18px; color: var(--muted); font-size: 13px; }
+    .checklist { display: grid; gap: 11px; margin-top: 26px; }
+    .check {
+      padding: 18px;
+      display: grid;
+      grid-template-columns: 40px 160px 1fr;
+      gap: 16px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+    }
+    .check-num {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--navy-800);
+      font-weight: 900;
+    }
+    .check b { padding-top: 4px; }
+    .check div:last-child { color: var(--muted); font-size: 13px; }
+    .risk-math {
+      margin-top: 22px;
+      padding: 24px;
+      border-radius: 17px;
+      color: #f7fbff;
+      background: var(--navy-900);
+    }
+    .risk-math code { color: #fff; background: rgba(255,255,255,.1); }
+
+    .case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .case {
+      padding: 27px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--card);
+    }
+    .case.win { border-top: 5px solid var(--teal); }
+    .case.loss { border-top: 5px solid var(--red); }
+    .case-label { color: var(--teal-dark); font-size: 11px; font-weight: 900; letter-spacing: .1em; }
+    .case.loss .case-label { color: var(--red); }
+    .case-meta { color: var(--muted); font-size: 12px; }
+    .case-values { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 17px 0; }
+    .case-value { padding: 11px; border-radius: 10px; background: #ecefe9; }
+    .case-value b { display: block; font-size: 13px; }
+    .case-value span { color: var(--muted); font-size: 10px; }
+    .case-result { padding: 13px; border-radius: 11px; color: #17645e; background: var(--teal-soft); font-weight: 800; font-size: 13px; }
+    .case.loss .case-result { color: #85443f; background: var(--red-soft); }
+
+    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .stat { min-height: 145px; padding: 21px; border: 1px solid var(--line); border-radius: 17px; background: var(--card); }
+    .stat span { color: var(--muted); font-size: 11px; }
+    .stat b { display: block; margin: 10px 0 5px; font: 600 34px/1 Georgia, serif; letter-spacing: -.03em; }
+    .stat small { color: var(--teal-dark); }
+
+    .chart-card {
+      margin-top: 20px;
+      padding: 26px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--card);
+      box-shadow: 0 12px 30px rgba(10,29,44,.05);
+    }
+    .chart-head { display: flex; justify-content: space-between; align-items: start; gap: 20px; margin-bottom: 10px; }
+    .chart-head p { color: var(--muted); font-size: 12px; }
+    .legend { display: flex; gap: 13px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .legend i { display: inline-block; width: 9px; height: 9px; margin-right: 4px; border-radius: 50%; background: var(--teal); }
+    canvas { display: block; width: 100%; height: 360px; }
+    .economics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 20px; }
+    .econ { padding: 22px; border-radius: 16px; background: #e8ece8; }
+    .econ b { display: block; font-size: 22px; }
+    .econ span { color: var(--muted); font-size: 12px; }
+
+    details {
+      margin-top: 22px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+    }
+    summary { padding: 17px 20px; cursor: pointer; font-weight: 800; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { padding: 12px 14px; border-top: 1px solid var(--line); text-align: right; white-space: nowrap; font-size: 12px; }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); background: #e9ece7; }
+    td.pos { color: var(--teal-dark); }
+    td.neg { color: var(--red); }
+    .parameter-table td:nth-child(2), .parameter-table td:nth-child(3) {
+      min-width: 280px;
+      white-space: normal;
+      text-align: left;
+    }
+
+    .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .limit { padding: 24px; border-radius: 17px; background: var(--card); border: 1px solid var(--line); }
+    .limit b { display: block; margin-bottom: 8px; }
+    .limit p { color: var(--muted); font-size: 13px; }
+    .source-map { margin-top: 28px; padding: 26px; border-radius: 18px; background: #e8ebe6; }
+    .source-map ol { padding-left: 20px; }
+    .source-map li { margin: 9px 0; color: var(--muted); font-size: 12px; }
+
+    footer {
+      padding: 45px 28px;
+      color: rgba(255,255,255,.56);
+      background: var(--navy-950);
+      text-align: center;
+      font-size: 12px;
+    }
+
+    @media (max-width: 1080px) {
+      .doc-shell { grid-template-columns: 1fr; }
+      .toc { display: none; }
+      .architecture { grid-template-columns: repeat(3, 1fr); }
+      .arch-step:nth-child(3) { border-right: 0; }
+      .arch-step:nth-child(4), .arch-step:nth-child(5), .arch-step:nth-child(6) { border-top: 1px solid var(--line); }
+      .clock { grid-template-columns: 1fr 1fr; }
+      .pipeline { grid-template-columns: 1fr; }
+      .pipe-step:not(:last-child)::after { content: "↓"; right: 50%; top: auto; bottom: -14px; transform: translateX(50%); }
+      .exit-race { grid-template-columns: 1fr; }
+      .race-arrow { transform: rotate(90deg); }
+      .stat-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    @media (max-width: 760px) {
+      .hero { min-height: 790px; background-position: 58% center; }
+      .hero::before { background: linear-gradient(90deg, rgba(4,16,27,.98), rgba(4,16,27,.72)), linear-gradient(0deg, rgba(4,16,27,.96), transparent 60%); }
+      .hero-nav { padding: 20px; }
+      .nav-links a { display: none; }
+      .hero-copy { padding: 92px 20px 210px; }
+      h1 { font-size: 49px; }
+      .hero-facts { width: calc(100% - 40px); grid-template-columns: 1fr 1fr; }
+      .hero-fact { padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,.1); }
+      .hero-fact:last-child { grid-column: 1 / -1; }
+      .doc-shell { padding: 0 20px; }
+      .section { padding: 75px 0; }
+      .section-head, .truth-grid { grid-template-columns: 1fr; gap: 22px; }
+      .architecture { grid-template-columns: 1fr; }
+      .arch-step { border-right: 0; border-bottom: 1px solid var(--line); }
+      .arch-step::after { top: auto; right: 50%; bottom: -13px; transform: rotate(90deg) translateY(-50%); }
+      .mro-node { grid-template-columns: 1fr; gap: 6px; }
+      .state-row, .clock, .data-map, .used-no, .indicator-grid, .door-grid, .gate-grid,
+      .fresh-examples, .manual-levels, .case-grid, .limits, .economics { grid-template-columns: 1fr; }
+      .context-row { grid-template-columns: 1fr; gap: 5px; }
+      .door-stat { grid-template-columns: repeat(3, 1fr); }
+      .attr-row { grid-template-columns: 1fr; }
+      .attr-metrics { text-align: left; }
+      .execution-grid { grid-template-columns: 1fr 1fr; }
+      .check { grid-template-columns: 40px 1fr; }
+      .check div:last-child { grid-column: 2; }
+      .stat-grid { grid-template-columns: 1fr 1fr; }
+      .chart-head { flex-direction: column; }
+      canvas { height: 300px; }
+      .exit-bar { grid-template-columns: 120px 1fr; }
+      .exit-bar > span:last-child { grid-column: 1 / -1; }
+    }
+
+    @media print {
+      .progress, .hero-nav, .toc, .side-switch, .print { display: none !important; }
+      body { background: #fff; }
+      .hero { min-height: 560px; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .doc-shell { display: block; max-width: none; }
+      .section { padding: 45px 0; }
+      .door, .gate, .case, .chart-card, .indicator, .truth { break-inside: avoid; box-shadow: none; }
+    }
+  </style>
+</head>
+<body data-side="long">
+  <div class="progress" aria-hidden="true"></div>
+
+  <header class="hero" id="top">
+    <nav class="hero-nav" aria-label="文档导航">
+      <a class="brand" href="#top"><span class="brand-mark">E10</span><span>源码技术文档</span></a>
+      <div class="nav-links">
+        <a href="#architecture">架构</a>
+        <a href="#base">怎样找机会</a>
+        <a href="#gate">怎样验信号</a>
+        <a href="#manual">人工流程</a>
+        <button class="print" type="button" onclick="window.print()">打印 / PDF</button>
+      </div>
+    </nav>
+
+    <div class="hero-copy">
+      <p class="eyebrow">真实源码拆解 · E10 单策略版</p>
+      <h1>先顺着风，<br>再等一次<em>可靠确认</em></h1>
+      <p class="hero-deck">这就是 E10 的直觉：不猜底、不抢第一根突破；先确认大趋势，再等结构或资金冲击给出机会，最后用成交量与最新证据复核。下文把每一步翻译成人话，同时保留真实代码公式和阈值。</p>
+    </div>
+
+    <div class="hero-facts">
+      <div class="hero-fact"><b>每 15 分钟判断</b><span>只看已经收完的 K 线</span></div>
+      <div class="hero-fact"><b>两种找机会办法</b><span>突破回踩 / 成交冲击延续</span></div>
+      <div class="hero-fact"><b>一次最终验票</b><span>量不冷 + 价格或资金流确认</span></div>
+      <div class="hero-fact"><b>三条离场通道</b><span>目标 / 逻辑失效 / 硬止损</span></div>
+      <div class="hero-fact"><b>状态：Shadow</b><span>历史研究，不是实盘授权</span></div>
+    </div>
+  </header>
+
+  <main class="doc-shell">
+    <aside class="toc" aria-label="目录">
+      <b>DOCUMENT MAP</b>
+      <a href="#architecture">01 · 全局架构</a>
+      <a href="#source">02 · 源码在哪里</a>
+      <a href="#clock">03 · 数据何时可用</a>
+      <a href="#indicators">04 · 指标翻译</a>
+      <a href="#base">05 · 两种找机会方法</a>
+      <a href="#gate">06 · 最终验票规则</a>
+      <a href="#exit">07 · 执行与退出</a>
+      <a href="#manual">08 · 人工操作流程</a>
+      <a href="#cases">09 · 真实交易案例</a>
+      <a href="#returns">10 · 收益结构</a>
+      <a href="#limits">11 · 边界与源码索引</a>
+      <div class="toc-note">文档中的“通过”只表示满足历史代码条件，不代表未来交易一定盈利。</div>
+    </aside>
+
+    <article class="doc">
+      <section class="section" id="architecture">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">01 · 一分钟看懂 E10</p>
+            <h2>把它想成六道闸，<br>不是一个神奇指标</h2>
+          </div>
+          <p class="intro">E10 做的是<strong>趋势延续</strong>：市场已经往一个方向走，它等一次“突破后仍站得住”的证明，再跟随。任何一道闸不通过都不下单，所以一个漂亮形态不等于交易信号。</p>
+        </div>
+
+        <div class="truth">
+          <div class="truth-grid">
+            <blockquote>用一句话记住：大周期同向 → 两种机会之一出现 → 当前成交不冷 → 价格或主动成交至少一项继续支持 → 下一根 15m 才尝试入场。</blockquote>
+            <div class="truth-list">
+              <div class="truth-item"><strong>Long / 做多：</strong>判断价格更可能延续上涨；Short / 做空则把全部方向条件镜像。</div>
+              <div class="truth-item"><strong>“候选”只是待验票：</strong>突破回踩或 CUSUM 冲击先发现机会，E10 还会删掉证据不足的机会。</div>
+              <div class="truth-item"><strong>47.75% 胜率仍可盈利：</strong>历史平均盈利约为平均亏损的 2.62 倍，核心是盈亏不对称，不是百发百中。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="architecture" aria-label="E10 六层架构">
+          <div class="arch-step"><span>第 0 道闸</span><b>等数据收完</b><small>只用完整 OKX 15m K 线；Binance 5m 数据必须对齐到同一决策时刻。</small></div>
+          <div class="arch-step"><span>第 1 道闸</span><b>先找“顺风”方向</b><small>1h 与 4h 趋势同向，15m 也站在 EMA20 和 24h VWAP 的正确一侧。</small></div>
+          <div class="arch-step"><span>第 2 道闸</span><b>机会必须有来历</b><small>要么强突破后回踩守住，要么 Binance 主动成交异常后 OKX 顺向确认。</small></div>
+          <div class="arch-step"><span>第 3 道闸</span><b>E10 再验一次票</b><small>RV≥0.80，而且强收盘或最新 taker 变化至少有一项继续支持。</small></div>
+          <div class="arch-step"><span>第 4 道闸</span><b>下一根才执行</b><small>信号 K 线收完才知道答案；回测开仓落在下一根 15m K 线。</small></div>
+          <div class="arch-step"><span>第 5 道闸</span><b>让三种退出赛跑</b><small>分段盈利目标、逻辑失效、−3% 硬止损，哪条先到就平仓。</small></div>
+        </div>
+
+        <div class="callout info"><strong>读公式前先认符号：</strong><code>AND</code> 表示每一项都要满足；<code>OR</code> 表示两项至少满足一项。下面的公式不是另一个模型，而是上面六道闸的源码级压缩版。</div>
+
+        <div class="side-switch" role="group" aria-label="查看方向">
+          <button type="button" data-side-button="long" aria-pressed="true">做多（Long）精确公式</button>
+          <button type="button" data-side-button="short" aria-pressed="false">做空（Short）精确公式</button>
+        </div>
+
+        <div class="formula-card side-pane" data-side="long">
+          <div class="formula">E10_LONG =
+  <span class="a">CROSS_DATA_VALID</span>
+  AND <span class="a">MARKET_CONTEXT_LONG</span>
+  AND (
+        <span class="o">CORE_RETEST_LONG</span>
+        OR (<span class="o">CUSUM_LONG_FOLLOW</span> AND OI_ADD AND LEADER_SIZE_LONG)
+      )
+  AND <span class="a">RELATIVE_VOLUME ≥ 0.80</span>
+  AND (
+        <span class="o">PRICE_ACCEPT_LONG</span>
+        OR <span class="o">BIN_TAKER_NOW ≥ BIN_TAKER_10_MIN_AGO</span>
+      )</div>
+        </div>
+        <div class="formula-card side-pane" data-side="short">
+          <div class="formula">E10_SHORT =
+  <span class="a">CROSS_DATA_VALID</span>
+  AND <span class="a">MARKET_CONTEXT_SHORT</span>
+  AND (
+        <span class="o">CORE_RETEST_SHORT</span>
+        OR (<span class="o">CUSUM_SHORT_FOLLOW</span> AND OI_ADD AND LEADER_SIZE_SHORT)
+      )
+  AND <span class="a">RELATIVE_VOLUME ≥ 0.80</span>
+  AND (
+        <span class="o">PRICE_ACCEPT_SHORT</span>
+        OR <span class="o">BIN_TAKER_NOW ≤ BIN_TAKER_10_MIN_AGO</span>
+      )</div>
+        </div>
+        <a class="source-ref" href="../ft_userdata/user_data/strategies/PriceFlowEventAdaptiveResearchStrategy.py">PriceFlowEventAdaptiveResearchStrategy.py · L164–196, L331–375</a>
+      </section>
+
+      <section class="section" id="source">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">02 · 源码定位</p>
+            <h2>入口文件只有几行，<br>真正逻辑分散在父类</h2>
+          </div>
+          <p class="intro">如果只打开 <code>PriceFlowParticipationFreshnessStrategy.py</code>，几乎看不到规则，这不是逻辑缺失。Python 会沿继承链向下寻找方法；下面六个类合在一起，才是实际运行的 E10。</p>
+        </div>
+
+        <div class="mro">
+          <div class="mro-node"><b>PriceFlowParticipationFreshnessStrategy</b><span>冻结名称与研究说明；没有覆写交易逻辑。</span></div>
+          <div class="mro-node"><b>PriceFlowEventAdaptive10Strategy</b><span>运行时动态生成，唯一关键属性是 <code>event_id = 10</code>。</span></div>
+          <div class="mro-node"><b>PriceFlowEventAdaptiveResearchBase</b><span>最后验票：候选信号必须再满足 <code>RV ≥ 0.80 AND (PRICE_ACCEPT OR FRESH)</code>。</span></div>
+          <div class="mro-node"><b>PriceFlowCapitalIntentResearchBase</b><span><code>research_id = 4</code> 打开两种机会来源：结构回踩，以及 CUSUM + OI + leader-size 的补充路径。</span></div>
+          <div class="mro-node"><b>PriceFlowCrossVenueResearchBase</b><span>加载 Binance 跨市场数据，并验证 <code>decision_time</code> 与 <code>cross_data_valid</code>。</span></div>
+          <div class="mro-node"><b>PriceFlowContinuationStrategy</b><span>定义 OKX 15m/1h/4h 指标、结构回踩、基础退出、2× 杠杆和 ROI/止损。</span></div>
+        </div>
+
+        <div class="state-row">
+          <div class="state"><b>10</b><small>event_id：启用 E10 过滤</small></div>
+          <div class="state"><b>4</b><small>research_id：启用 OI + 持仓强度补充路径</small></div>
+          <div class="state"><b>0</b><small>candidate_id：不启用另一组旧跨市场候选</small></div>
+        </div>
+
+        <div class="callout"><strong>小白只需记住：</strong><code>event_id = 10</code> 选择“最终怎么验票”，<code>research_id = 4</code> 选择“前面用哪两种办法找机会”，<code>candidate_id = 0</code> 关闭另一组旧候选。数字是源码内部开关，不是 10 个指标、4 小时周期或第 4 次加仓。</div>
+        <div class="source-map">
+          <strong>真实调用顺序：</strong>
+          <ol>
+            <li><code>populate_indicators</code>：先计算基础 K 线指标，再逐层追加跨市场、资金行为和 E10 验票字段。</li>
+            <li><code>populate_entry_trend</code>：基础层先找结构回踩；资金层把 CUSUM 补充路径并入；E10 层清空旧入场列，只写回最终通过的信号。</li>
+            <li><code>populate_exit_trend</code>：E10 上层不改退出，最终沿用基础层的流/结构失效规则。</li>
+            <li><code>leverage</code>：来自 Continuation，固定返回 <code>min(2.0, max_leverage)</code>。</li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section" id="clock">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">03 · 数据时钟</p>
+            <h2>必须等收盘，<br>不能偷看未来</h2>
+          </div>
+          <p class="intro">一根 15 分钟 K 线在走完之前，高低点、成交量和收盘位置都还会变。源码因此把“可以做决定的时间”固定为该 K 线开盘时间加 15 分钟，并且只处理刚刚完整收盘的新 K 线。</p>
+        </div>
+
+        <div class="clock">
+          <div class="clock-step"><span class="clock-time">T−10m</span><h3>保存旧快照</h3><p>源码字段 <code>bin_taker_lag2</code>：约 10 分钟前的 5m 主动成交偏向，稍后拿来比较“有没有变新鲜”。</p></div>
+          <div class="clock-step"><span class="clock-time">T−5m</span><h3>检查中间数据</h3><p>这一段参与 CUSUM 和连续性校验；最终 Fresh 比较并不直接使用 <code>lag1</code>。</p></div>
+          <div class="clock-step"><span class="clock-time">T</span><h3>15m 完整收盘</h3><p>区间 [T−15m, T) 的 OKX K 线与截至 T 已知的 Binance、1h/4h 信息在 decision_time T 决策。</p></div>
+          <div class="clock-step"><span class="clock-time">T</span><h3>下一根才允许执行</h3><p>回测开仓时间比信号 K 线的开盘时间晚 15 分钟。换句话说，不能看到一根漂亮 K 线后，假装自己早已在这根 K 线里面成交。</p></div>
+        </div>
+
+        <div class="data-map">
+          <div class="data-source"><b>OKX：交易与价格结构</b><span>BTC/ETH 永续 15m，外加 1h 和 4h informative K 线。成交、止损和收益都落在 OKX。</span></div>
+          <div class="data-source"><b>Binance：旁证从哪里来</b><span>5m 主动买卖量比、未平仓量 OI、头部交易者 position/account ratio，用于识别成交冲击和最新变化。</span></div>
+          <div class="data-source"><b>Sidecar：把两家交易所的钟对齐</b><span>这是预先整理好的伴随数据表，按 OKX 15m 决策点一对一合并；缺字段、无效数或时间错位就拒绝信号。</span></div>
+        </div>
+
+        <div class="used-no">
+          <div class="used"><strong>E10 真正用于决策</strong><ul><li>OKX 15m/1h/4h 价格与成交量</li><li>Binance taker imbalance、OI、top position/account ratio</li><li>跨所有效性与准确 decision_time</li></ul></div>
+          <div class="not-used"><strong>E10 虽计算但不用于门槛</strong><ul><li>FOMC、CPI、政策方向</li><li>Deribit 期权方向与 urgency</li><li>funding 阈值、crowding veto</li><li>venue spread shock 方向门</li></ul></div>
+        </div>
+
+        <div class="callout danger"><strong>人工执行最容易漏掉的门：</strong><code>cross_data_valid</code> 不只检查当前一个点。实际数据准备代码要求连续四个 5m 记录的 Binance 指标和价格有效，并要求关键派生字段都是真实有限数值；图上偶尔出现一个点，不代表数据可用于下单。</div>
+        <a class="source-ref" href="../tools/prepare_price_flow_cross_venue.py">prepare_price_flow_cross_venue.py · L620–754, L1387–1485</a>
+      </section>
+
+      <section class="section" id="indicators">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">04 · 指标翻译</p>
+            <h2>先懂每个数在问什么，<br>再记精确阈值</h2>
+          </div>
+          <p class="intro">这些指标不是六张独立的买卖票。它们分别测量“这根 K 线有多用力、收盘守在哪边、有没有足够的人参与、价格站在平均成本哪侧、最近压力向哪边”。E10 把答案组合起来，而不是看到单个指标就交易。</p>
+        </div>
+
+        <div class="indicator-grid">
+          <article class="indicator">
+            <h3>ATR14 <span class="symbol">波动标尺</span></h3>
+            <div class="math">ATRₜ = EWM₁/₁₄(TrueRange)</div>
+            <p>人话：先估计市场平常一根会走多远，再看当前实体占这个距离多少。所有“实体够不够大”都用 ATR 归一化，因此 BTC、ETH 和不同价格阶段能共用阈值。</p>
+          </article>
+          <article class="indicator">
+            <h3>Close Location <span class="symbol">收盘位置</span></h3>
+            <div class="math">CL = (2C − H − L) / (H − L), clip[−1,1]</div>
+            <p>人话：同样是阳线，收在最高点附近比冲高回落更强。CL 接近 +1 表示收在本根高位，接近 −1 表示收在低位。</p>
+          </article>
+          <article class="indicator">
+            <h3>Body / ATR <span class="symbol">实体力度</span></h3>
+            <div class="math">BODY_ATR = |C − O| / ATR14</div>
+            <p>人话：过滤只有细小实体、主要靠影线刺穿的 K 线。强位移要求 ≥0.70；最终“价格接受”要求 ≥0.30。</p>
+          </article>
+          <article class="indicator">
+            <h3>Relative Volume <span class="symbol">参与度</span></h3>
+            <div class="math">RV = Vₜ / median(V, 96 × 15m)</div>
+            <p>人话：当前成交量是最近约 24 小时“典型一根”的几倍。强位移要 ≥1.50，回踩要 ≤1.50，E10 最终又要求不能太冷，即 ≥0.80。</p>
+          </article>
+          <article class="indicator">
+            <h3>24h Rolling VWAP <span class="symbol">价值位置</span></h3>
+            <div class="math">VWAP₉₆ = Σ(TypicalPrice × V) / ΣV</div>
+            <p>人话：把最近 24 小时成交量加权的平均成交价当作“成本中轴”。做多要在 VWAP96 和 15m EMA20 上方，做空则在下方。</p>
+          </article>
+          <article class="indicator">
+            <h3>Flow Imbalance Proxy <span class="symbol">K线压力代理</span></h3>
+            <div class="math">FIₙ = Σ(Vᵢ × CloseLocationᵢ) / ΣVᵢ</div>
+            <p>人话：成交量越大、收盘越靠高位，向上压力分数越高。它只是 OKX K 线代理，不是真实逐笔主动买卖流；回踩门要求 FI8 ≥0.10、FI24 ≥0.03，做空镜像为负。</p>
+          </article>
+        </div>
+
+        <h3 style="margin-top:30px">“只顺风”在源码里到底是什么意思</h3>
+        <div class="table-scroll">
+          <table class="mirror-table">
+            <thead><tr><th>层级</th><th>Long</th><th>Short</th><th>直观含义</th></tr></thead>
+            <tbody>
+              <tr><td>1h 趋势</td><td>C &gt; EMA50，EMA20 &gt; EMA50</td><td>C &lt; EMA50，EMA20 &lt; EMA50</td><td>中周期方向一致</td></tr>
+              <tr><td>4h 大周期状态</td><td>C &gt; EMA200，EMA50 &gt; EMA200，24h 斜率 &gt; 0</td><td>全部反向</td><td>大周期不逆势</td></tr>
+              <tr><td>15m 位置</td><td>C &gt; VWAP96 且 C &gt; EMA20</td><td>C &lt; VWAP96 且 C &lt; EMA20</td><td>价格站在价值区同侧</td></tr>
+              <tr><td>过度延伸</td><td>1h 的 24h return ≤ +8%</td><td>1h 的 24h return ≥ −8%</td><td>避免追已经走太远的行情</td></tr>
+              <tr><td>快速/慢速压力</td><td>FI8 ≥ +0.10，FI24 ≥ +0.03</td><td>FI8 ≤ −0.10，FI24 ≤ −0.03</td><td>仅核心回踩门要求</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <a class="source-ref" href="../ft_userdata/user_data/strategies/PriceFlowContinuationStrategy.py">PriceFlowContinuationStrategy.py · L80–170, L217–255</a>
+      </section>
+
+      <section class="section" id="base">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">05 · 两种找机会方法</p>
+            <h2>E10 先发现“值得检查”的机会，<br>再决定是否真的入场</h2>
+          </div>
+          <p class="intro">第一种办法看 OKX 自己的“强突破 → 回踩守住”；第二种办法看 Binance 主动成交先异常、OKX 随后跟上。历史 111 笔 E10 交易中，97 笔来自第一种，14 笔来自第二种。</p>
+        </div>
+
+        <h3>无论哪种机会，都先通过同一组“大方向过滤”</h3>
+        <div class="context-stack side-pane" data-side="long">
+          <div class="context-row"><b>1h</b><span>close &gt; EMA50</span><span>EMA20 &gt; EMA50</span></div>
+          <div class="context-row"><b>4h</b><span>close &gt; EMA200，EMA50 &gt; EMA200</span><span>EMA50 相对 6 根前（24h）斜率 &gt; 0</span></div>
+          <div class="context-row"><b>15m</b><span>close &gt; rolling VWAP96</span><span>close &gt; EMA20，volume &gt; 0</span></div>
+          <div class="context-row"><b>伸展限制</b><span>1h close / 24 根前 close − 1 ≤ 8%</span><span>避免在日涨幅过高后继续追 Long</span></div>
+        </div>
+        <div class="context-stack side-pane" data-side="short">
+          <div class="context-row"><b>1h</b><span>close &lt; EMA50</span><span>EMA20 &lt; EMA50</span></div>
+          <div class="context-row"><b>4h</b><span>close &lt; EMA200，EMA50 &lt; EMA200</span><span>EMA50 相对 6 根前（24h）斜率 &lt; 0</span></div>
+          <div class="context-row"><b>15m</b><span>close &lt; rolling VWAP96</span><span>close &lt; EMA20，volume &gt; 0</span></div>
+          <div class="context-row"><b>伸展限制</b><span>1h close / 24 根前 close − 1 ≥ −8%</span><span>避免在日跌幅过深后继续追 Short</span></div>
+        </div>
+
+        <div class="door-grid">
+          <article class="door">
+            <div class="door-head">
+              <span>方法 A · 结构回踩型 · 97 / 111 笔</span>
+              <h3>像跨过门槛，再回头踩一下</h3>
+              <p style="color:rgba(255,255,255,.68);font-size:13px">先用大实体、高成交量跨过过去 12 小时边界，再等价格回来测试，确认边界没有失守。</p>
+            </div>
+            <div class="door-body">
+              <div class="door-flow side-pane" data-side="long">
+                <div class="door-step" data-n="1"><b>先出现真正的向上位移</b><small>收盘 &gt; 前 48 根最高点；实体 ≥0.70 ATR；RV≥1.50；CL≥0.60。</small></div>
+                <div class="door-step" data-n="2"><b>等待 1–8 根 15m</b><small>突破位最多向前传播 8 根，也就是约 2 小时。</small></div>
+                <div class="door-step" data-n="3"><b>回来测试，但收盘守住</b><small>最低价 ≤ 突破位×1.002；收盘仍 &gt; 突破位；阳线；CL≥0.35；RV≤1.50。</small></div>
+                <div class="door-step" data-n="4"><b>快慢压力都向上</b><small>FI8≥0.10 且 FI24≥0.03，并通过上面的“大方向过滤”。</small></div>
+              </div>
+              <div class="door-flow side-pane" data-side="short">
+                <div class="door-step" data-n="1"><b>先出现真正的向下位移</b><small>收盘 &lt; 前 48 根最低点；实体 ≥0.70 ATR；RV≥1.50；CL≤−0.60。</small></div>
+                <div class="door-step" data-n="2"><b>等待 1–8 根 15m</b><small>跌破位最多向前传播 8 根，也就是约 2 小时。</small></div>
+                <div class="door-step" data-n="3"><b>向上反抽，但收盘没站回</b><small>最高价 ≥ 跌破位×0.998；收盘仍 &lt; 跌破位；阴线；CL≤−0.35；RV≤1.50。</small></div>
+                <div class="door-step" data-n="4"><b>快慢压力都向下</b><small>FI8≤−0.10 且 FI24≤−0.03，并通过上面的“大方向过滤”。</small></div>
+              </div>
+              <div class="door-stat"><span><b>97</b><small>交易</small></span><span><b>46</b><small>盈利</small></span><span><b>+1.33%</b><small>逐笔均值</small></span></div>
+            </div>
+          </article>
+
+          <article class="door">
+            <div class="door-head amber">
+              <span>方法 B · 资金冲击型 · 14 / 111 笔</span>
+              <h3>像隔壁市场先有人持续用力</h3>
+              <p style="color:rgba(255,255,255,.68);font-size:13px">Binance 5m 主动成交先出现非日常的连续偏向；E10 不立即追，而是等下一根 OKX 15m 同向确认。</p>
+            </div>
+            <div class="door-body">
+              <div class="door-flow side-pane" data-side="long">
+                <div class="door-step" data-n="1"><b>前一根 15m 发现向上冲击</b><small>5m robust-z 的正向 CUSUM 累计超过 +5 后复位。</small></div>
+                <div class="door-step" data-n="2"><b>当前 OKX 也收阳</b><small>当前收盘 &gt; 开盘；源码字段为 <code>taker_cusum_long_follow</code>。</small></div>
+                <div class="door-step" data-n="3"><b>未平仓量增加</b><small>Binance 15m OI 对数变化 &gt; 0，表示场内风险敞口总量增加。</small></div>
+                <div class="door-step" data-n="4"><b>头部平均仓位强度偏多</b><small>2h top-position 变化 − top-account 变化 &gt; 0。</small></div>
+              </div>
+              <div class="door-flow side-pane" data-side="short">
+                <div class="door-step" data-n="1"><b>前一根 15m 发现向下冲击</b><small>5m robust-z 的负向 CUSUM 累计低于 −5 后复位。</small></div>
+                <div class="door-step" data-n="2"><b>当前 OKX 也收阴</b><small>当前收盘 &lt; 开盘；源码字段为 <code>taker_cusum_short_follow</code>。</small></div>
+                <div class="door-step" data-n="3"><b>未平仓量增加</b><small>做空也要求 Binance 15m OI 对数变化 &gt; 0；它只表示总仓位增加，不证明全是新空。</small></div>
+                <div class="door-step" data-n="4"><b>头部平均仓位强度偏空</b><small>2h top-position 变化 − top-account 变化 &lt; 0。</small></div>
+              </div>
+              <div class="door-stat"><span><b>14</b><small>交易</small></span><span><b>7</b><small>盈利</small></span><span><b>+1.40%</b><small>逐笔均值</small></span></div>
+            </div>
+          </article>
+        </div>
+
+        <div class="cusum-pipeline">
+          <h3 style="color:#fff">CUSUM 是“累计异常报警器”，不是一条均线</h3>
+          <div class="pipeline">
+            <div class="pipe-step"><b>① 原始主动买卖比 R</b>Binance 5m taker long / short volume ratio</div>
+            <div class="pipe-step"><b>② 变成有方向的分数</b><code>I=(R−1)/(R+1)</code>，限制在 [−1,1]</div>
+            <div class="pipe-step"><b>③ 判断有多反常</b>最多 8640 个 5m 点（30 天），至少 1000 点；过去数据先 shift(1)，median / MAD×1.4826，尺度下限 0.01</div>
+            <div class="pipe-step"><b>④ 小异常连续累加</b><code>S⁺=max(0,S⁺+z−0.5)</code>；<code>S⁻=min(0,S⁻+z+0.5)</code></div>
+            <div class="pipe-step"><b>⑤ 超线报警并清零</b><code>S⁺&gt;5</code> 或 <code>S⁻&lt;−5</code> 触发，正负累积同时复位</div>
+          </div>
+          <p style="margin:18px 0 0;color:rgba(255,255,255,.58);font-size:12px">一个 15m 区间内的三个 5m 点只要有一次报警，就记为“本根有冲击”；补充路径再把这个 15m 标志 <code>shift(1)</code>，因此 OKX 价格确认发生在冲击后的下一根 15m，而不是同一根抢跑。</p>
+        </div>
+
+        <div class="callout info"><strong>为什么需要两扇门：</strong>回踩门寻找“已经位移、回踩仍守住”的结构延续；CUSUM 门允许没有标准回踩、但跨市场主动成交先异常、OKX 随后确认的延续。E10 不新增第三种候选，它只过滤这两种。</div>
+        <a class="source-ref" href="../ft_userdata/user_data/strategies/PriceFlowCapitalIntentResearchStrategy.py">PriceFlowCapitalIntentResearchStrategy.py · L204–239, L337–414</a>
+      </section>
+
+      <section class="section" id="gate">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">06 · 最终验票规则</p>
+            <h2>机会出现以后，<br>还要满足“一项必选 + 二选一”</h2>
+          </div>
+          <p class="intro">把它当作验票口：<strong>成交量不能太冷</strong>是必选项；然后“收盘真的向前推进”或“主动成交偏向仍在改善”至少过一项。精确逻辑是 <code>RV08 AND (PRICE_ACCEPT OR FRESH)</code>。</p>
+        </div>
+
+        <div class="gate-grid">
+          <article class="gate">
+            <span class="gate-num">必选项 · 源码 rv08</span>
+            <h3>最低参与度：RV ≥ 0.80</h3>
+            <p>当前完整 OKX 15m 成交量至少达到包含当前 bar 在内的最近 96 根中位数的 80%。它不是“放量突破”要求，只是排除过冷环境。</p>
+            <div class="gate-visual"><div class="rv-track"><div class="rv-fill"></div></div><div class="rv-labels"><span>0</span><span>门槛 0.80</span><span>当前 0.84</span></div></div>
+          </article>
+          <article class="gate">
+            <span class="gate-num">证据 A · 源码 price</span>
+            <h3>强收盘：价格真的向前推进</h3>
+            <p>做多：CL≥0.35、实体≥0.30 ATR、收盘&gt;前一根最高价；做空完全镜像。三项必须同时满足，所以不是“随便一根阳线/阴线”。</p>
+            <div class="gate-visual"><div class="candle-mini"><i class="stick" style="height:34px"></i><i class="stick" style="height:45px"></i><i class="stick" style="height:78px"></i></div></div>
+          </article>
+          <article class="gate">
+            <span class="gate-num">证据 B · 源码 fresh</span>
+            <h3>新鲜变化：最新主动成交没有掉队</h3>
+            <p>做多要求当前 5m imbalance ≥约 10 分钟前；做空要求 ≤。这里比较的是“往哪边变化”，不是要求当前数值必须为正或负。</p>
+            <div class="gate-visual fresh-line"><div class="fresh-row"><span>t−10m</span><div class="fresh-track"><i style="width:42%"></i></div><b>0.03</b></div><div class="fresh-row"><span>当前</span><div class="fresh-track"><i style="width:70%"></i></div><b>0.16</b></div></div>
+          </article>
+        </div>
+
+        <div class="callout danger"><strong>最反直觉、也最容易抄错的一点：</strong>Fresh Flow 不是“做多时 taker 必须为正、做空时必须为负”。例如做空从 +0.16 降到 +0.05：两者都仍偏买，但变化方向在转弱，所以源码仍判定做空 Fresh 通过。</div>
+
+        <div class="fresh-examples">
+          <div class="fresh-example"><b>做多通过</b><code>−0.10 → +0.02</code><span>买方方向显著改善；当前值 ≥旧值。</span></div>
+          <div class="fresh-example"><b>做空通过</b><code>+0.16 → +0.05</code><span>仍为净正，但卖方方向在增强；当前值 ≤旧值。</span></div>
+          <div class="fresh-example"><b>做多不通过</b><code>+0.20 → +0.08</code><span>仍为净买，但相对旧值已经衰减。</span></div>
+        </div>
+
+        <div class="attr">
+          <h3 style="color:#fff">E10 三种实际触发子集</h3>
+          <div class="attr-row"><span><b style="color:#fff">价格 + Fresh 同时成立</b><br>38 笔</span><div class="attr-track"><i style="width:100%"></i></div><div class="attr-metrics"><b>55.26% 胜率 · PF 3.81</b><br>逐笔收益和 +78.30%</div></div>
+          <div class="attr-row"><span><b style="color:#fff">仅价格接受</b><br>15 笔</span><div class="attr-track"><i style="width:81.7%"></i></div><div class="attr-metrics"><b>53.33% 胜率 · PF 3.11</b><br>逐笔收益和 +24.67%</div></div>
+          <div class="attr-row"><span><b style="color:#fff">仅新鲜变化</b><br>58 笔</span><div class="attr-track"><i style="width:44.1%"></i></div><div class="attr-metrics"><b>41.38% 胜率 · PF 1.68</b><br>逐笔收益和 +45.27%</div></div>
+        </div>
+
+        <p class="small">子集 PF 按每笔 <code>profit_ratio</code> 等权归因，用来比较机制，不是共享钱包资金加权 PF。历史上最强的是“两项证据同时出现”；仅新鲜变化的数量最多，但质量最低。</p>
+        <a class="source-ref" href="../ft_userdata/user_data/strategies/PriceFlowEventAdaptiveResearchStrategy.py">PriceFlowEventAdaptiveResearchStrategy.py · L101–147, L195–196</a>
+      </section>
+
+      <section class="section" id="exit">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">07 · 执行与退出</p>
+            <h2>入场只是开始，<br>收益来自退出不对称</h2>
+          </div>
+          <p class="intro">E10 历史胜率低于 50%。它能产生正收益的关键不是“多猜对几次”，而是让成功延续走到 6%/4%/2% ROI，同时用流失效和 −3% 硬止损限制失败。</p>
+        </div>
+
+        <div class="exit-race">
+          <div class="position-node"><span style="color:#7adfd6;font-size:11px;font-weight:900">持仓已经打开</span><h3>同时监听三条离场通道</h3><p style="color:rgba(255,255,255,.66);font-size:13px">没有加仓、没有摊平、没有移动止损。任何一条退出先满足，就结束交易。</p></div>
+          <div class="race-arrow">→</div>
+          <div class="exit-node">
+            <h3>① ROI 达标</h3>
+            <p>按持仓分钟数降低目标；2× 下是杠杆后交易收益率。</p>
+            <div class="roi-steps"><div class="roi-step"><span>0–720m</span><b>+6%</b></div><div class="roi-step"><span>720–1440m</span><b>+4%</b></div><div class="roi-step"><span>≥1440m</span><b>+2%</b></div></div>
+          </div>
+          <div class="exit-node side-pane" data-side="long">
+            <h3>② 做多逻辑失效</h3>
+            <p><code>close &lt; VWAP96 AND FI8 &lt; 0</code>，或者出现反向的向下位移。人话：价格跌回成本中轴下且近期压力转空，或出现强势反向突破。</p>
+          </div>
+          <div class="exit-node side-pane" data-side="short">
+            <h3>② 做空逻辑失效</h3>
+            <p><code>close &gt; VWAP96 AND FI8 &gt; 0</code>，或者出现反向的向上位移。人话：价格站回成本中轴上且近期压力转多，或出现强势反向突破。</p>
+          </div>
+          <div class="exit-node">
+            <h3>③ 硬止损</h3>
+            <p><code>stoploss = −3%</code>。2× 时约对应标的向不利方向移动 1.5%，未计滑点；回测含费用后的止损单均值约 −3.20%。</p>
+          </div>
+        </div>
+
+        <div class="exit-bars">
+          <div class="exit-bar"><span><b>ROI</b> · 48 笔</span><div class="bar-track"><i style="width:100%"></i></div><span>48 胜 · 均值 +5.24%</span></div>
+          <div class="exit-bar"><span><b>流/结构失效</b> · 48 笔</span><div class="bar-track"><i style="width:100%"></i></div><span>5 胜 43 负 · 均值约 −1.15%</span></div>
+          <div class="exit-bar"><span><b>硬止损</b> · 15 笔</span><div class="bar-track"><i style="width:31.25%"></i></div><span>0 胜 · 均值 −3.20%</span></div>
+        </div>
+
+        <div class="execution-grid">
+          <div class="execution"><b>固定 2×</b><span>isolated futures；源码 leverage 返回最多 2.0。</span></div>
+          <div class="execution"><b>最多一仓</b><span>BTC 与 ETH 竞争同一钱包，max_open_trades=1。</span></div>
+          <div class="execution"><b>90% 可用余额</b><span>stake unlimited，tradable_balance_ratio=0.9。</span></div>
+          <div class="execution"><b>平仓后冷却 4 根</b><span>CooldownPeriod 4×15m，即约 60 分钟。</span></div>
+        </div>
+
+        <div class="callout"><strong>利用策略思想时最不能随意改的部分：</strong>如果人工交易一有小利润就提前落袋，却在失败时把 −3% 止损放宽，47.75% 的胜率将无法支撑正期望。历史平均盈利/平均亏损约 2.62 倍，收益来自这个不对称。</div>
+        <a class="source-ref" href="../ft_userdata/user_data/strategies/PriceFlowContinuationStrategy.py">PriceFlowContinuationStrategy.py · L27–47, L268–299</a>
+      </section>
+
+      <section class="section" id="manual">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">08 · 人工检查流程</p>
+            <h2>如何把源码变成<br>可执行检查表</h2>
+          </div>
+          <p class="intro">“精确复刻 E10”和“借鉴 E10 思想”必须分开。前者需要脚本与 Binance 历史字段；后者可以人工执行，但不能声称拥有同一组回测结果。</p>
+        </div>
+
+        <details open>
+          <summary>E10 核心参数速查：人话与源码值放在一起</summary>
+          <div class="table-scroll">
+            <table class="parameter-table">
+              <thead><tr><th>环节</th><th>直观意思</th><th>真实源码条件</th></tr></thead>
+              <tbody>
+                <tr><td>运行节奏</td><td>每 15 分钟只判断一次完整 K 线</td><td><code>timeframe="15m"</code>；<code>process_only_new_candles=True</code>；<code>startup_candle_count=960</code>；允许做多和做空</td></tr>
+                <tr><td>方向过滤</td><td>1h、4h、当前价值位置同向，且日内不能已经跑太远</td><td>1h EMA20/50；4h EMA50/200 与 6 根斜率；15m EMA20 + VWAP96；24h 涨跌幅限制 ±8%</td></tr>
+                <tr><td>方法 A：强位移</td><td>用大实体和大成交量越过过去约 12 小时边界</td><td>Donchian 48；实体≥0.70 ATR；RV≥1.50；做多 CL≥0.60 / 做空 CL≤−0.60</td></tr>
+                <tr><td>方法 A：回踩</td><td>1–8 根内回来测试，触碰边界但收盘守住</td><td>容差 0.2%；RV≤1.50；CL 阈值 ±0.35；FI8 阈值 ±0.10；FI24 阈值 ±0.03</td></tr>
+                <tr><td>方法 B：资金冲击</td><td>主动成交连续反常，下一根 OKX 同向，且总仓位增加</td><td>30 天过去式 robust-z；至少 1000 点；CUSUM <code>k=0.5</code>、阈值 <code>±5</code>；OI 15m 变化&gt;0；leader-size 2h 方向同向</td></tr>
+                <tr><td>E10 最终验票</td><td>量不能太冷，且强收盘或主动成交改善至少一项成立</td><td><code>RV≥0.80 AND (PRICE_ACCEPT OR FRESH)</code>；同时必须 <code>cross_data_valid</code></td></tr>
+                <tr><td>执行与风险</td><td>下一根执行，不加仓；平仓后冷静一小时</td><td>最多 2×；最多一仓；90% 可交易余额；Cooldown 4×15m；硬止损为交易收益 −3%</td></tr>
+                <tr><td>盈利目标</td><td>等待越久，接受越小的盈利</td><td>0–720 分钟 +6%；720–1440 分钟 +4%；≥1440 分钟 +2%</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+
+        <div class="manual-levels">
+          <article class="manual-level exact"><h3>精确复刻</h3><p>需要程序计算，不能可靠地只靠肉眼。</p><ul><li>完整 OKX 15m/1h/4h 数据</li><li>Binance 5m taker ratio、OI、top position/account ratio</li><li>过去式 robust-z、CUSUM 状态机和严格 decision_time</li><li>字段缺失就拒绝信号、下一根执行和同样退出顺序</li></ul></article>
+          <article class="manual-level idea"><h3>人工借鉴</h3><p>可以保留核心思想，但属于新策略。</p><ul><li>只顺 1h/4h 大方向</li><li>等待强位移后的成功回踩，不追第一根</li><li>成交量至少接近日常水平</li><li>要求强收盘或可验证的主动成交改善</li><li>预先固定止损与分段目标，保持盈亏不对称</li></ul></article>
+        </div>
+
+        <div class="side-switch" role="group" aria-label="人工检查方向">
+          <button type="button" data-side-button="long" aria-pressed="true">做多检查</button>
+          <button type="button" data-side-button="short" aria-pressed="false">做空检查</button>
+        </div>
+
+        <div class="checklist side-pane" data-side="long">
+          <div class="check"><span class="check-num">1</span><b>等 15m 收盘</b><div>当前 K 线未收完时不计算；确认 Binance 5m 字段已到同一 decision_time。</div></div>
+          <div class="check"><span class="check-num">2</span><b>确认做多环境</b><div>1h close&gt;EMA50 且 EMA20&gt;EMA50；4h close&gt;EMA200 且 EMA50&gt;EMA200，EMA50 的 24h slope&gt;0；15m close&gt;VWAP96 和 EMA20；24h return≤8%。</div></div>
+          <div class="check"><span class="check-num">3</span><b>找到机会来源</b><div>A：过去 1–8 根有高量上破，当前回踩收回；或 B：前一 15m 有做多 CUSUM，当前阳线、OI&gt;0、leader-size delta&gt;0。</div></div>
+          <div class="check"><span class="check-num">4</span><b>通过 E10 门</b><div>当前 RV≥0.80，并且“做多强收盘”或“当前 taker imbalance≥约 10 分钟前”至少一项成立。</div></div>
+          <div class="check"><span class="check-num">5</span><b>下一根才执行</b><div>不要回填到信号 K 线。历史配置使用 order-book top 1 的同侧限价，10 分钟未成交超时；真实未成交可能改变结果。</div></div>
+          <div class="check"><span class="check-num">6</span><b>先放硬止损</b><div>源码交易收益止损 −3%；2× 下约为价格不利移动 1.5%。人工仓位应按可承受账户风险重新缩放，不应机械照抄 90% stake。</div></div>
+          <div class="check"><span class="check-num">7</span><b>按竞赛退出</b><div>达到 6%/4%/2% ROI，或 close 跌回 VWAP96 且 FI8&lt;0，或出现反向位移，或硬止损——哪个先到就退出。</div></div>
+        </div>
+
+        <div class="checklist side-pane" data-side="short">
+          <div class="check"><span class="check-num">1</span><b>等 15m 收盘</b><div>当前 K 线未收完时不计算；确认 Binance 5m 字段已到同一 decision_time。</div></div>
+          <div class="check"><span class="check-num">2</span><b>确认做空环境</b><div>1h close&lt;EMA50 且 EMA20&lt;EMA50；4h close&lt;EMA200 且 EMA50&lt;EMA200，EMA50 的 24h slope&lt;0；15m close&lt;VWAP96 和 EMA20；24h return≥−8%。</div></div>
+          <div class="check"><span class="check-num">3</span><b>找到机会来源</b><div>A：过去 1–8 根有高量下破，当前反抽未站回；或 B：前一 15m 有做空 CUSUM，当前阴线、OI&gt;0、leader-size delta&lt;0。</div></div>
+          <div class="check"><span class="check-num">4</span><b>通过 E10 门</b><div>当前 RV≥0.80，并且“做空强收盘”或“当前 taker imbalance≤约 10 分钟前”至少一项成立。</div></div>
+          <div class="check"><span class="check-num">5</span><b>下一根才执行</b><div>不要回填到信号 K 线。历史配置使用 order-book top 1 的同侧限价，10 分钟未成交超时；真实未成交可能改变结果。</div></div>
+          <div class="check"><span class="check-num">6</span><b>先放硬止损</b><div>源码交易收益止损 −3%；2× 下约为价格不利移动 1.5%。人工仓位应按可承受账户风险重新缩放，不应机械照抄 90% stake。</div></div>
+          <div class="check"><span class="check-num">7</span><b>按竞赛退出</b><div>达到 6%/4%/2% ROI，或 close 站回 VWAP96 且 FI8&gt;0，或出现反向位移，或硬止损——哪个先到就退出。</div></div>
+        </div>
+
+        <div class="risk-math">
+          <h3 style="color:#fff">仓位风险的直观换算</h3>
+          <p style="color:rgba(255,255,255,.66)">历史配置约把 90% 钱包作为 stake，硬止损为该交易的 −3% 杠杆后收益。因此一次完整硬止损对钱包的理论影响约为：</p>
+          <p><code>0.90 × 3% ≈ 2.7% 钱包</code>，再加手续费、funding 与可能滑点。</p>
+          <p style="margin:0;color:rgba(255,255,255,.58);font-size:12px">这只是解释回测风险结构，不是建议人工使用 90% 钱包。真实交易应先定义账户单笔最大损失，再反推仓位。</p>
+        </div>
+      </section>
+
+      <section class="section" id="cases">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">09 · 真实案例</p>
+            <h2>用真实交易，<br>看规则怎样落地</h2>
+          </div>
+          <p class="intro">下面数据直接来自 E10 导出的 signal snapshot，并按下一根开仓时间与晋升回测逐笔连接。它们展示“通过条件”与“最后盈利”并不是同一件事。</p>
+        </div>
+
+        <div class="case-grid">
+          <article class="case win">
+            <span class="case-label">案例 A · 结构回踩做多 · 两项证据都通过</span>
+            <h3>ETH 结构回踩，两项 E10 证据同时成立</h3>
+            <p class="case-meta">信号：2023-10-23 19:45 UTC · 下一根 20:00 开仓</p>
+            <div class="case-values">
+              <div class="case-value"><b>1708.53 &gt; 1702.39</b><span>收盘守住突破位</span></div>
+              <div class="case-value"><b>CL 0.396 · 实体 0.589 ATR</b><span>强收盘证据通过</span></div>
+              <div class="case-value"><b>RV 1.491</b><span>回踩≤1.5，同时 E10≥0.8</span></div>
+              <div class="case-value"><b>Taker 0.160 &gt; 0.030</b><span>做多新鲜变化通过</span></div>
+              <div class="case-value"><b>FI8 0.466 · FI24 0.259</b><span>核心压力同向</span></div>
+              <div class="case-value"><b>1h + 4h Long</b><span>市场环境通过</span></div>
+            </div>
+            <div class="case-result">1708.54 → 1761.56 · 150 分钟 · ROI +6.00%</div>
+          </article>
+
+          <article class="case win">
+            <span class="case-label">案例 B · 资金冲击做空 · 两项证据都通过</span>
+            <h3>ETH 没有标准回踩，但跨市场冲击先行</h3>
+            <p class="case-meta">信号：2024-07-03 07:15 UTC · 下一根 07:30 开仓</p>
+            <div class="case-values">
+              <div class="case-value"><b>做空 CUSUM Follow = true</b><span>前一 15m 有负向累计冲击</span></div>
+              <div class="case-value"><b>OI15 +0.114%</b><span>新增风险承担</span></div>
+              <div class="case-value"><b>Leader Δ −0.00338</b><span>持仓强度相对账户数偏空</span></div>
+              <div class="case-value"><b>CL −1.0 · 实体 1.14 ATR</b><span>做空强收盘证据通过</span></div>
+              <div class="case-value"><b>Taker −0.276 &lt; −0.224</b><span>做空新鲜变化通过</span></div>
+              <div class="case-value"><b>RV 2.597</b><span>E10 参与度通过</span></div>
+            </div>
+            <div class="case-result">3355.37 → 3252.00 · 705 分钟 · ROI +6.00%</div>
+          </article>
+
+          <article class="case win">
+            <span class="case-label">案例 C · 结构回踩做空 · 仅新鲜变化通过</span>
+            <h3>两个 taker 值都为正，做空仍可通过</h3>
+            <p class="case-meta">BTC · 信号 2026-01-31 09:45 UTC</p>
+            <div class="case-values">
+              <div class="case-value"><b>Taker +0.162 → +0.054</b><span>当前值更低，做空新鲜变化通过</span></div>
+              <div class="case-value"><b>强收盘 = false</b><span>只靠 OR 右侧的“新鲜变化”分支</span></div>
+              <div class="case-value"><b>CL −0.641 · 实体 0.428 ATR</b><span>实体够大但未跌破前低</span></div>
+              <div class="case-value"><b>RV 1.013</b><span>参与度通过</span></div>
+            </div>
+            <div class="case-result">83077.50 → 80509.60 · 375 分钟 · ROI +6.00%</div>
+          </article>
+
+          <article class="case loss">
+            <span class="case-label">案例 D · 结构回踩做多 · 仅新鲜变化 · 失败</span>
+            <h3>所有门都通过，仍然触发硬止损</h3>
+            <p class="case-meta">BTC · 信号 2024-11-15 13:00 UTC</p>
+            <div class="case-values">
+              <div class="case-value"><b>RV 0.842</b><span>刚过 E10 参与门</span></div>
+              <div class="case-value"><b>Taker −0.110 → +0.023</b><span>做多新鲜变化通过</span></div>
+              <div class="case-value"><b>强收盘 = false</b><span>只有新鲜变化分支成立</span></div>
+              <div class="case-value"><b>FI8 0.199 · FI24 0.170</b><span>核心结构仍通过</span></div>
+            </div>
+            <div class="case-result">89940.20 → 88591.10 · 105 分钟 · Stop loss −3.20%</div>
+          </article>
+        </div>
+
+        <div class="callout"><strong>案例真正说明了什么：</strong>条件通过只意味着“这是历史代码愿意承担的风险”，不是确定性预测。仅靠新鲜变化通过的 58 笔交易，历史胜率只有 41.38%；没有硬止损和较大的盈利目标，这个子集很容易从正期望变成负期望。</div>
+      </section>
+
+      <section class="section" id="returns">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">10 · 收益是怎样形成的</p>
+            <h2>先看收益质量，<br>再看 +241.75%</h2>
+          </div>
+          <p class="intro">这条曲线来自 2023-08-01 至 2026-08-01 的历史回测。判断它时不能只看终点，还要看出手次数、盈亏比例、最大回撤、收益集中度和不同 Sharpe 口径。</p>
+        </div>
+
+        <div class="stat-grid">
+          <div class="stat"><span>共享钱包累计收益</span><b>+241.75%</b><small>20 → 68.35 USDT</small></div>
+          <div class="stat"><span>交易 / 胜率</span><b>111</b><small>53 胜 · 58 负 · 47.75%</small></div>
+          <div class="stat"><span>Payoff / PF</span><b>2.62</b><small>利润因子 2.72</small></div>
+          <div class="stat"><span>日钱包 Sharpe</span><b>2.10</b><small>按每日账户权益变化年化</small></div>
+          <div class="stat"><span>最大回撤</span><b>7.66%</b><small>Freqtrade 账户口径</small></div>
+          <div class="stat"><span>年化复合增长</span><b>50.63%</b><small>历史 CAGR，非未来承诺</small></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <div><h3>BTC + ETH 共享钱包月末权益</h3><p>20 USDT 起点；最多一笔仓位，因此两资产实际争夺资金。冻结回测按每边 0.05% 手续费计算；资金费率缺口见第 11 节。</p></div>
+            <div class="legend"><span><i></i>E10 月末权益</span></div>
+          </div>
+          <canvas id="equityChart" role="img" aria-label="E10 从 20 USDT 到 68.35 USDT 的三年月末权益曲线"></canvas>
+        </div>
+
+        <div class="economics">
+          <div class="econ"><b>Long：67 笔</b><span>31 胜，逐笔平均 +1.12%；利润因子 1.89。</span></div>
+          <div class="econ"><b>Short：44 笔</b><span>22 胜，逐笔平均 +1.66%；利润因子 4.05。</span></div>
+          <div class="econ"><b>平均持仓 8h50m</b><span>中位数 7h45m；最短 15m，最长 25h。</span></div>
+        </div>
+
+        <div class="callout info"><strong>收益结构结论：</strong>做空交易更少，但历史质量显著高于做多；结构回踩贡献 97 笔，资金冲击路径仅 14 笔。E10 不是高频系统，也不是靠少数 CUSUM 信号主导，它仍然主要是一套“趋势位移—回踩—再延续”策略。</div>
+
+        <details>
+          <summary>展开查看 36 个月完整收益</summary>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>月份</th><th>E10 月收益</th><th>月末权益（USDT）</th><th>当月状态</th></tr></thead>
+              <tbody id="monthlyRows"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <p class="small"><strong>不要把三个 Sharpe 混成一个：</strong>每日钱包权益变化的年化 Sharpe 为 2.10；把 36 个月收益作为样本计算，月频年化 Sharpe 为 1.81；把每笔平仓收益当作独立样本，Sharpe 为 0.73。采样频率和是否计入空仓日不同，所以数值不同。36 个月中 22 个月上涨、11 个月下跌、3 个月持平；最好月份为 2024-11 的 +25.85%，最差为 2024-01 的 −5.42%，月收益中位数仅 +0.70%，说明收益并不均匀。</p>
+      </section>
+
+      <section class="section" id="limits">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">11 · 边界与源码索引</p>
+            <h2>可以利用思想，<br>不能复制承诺</h2>
+          </div>
+          <p class="intro">这份文档把历史代码解释清楚，但不会把历史回测变成未来收益保证。精确复刻仍需要“当时能看到什么就只用什么”的 point-in-time 数据、真实执行审计与前瞻样本。</p>
+        </div>
+
+        <div class="limits">
+          <div class="limit"><b>选择偏差</b><p>E10 来自 20 轮候选；挑战期也不是从未查看过的全新留出集。继续在同一段历史上调整阈值，会扩大过拟合。</p></div>
+          <div class="limit"><b>执行差异</b><p>限价单未成交、滑点、延迟、价差扩张和交易所中断没有被完整重放。翻倍手续费压力测试不能替代真实撮合。</p></div>
+          <div class="limit"><b>数据身份</b><p>Binance top-position/account、OI 与 taker ratio 都是聚合行为代理，不能判断新多、新空、平多、平空或交易者身份。</p></div>
+          <div class="limit"><b>资金费率</b><p>早期 funding 缺失按冻结配置 0.0 处理，三年回测不是完整的历史资金费率重放。</p></div>
+          <div class="limit"><b>人工近似</b><p>如果没有 robust-z、CUSUM 状态与时间对齐，人工版就不是 E10。它可以借鉴方法，但必须独立重新验证。</p></div>
+          <div class="limit"><b>当前授权</b><p>结论仍是 Shadow。至少积累 100 笔 forward 交易并完成真实执行、故障恢复与 kill-switch，才应讨论后续阶段。</p></div>
+        </div>
+
+        <div class="source-map">
+          <h3>源码与证据索引</h3>
+          <ol>
+            <li><a href="../ft_userdata/user_data/strategies/PriceFlowParticipationFreshnessStrategy.py">PriceFlowParticipationFreshnessStrategy.py</a>：晋升入口和策略意图说明，L1–8。</li>
+            <li><a href="../ft_userdata/user_data/strategies/PriceFlowEventAdaptiveResearchStrategy.py">PriceFlowEventAdaptiveResearchStrategy.py</a>：E10 directional features、最终过滤与信号重写，L98–147、L164–196、L331–375。</li>
+            <li><a href="../ft_userdata/user_data/strategies/PriceFlowCapitalIntentResearchStrategy.py">PriceFlowCapitalIntentResearchStrategy.py</a>：强收盘、OI、leader-size、结构回踩与资金冲击两类候选，L54–97、L204–239、L337–414。</li>
+            <li><a href="../ft_userdata/user_data/strategies/PriceFlowCrossVenueResearchStrategy.py">PriceFlowCrossVenueResearchStrategy.py</a>：跨市场伴随数据、决策时间边界、大方向过滤与数据有效性，L93–189、L418–441。</li>
+            <li><a href="../ft_userdata/user_data/strategies/PriceFlowContinuationStrategy.py">PriceFlowContinuationStrategy.py</a>：15m/1h/4h 指标、位移回踩、退出、ROI、止损和杠杆，L20–47、L80–299。</li>
+            <li><a href="../tools/prepare_price_flow_cross_venue.py">prepare_price_flow_cross_venue.py</a>：taker imbalance、past robust-z、CUSUM、5m→15m 采样与 cross_data_valid，L467–496、L620–754、L1387–1485。</li>
+            <li><a href="../ft_userdata/runtime/freqtrade-futures/backtest_results/price-flow-event-adaptive-20-rounds/research-config.json">research-config.json</a>：20 USDT 起始钱包、最多一仓、90% 余额、限价单、10 分钟超时与 order-book top 1 执行配置。</li>
+            <li><a href="../ft_userdata/runtime/freqtrade-futures/backtest_results/price-flow-event-adaptive-20-rounds/POST_SELECTION_AUDIT.md">POST_SELECTION_AUDIT.md</a>、晋升 backtest ZIP、signal export 与月度 CSV：收益与案例证据。</li>
+          </ol>
+        </div>
+
+        <div class="callout danger"><strong>最终定位：</strong>读完这份文档，读者应能理解和复现 E10 的思想与规则；但“理解规则”不等于获得未来盈利保证。真实盈利还取决于前瞻有效性、数据质量、交易成本、执行纪律和仓位风险。</div>
+      </section>
+    </article>
+  </main>
+
+  <footer>基于冻结源码与 2023-08-01 至 2026-08-01 历史回测生成 · 技术研究文档 · 非投资建议、非收益承诺、非实盘授权</footer>
+
+  <script>
+    const monthly = [
+      ["2023-08",-3.77111985,19.24577603],
+      ["2023-09",-3.084700503,18.65210148],
+      ["2023-10",0.1690553745,18.68363386],
+      ["2023-11",6.9954908119,19.99064575],
+      ["2023-12",5.2532260995,21.04079957],
+      ["2024-01",-5.4154474796,19.90134612],
+      ["2024-02",18.6868613187,23.62028307],
+      ["2024-03",-0.1373562286,23.58783914],
+      ["2024-04",2.9033143135,24.27266825],
+      ["2024-05",5.6179704924,25.63629959],
+      ["2024-06",-4.7057688875,24.42991458],
+      ["2024-07",7.006387699,26.14156911],
+      ["2024-08",-0.4798076943,26.01613985],
+      ["2024-09",3.4671113593,26.91814839],
+      ["2024-10",0.9094095049,27.16294459],
+      ["2024-11",25.8521631804,34.18515335],
+      ["2024-12",0.4840900911,34.35064029],
+      ["2025-01",-1.1453730896,33.9571973],
+      ["2025-02",6.9641761041,36.32203632],
+      ["2025-03",3.2325919441,37.49617954],
+      ["2025-04",-1.3433054945,36.9924913],
+      ["2025-05",0.26375804,37.09006197],
+      ["2025-06",-2.8021261891,36.05075163],
+      ["2025-07",3.7641829328,37.40776787],
+      ["2025-08",13.1511279612,42.32731129],
+      ["2025-09",2.6389893805,43.44432454],
+      ["2025-10",0,43.44432454],
+      ["2025-11",16.1316600596,50.45261529],
+      ["2025-12",0.4117000255,50.66032872],
+      ["2026-01",8.9086715662,55.17349102],
+      ["2026-02",11.8481057101,61.71050456],
+      ["2026-03",-1.9906961039,60.48203595],
+      ["2026-04",0,60.48203595],
+      ["2026-05",-1.565567999,59.53514855],
+      ["2026-06",14.8067690343,68.35038049],
+      ["2026-07",0,68.35038049]
+    ];
+
+    const styles = getComputedStyle(document.documentElement);
+    const colors = {
+      teal: styles.getPropertyValue("--teal").trim(),
+      line: styles.getPropertyValue("--line").trim(),
+      muted: styles.getPropertyValue("--muted").trim()
+    };
+
+    document.querySelectorAll("[data-side-button]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const side = button.getAttribute("data-side-button");
+        document.body.setAttribute("data-side", side);
+        document.querySelectorAll("[data-side-button]").forEach(function (item) {
+          item.setAttribute("aria-pressed", String(item.getAttribute("data-side-button") === side));
+        });
+      });
+    });
+
+    function prepareCanvas(canvas) {
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.round(rect.width * ratio));
+      canvas.height = Math.max(1, Math.round(rect.height * ratio));
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      return { ctx: ctx, width: rect.width, height: rect.height };
+    }
+
+    function drawEquity() {
+      const canvas = document.getElementById("equityChart");
+      const result = prepareCanvas(canvas);
+      const ctx = result.ctx;
+      const width = result.width;
+      const height = result.height;
+      const pad = { left: 48, right: 20, top: 22, bottom: 43 };
+      const innerW = width - pad.left - pad.right;
+      const innerH = height - pad.top - pad.bottom;
+      const min = 15;
+      const max = 75;
+      const x = function (i) { return pad.left + i * innerW / 36; };
+      const y = function (v) { return pad.top + (max - v) * innerH / (max - min); };
+      const values = [20].concat(monthly.map(function (r) { return r[2]; }));
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.font = "11px system-ui";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      [20,30,40,50,60,70].forEach(function (v) {
+        ctx.strokeStyle = colors.line;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y(v));
+        ctx.lineTo(width - pad.right, y(v));
+        ctx.stroke();
+        ctx.fillStyle = colors.muted;
+        ctx.fillText(v + "U", pad.left - 8, y(v));
+      });
+
+      [[0,"23-08"],[5,"24-01"],[12,"24-08"],[17,"25-01"],[24,"25-08"],[29,"26-01"],[36,"26-07"]].forEach(function (item) {
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = colors.muted;
+        ctx.fillText(item[1], x(item[0]), height - pad.bottom + 14);
+      });
+
+      ctx.beginPath();
+      values.forEach(function (v, i) {
+          if (i === 0) ctx.moveTo(x(i), y(v));
+          else ctx.lineTo(x(i), y(v));
+      });
+      ctx.strokeStyle = colors.teal;
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+
+      const gradient = ctx.createLinearGradient(0, pad.top, 0, height - pad.bottom);
+      gradient.addColorStop(0, "rgba(13,148,136,.22)");
+      gradient.addColorStop(1, "rgba(13,148,136,0)");
+      ctx.lineTo(x(36), y(min));
+      ctx.lineTo(x(0), y(min));
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      const last = values[values.length - 1];
+      ctx.beginPath();
+      ctx.arc(x(36), y(last), 4, 0, Math.PI * 2);
+      ctx.fillStyle = colors.teal;
+      ctx.fill();
+
+      ctx.font = "700 11px system-ui";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = colors.teal;
+      ctx.fillText("E10 68.35", x(36) - 8, y(68.35038049) - 8);
+    }
+
+    function buildMonthlyTable() {
+      const root = document.getElementById("monthlyRows");
+      monthly.forEach(function (r) {
+        const tr = document.createElement("tr");
+        const pct = function (v) { return (v > 0 ? "+" : "") + v.toFixed(2) + "%"; };
+        const returnClass = r[1] > 0 ? "pos" : (r[1] < 0 ? "neg" : "");
+        tr.innerHTML =
+          "<td>" + r[0] + "</td>" +
+          "<td class='" + returnClass + "'>" + pct(r[1]) + "</td>" +
+          "<td>" + r[2].toFixed(2) + "</td>" +
+          "<td>" + (r[1] > 0 ? "上涨" : (r[1] < 0 ? "下跌" : "持平")) + "</td>";
+        root.appendChild(tr);
+      });
+    }
+
+    let resizeTimer;
+    window.addEventListener("resize", function () {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(drawEquity, 120);
+    });
+    window.addEventListener("scroll", function () {
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      document.querySelector(".progress").style.width = (max > 0 ? window.scrollY / max * 100 : 0) + "%";
+    }, { passive: true });
+
+    buildMonthlyTable();
+    drawEquity();
+  </script>
+</body>
+</html>
