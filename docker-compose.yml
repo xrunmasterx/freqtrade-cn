@@ -317,7 +317,7 @@ services:
       --config /freqtrade/config/trading-safety.json
       --user-data-dir /freqtrade/state
       --strategy-path /freqtrade/user_data/strategies
-      --strategy VolatilitySystem
+      --strategy PriceFlowParticipationFreshnessStrategy
 
   freqtrade-research:
     <<: *freqtrade-common

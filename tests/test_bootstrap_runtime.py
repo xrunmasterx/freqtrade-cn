@@ -181,6 +181,34 @@ class BootstrapRuntimeTests(unittest.TestCase):
             ["freqtrade", "freqtrade-futures", "freqtrade-research"],
         )
 
+    def test_default_futures_runtime_uses_e10_with_btc_eth_shared_wallet(self) -> None:
+        manifest = load_runtime_manifest()
+        futures = next(
+            service
+            for service in manifest["services"]
+            if service["name"] == "freqtrade-futures"
+        )
+        config = json.loads(
+            (Path(__file__).resolve().parents[1] / futures["config_template"]).read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(
+            futures["strategy"],
+            "PriceFlowParticipationFreshnessStrategy",
+        )
+        self.assertIs(config["dry_run"], True)
+        self.assertEqual(config["trading_mode"], "futures")
+        self.assertEqual(
+            config["exchange"]["pair_whitelist"],
+            ["BTC/USDT:USDT", "ETH/USDT:USDT"],
+        )
+        self.assertEqual(
+            config["cross_venue_sidecar_dir"],
+            "/freqtrade/state/data-price-flow-deep-5y/cross-venue",
+        )
+
     def test_cli_can_run_as_a_direct_script(self) -> None:
         script = Path(__file__).resolve().parents[1] / "tools" / "bootstrap_runtime.py"
 

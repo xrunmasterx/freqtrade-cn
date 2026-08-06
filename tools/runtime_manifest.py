@@ -42,7 +42,7 @@ EXPECTED_SERVICES: dict[str, dict[str, object]] = {
         "profile": "trading",
         "config_template": "ft_userdata/user_data/config.volatility.futures.example.json",
         "config_path": "ft_userdata/user_data/config.volatility.futures.json",
-        "strategy": "VolatilitySystem",
+        "strategy": "PriceFlowParticipationFreshnessStrategy",
         "state_root": "ft_userdata/runtime/freqtrade-futures",
         "legacy_database": "ft_userdata/user_data/tradesv3-futures.sqlite",
         "database_filename": "trades.sqlite",

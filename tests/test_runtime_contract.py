@@ -23,7 +23,7 @@ SERVICES = (
         "trading",
         "trading",
         "config.volatility.futures.json",
-        "VolatilitySystem",
+        "PriceFlowParticipationFreshnessStrategy",
     ),
     ("freqtrade-research", "research", "research", "config.research.json", None),
 )
