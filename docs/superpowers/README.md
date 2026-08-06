@@ -1,6 +1,6 @@
 # Superpowers Documentation Index
 
-**Current status date:** 2026-08-02
+**Current status date:** 2026-08-06
 
 Read this file before selecting an implementation plan. Dated plans and specifications
 are retained as design and acceptance history; unchecked boxes in a completed plan are
@@ -8,15 +8,18 @@ not an active backlog.
 
 ## Current development state
 
-- The manual-acceptance dev baseline is integrated on branch
-  `xrunmasterx/phase1-complete-development`. Its pre-document code-state anchor is Root
-  `32cb20819`, backend `382320523`, frontend `820bcc81d`, and public upstream strategies
-  `dbd5b0b21`. A remote recursive clone and the focused backend/frontend/Compose checks
-  passed as recorded in the
-  [dev-branch integration closeout](reports/2026-08-02-phase1-dev-branch-integration-closeout.md).
-  Root/backend/frontend `main` were not merged or modified by that closeout. The dev
-  branch awaits user manual acceptance and is not a new product, Paper, Live, or strategy
-  acceptance.
+- On 2026-08-06 the user authorized integration of the manual-acceptance dev baseline
+  into local `main`. Root `main` contains the dev history through `4f68407`; backend
+  `main` records merge `b1121f895`, frontend `main` is `820bcc81d`, and public upstream
+  strategies remain `dbd5b0b21`. The earlier
+  [dev-branch integration closeout](reports/2026-08-02-phase1-dev-branch-integration-closeout.md)
+  remains frozen historical evidence; this integration does not expand its product,
+  Paper, Live, or strategy-acceptance claims.
+- The legacy `freqtrade-futures` dry-run instance now defaults to the frozen E10 entry
+  `PriceFlowParticipationFreshnessStrategy` for `BTC/USDT:USDT` and `ETH/USDT:USDT` in
+  one process, state root, database, and wallet. It requires the precomputed cross-venue
+  sidecars under the instance state root and remains a Shadow/dry-run configuration;
+  live trading and exchange writes are not authorized by this default.
 - Runtime Registry v2 Phases 2A, 2B, and 2C are merged into local Root `main`.
 - Phase 2C is accepted at its offline, fail-closed boundary. Production Supervisor
   assembly, online runtime acceptance, exchange writes, and live trading remain disabled.
@@ -293,7 +296,7 @@ not an active backlog.
 | Role | Document | Status |
 |---|---|---|
 | Product purpose and sequencing | `STRATEGY.md` | Governing |
-| Manual-acceptance dev baseline | `reports/2026-08-02-phase1-dev-branch-integration-closeout.md` | Integrated on dev branch; user acceptance pending; no main merge |
+| Manual-acceptance dev baseline | `reports/2026-08-02-phase1-dev-branch-integration-closeout.md` | Integrated into local `main` on 2026-08-06; historical report remains frozen |
 | Shared domain language | `../../CONTEXT.md` | Governing glossary |
 | Previous baseline implementation | `plans/2026-07-30-phase1-baseline-capability-gate.md` | Completed; exact-SHA accepted |
 | Previous baseline evidence | `reports/2026-07-30-phase1-baseline-capability-gate-acceptance.md` | Accepted implementation receipt |
