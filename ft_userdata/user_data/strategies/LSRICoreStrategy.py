@@ -16,7 +16,8 @@ class LSRICoreStrategy(IStrategy):
     """
     LSRI Core: Liquidity Sweep + Regime Impulse.
 
-    Backtestable core version for OKX BTC/ETH USDT perpetual futures.
+    Backtestable core version for OKX USDT perpetual futures, with an opt-in
+    adaptive profile shared by pair-agnostic strategy subclasses.
     """
 
     INTERFACE_VERSION = 3
@@ -58,6 +59,31 @@ class LSRICoreStrategy(IStrategy):
     early_time_stop_r = 0.35
     time_stop_minutes = 90
     time_stop_r = 0.5
+
+    adaptive_profile_enabled = False
+    adaptive_max_stop_distance = 0.045
+    adaptive_leverage = 3.0
+    adaptive_pullback_tolerance = 0.006
+    adaptive_entry_min_risk_pct = 0.004
+    adaptive_entry_max_risk_pct = 0.045
+    adaptive_entry_volume_z_min = 0.5
+    adaptive_entry_volume_z_max = 4.0
+    adaptive_long_adx_hard_threshold = 18.0
+    adaptive_short_adx_hard_threshold = 20.0
+    adaptive_di_direction_ratio = 1.05
+    adaptive_long_rsi_min = 48.0
+    adaptive_long_rsi_max = 75.0
+    adaptive_short_rsi_min = 25.0
+    adaptive_short_rsi_max = 52.0
+    adaptive_dist_ema20_limit = 0.035
+    adaptive_dist_vwap_limit = 0.06
+    adaptive_crowded_ret24_limit = 0.20
+    adaptive_dist_ema200_4h_limit = 0.50
+    adaptive_trend_min_ema_spread = 0.002
+    adaptive_trend_min_atrp = 0.003
+    adaptive_chop_max_adx = 14.0
+    adaptive_chop_max_atrp = 0.0025
+    adaptive_take_profit_r = 2.0
 
     plot_config = {
         "main_plot": {
@@ -111,16 +137,20 @@ class LSRICoreStrategy(IStrategy):
             return default
         return result
 
-    @staticmethod
-    def _pair_max_stop_distance(pair: str) -> float:
+    @classmethod
+    def _pair_max_stop_distance(cls, pair: str) -> float:
+        if cls.adaptive_profile_enabled:
+            return cls.adaptive_max_stop_distance
         if pair.startswith("BTC/"):
             return 0.0068
         if pair.startswith("ETH/"):
             return 0.0096
         return 0.0
 
-    @staticmethod
-    def _pair_leverage(pair: str) -> float:
+    @classmethod
+    def _pair_leverage(cls, pair: str) -> float:
+        if cls.adaptive_profile_enabled:
+            return cls.adaptive_leverage
         if pair.startswith("BTC/"):
             return 12.0
         if pair.startswith("ETH/"):
@@ -200,6 +230,11 @@ class LSRICoreStrategy(IStrategy):
         return dataframe[["date", "funding_rate"]]
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        pullback_tolerance = (
+            self.adaptive_pullback_tolerance
+            if self.adaptive_profile_enabled
+            else self.pullback_tolerance
+        )
         dataframe["rolling_low_12"] = dataframe["low"].rolling(self.pullback_window).min()
         dataframe["rolling_high_12"] = dataframe["high"].rolling(self.pullback_window).max()
         dataframe["max_stop_distance"] = self._pair_max_stop_distance(metadata["pair"])
@@ -272,12 +307,12 @@ class LSRICoreStrategy(IStrategy):
         )
 
         dataframe["long_pullback_reclaim"] = (
-            (dataframe["low"] <= dataframe["key_long_level"] * (1 + self.pullback_tolerance))
+            (dataframe["low"] <= dataframe["key_long_level"] * (1 + pullback_tolerance))
             & (dataframe["close"] > dataframe["key_long_level"])
             & (dataframe["close"] > dataframe["open"])
         )
         dataframe["short_pullback_reject"] = (
-            (dataframe["high"] >= dataframe["key_short_level"] * (1 - self.pullback_tolerance))
+            (dataframe["high"] >= dataframe["key_short_level"] * (1 - pullback_tolerance))
             & (dataframe["close"] < dataframe["key_short_level"])
             & (dataframe["close"] < dataframe["open"])
         )
@@ -335,6 +370,49 @@ class LSRICoreStrategy(IStrategy):
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        is_adaptive = self.adaptive_profile_enabled
+        entry_min_risk_pct = (
+            self.adaptive_entry_min_risk_pct if is_adaptive else self.entry_min_risk_pct
+        )
+        entry_max_risk_pct = (
+            self.adaptive_entry_max_risk_pct if is_adaptive else self.entry_max_risk_pct
+        )
+        entry_volume_z_min = (
+            self.adaptive_entry_volume_z_min if is_adaptive else self.entry_volume_z_min
+        )
+        entry_volume_z_max = (
+            self.adaptive_entry_volume_z_max if is_adaptive else self.entry_volume_z_max
+        )
+        long_adx_hard_threshold = (
+            self.adaptive_long_adx_hard_threshold
+            if is_adaptive
+            else self.long_adx_hard_threshold
+        )
+        short_adx_hard_threshold = (
+            self.adaptive_short_adx_hard_threshold
+            if is_adaptive
+            else self.short_adx_hard_threshold
+        )
+        di_direction_ratio = (
+            self.adaptive_di_direction_ratio if is_adaptive else self.di_direction_ratio
+        )
+        long_rsi_min = self.adaptive_long_rsi_min if is_adaptive else 52.0
+        long_rsi_max = self.adaptive_long_rsi_max if is_adaptive else 68.0
+        short_rsi_min = self.adaptive_short_rsi_min if is_adaptive else 32.0
+        short_rsi_max = self.adaptive_short_rsi_max if is_adaptive else 48.0
+        dist_ema20_limit = self.adaptive_dist_ema20_limit if is_adaptive else 0.006
+        dist_vwap_limit = self.adaptive_dist_vwap_limit if is_adaptive else 0.008
+        crowded_ret24_limit = (
+            self.adaptive_crowded_ret24_limit if is_adaptive else self.crowded_ret24_limit
+        )
+        dist_ema200_4h_limit = self.adaptive_dist_ema200_4h_limit if is_adaptive else 0.08
+        trend_min_ema_spread = (
+            self.adaptive_trend_min_ema_spread if is_adaptive else self.trend_min_ema_spread
+        )
+        trend_min_atrp = self.adaptive_trend_min_atrp if is_adaptive else self.trend_min_atrp
+        chop_max_adx = self.adaptive_chop_max_adx if is_adaptive else self.chop_max_adx
+        chop_max_atrp = self.adaptive_chop_max_atrp if is_adaptive else self.chop_max_atrp
+
         candle_range = (dataframe["high"] - dataframe["low"]).replace(0, np.nan)
         body_pct = (dataframe["close"] - dataframe["open"]).abs() / candle_range
         close_pos = (dataframe["close"] - dataframe["low"]) / candle_range
@@ -346,28 +424,32 @@ class LSRICoreStrategy(IStrategy):
         ) / candle_range
 
         long_adx_hard = (
-            (dataframe["adx14_15m"] >= self.long_adx_hard_threshold)
+            (dataframe["adx14_15m"] >= long_adx_hard_threshold)
             & dataframe["adx_rising_15m"].fillna(False)
         )
         short_adx_hard = (
-            (dataframe["adx14_15m"] >= self.short_adx_hard_threshold)
+            (dataframe["adx14_15m"] >= short_adx_hard_threshold)
             & dataframe["adx_rising_15m"].fillna(False)
         )
         long_di_ok = (
-            dataframe["plus_di14_15m"] > dataframe["minus_di14_15m"] * self.di_direction_ratio
+            dataframe["plus_di14_15m"] > dataframe["minus_di14_15m"] * di_direction_ratio
         )
         short_di_ok = (
-            dataframe["minus_di14_15m"] > dataframe["plus_di14_15m"] * self.di_direction_ratio
+            dataframe["minus_di14_15m"] > dataframe["plus_di14_15m"] * di_direction_ratio
         )
-        long_rsi_hard = (dataframe["rsi14_15m"] >= 52) & (dataframe["rsi14_15m"] <= 68)
-        short_rsi_hard = (dataframe["rsi14_15m"] >= 32) & (dataframe["rsi14_15m"] <= 48)
+        long_rsi_hard = (dataframe["rsi14_15m"] >= long_rsi_min) & (
+            dataframe["rsi14_15m"] <= long_rsi_max
+        )
+        short_rsi_hard = (dataframe["rsi14_15m"] >= short_rsi_min) & (
+            dataframe["rsi14_15m"] <= short_rsi_max
+        )
         long_volume_ok = (
-            (dataframe["volume_z20_15m"] >= self.entry_volume_z_min)
-            & (dataframe["volume_z20_15m"] <= self.entry_volume_z_max)
+            (dataframe["volume_z20_15m"] >= entry_volume_z_min)
+            & (dataframe["volume_z20_15m"] <= entry_volume_z_max)
         )
         short_volume_ok = (
-            (dataframe["volume_z20_15m"] >= self.entry_volume_z_min)
-            & (dataframe["volume_z20_15m"] <= self.entry_volume_z_max)
+            (dataframe["volume_z20_15m"] >= entry_volume_z_min)
+            & (dataframe["volume_z20_15m"] <= entry_volume_z_max)
         )
         long_candle_quality = (
             (close_pos >= 0.65)
@@ -380,44 +462,50 @@ class LSRICoreStrategy(IStrategy):
             & (lower_wick_pct <= 0.30)
         )
         long_not_extended = (
-            (dataframe["dist_ema20_15m"] <= 0.006)
-            & (dataframe["dist_vwap_15m"] <= 0.008)
-            & (dataframe["ret24_1h"] <= self.crowded_ret24_limit)
-            & (dataframe["dist_ema200_4h"] <= 0.08)
+            (dataframe["dist_ema20_15m"] <= dist_ema20_limit)
+            & (dataframe["dist_vwap_15m"] <= dist_vwap_limit)
+            & (dataframe["ret24_1h"] <= crowded_ret24_limit)
+            & (dataframe["dist_ema200_4h"] <= dist_ema200_4h_limit)
         )
         short_not_extended = (
-            (dataframe["dist_ema20_15m"] >= -0.006)
-            & (dataframe["dist_vwap_15m"] >= -0.008)
-            & (dataframe["ret24_1h"] >= -self.crowded_ret24_limit)
-            & (dataframe["dist_ema200_4h"] >= -0.08)
+            (dataframe["dist_ema20_15m"] >= -dist_ema20_limit)
+            & (dataframe["dist_vwap_15m"] >= -dist_vwap_limit)
+            & (dataframe["ret24_1h"] >= -crowded_ret24_limit)
+            & (dataframe["dist_ema200_4h"] >= -dist_ema200_4h_limit)
         )
         long_funding_edge = dataframe["funding_rate_fr_1h"] <= self.long_funding_edge
         short_funding_edge = dataframe["funding_rate_fr_1h"] >= self.short_funding_edge
         long_crowded_skip = (
             (dataframe["funding_rate_fr_1h"] > self.crowded_funding_limit)
-            & (dataframe["ret24_1h"] > self.crowded_ret24_limit)
+            & (dataframe["ret24_1h"] > crowded_ret24_limit)
         )
         short_crowded_skip = (
             (dataframe["funding_rate_fr_1h"] < -self.crowded_funding_limit)
-            & (dataframe["ret24_1h"] < -self.crowded_ret24_limit)
+            & (dataframe["ret24_1h"] < -crowded_ret24_limit)
         )
         trend_regime = (
-            (dataframe["ema_spread_1h"] >= self.trend_min_ema_spread)
-            & (dataframe["adx14_15m"] >= self.long_adx_hard_threshold)
-            & (dataframe["atrp_15m"] >= self.trend_min_atrp)
+            (dataframe["ema_spread_1h"] >= trend_min_ema_spread)
+            & (dataframe["adx14_15m"] >= long_adx_hard_threshold)
+            & (dataframe["atrp_15m"] >= trend_min_atrp)
         )
         chop_regime = (
-            (dataframe["adx14_15m"] < self.chop_max_adx)
-            | (dataframe["atrp_15m"] < self.chop_max_atrp)
+            (dataframe["adx14_15m"] < chop_max_adx)
+            | (dataframe["atrp_15m"] < chop_max_atrp)
         )
         long_risk_ok = (
-            (dataframe["long_risk_pct"] >= self.entry_min_risk_pct)
-            & (dataframe["long_risk_pct"] <= self.entry_max_risk_pct)
+            (dataframe["long_risk_pct"] >= entry_min_risk_pct)
+            & (dataframe["long_risk_pct"] <= entry_max_risk_pct)
         )
         short_risk_ok = (
-            (dataframe["short_risk_pct"] >= self.entry_min_risk_pct)
-            & (dataframe["short_risk_pct"] <= self.entry_max_risk_pct)
+            (dataframe["short_risk_pct"] >= entry_min_risk_pct)
+            & (dataframe["short_risk_pct"] <= entry_max_risk_pct)
         )
+        if is_adaptive:
+            long_momentum_aligned = dataframe["ret24_1h"] >= 0
+            short_momentum_aligned = dataframe["ret24_1h"] <= 0
+        else:
+            long_momentum_aligned = pd.Series(True, index=dataframe.index)
+            short_momentum_aligned = pd.Series(True, index=dataframe.index)
 
         long_a_plus = (
             (dataframe["volume"] > 0)
@@ -436,13 +524,14 @@ class LSRICoreStrategy(IStrategy):
             & ~long_crowded_skip.fillna(False)
             & dataframe["long_stop_valid"].fillna(False)
             & long_risk_ok.fillna(False)
+            & long_momentum_aligned.fillna(False)
             & trend_regime.fillna(False)
             & ~chop_regime.fillna(False)
         )
         dataframe.loc[
             long_a_plus,
             ["enter_long", "enter_tag"],
-        ] = (1, "lsri_v2_long_trend")
+        ] = (1, "lsri_adaptive_long_trend" if is_adaptive else "lsri_v2_long_trend")
 
         short_a_plus = (
             (dataframe["volume"] > 0)
@@ -461,13 +550,14 @@ class LSRICoreStrategy(IStrategy):
             & ~short_crowded_skip.fillna(False)
             & dataframe["short_stop_valid"].fillna(False)
             & short_risk_ok.fillna(False)
+            & short_momentum_aligned.fillna(False)
             & trend_regime.fillna(False)
             & ~chop_regime.fillna(False)
         )
         dataframe.loc[
             short_a_plus,
             ["enter_short", "enter_tag"],
-        ] = (1, "lsri_v2_short_trend")
+        ] = (1, "lsri_adaptive_short_trend" if is_adaptive else "lsri_v2_short_trend")
 
         return dataframe
 
@@ -570,11 +660,14 @@ class LSRICoreStrategy(IStrategy):
         if risk_rate <= 0:
             return False
 
+        take_profit_r = (
+            self.adaptive_take_profit_r if self.adaptive_profile_enabled else self.take_profit_r
+        )
         if trade.is_short:
-            take_profit_rate = entry_rate - (self.take_profit_r * risk_rate)
+            take_profit_rate = entry_rate - (take_profit_r * risk_rate)
             half_r_rate = entry_rate - (self.time_stop_r * risk_rate)
         else:
-            take_profit_rate = entry_rate + (self.take_profit_r * risk_rate)
+            take_profit_rate = entry_rate + (take_profit_r * risk_rate)
             half_r_rate = entry_rate + (self.time_stop_r * risk_rate)
 
         trade.set_custom_data("initial_stop_rate", stop_rate)
@@ -661,10 +754,10 @@ class LSRICoreStrategy(IStrategy):
 
         if trade.is_short:
             if current_rate <= take_profit_rate:
-                return "short_tp_2_2r"
+                return "short_tp_2_0r" if self.adaptive_profile_enabled else "short_tp_2_2r"
         else:
             if current_rate >= take_profit_rate:
-                return "long_tp_2_2r"
+                return "long_tp_2_0r" if self.adaptive_profile_enabled else "long_tp_2_2r"
 
         trade_duration_minutes = (current_time - trade.open_date_utc).total_seconds() / 60
         if (
