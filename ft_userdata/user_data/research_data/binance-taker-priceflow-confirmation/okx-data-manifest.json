@@ -1,0 +1,395 @@
+{
+  "exchange": "OKX",
+  "funding": {
+    "archive_index_endpoint": "https://www.okx.com/api/v5/public/market-data-history",
+    "archives": [
+      {
+        "bytes": 1240,
+        "month": "2022-02",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-02.zip",
+        "rows": 83,
+        "sha256": "86c09d4683843e96124a98287e88600b864d889d2c80a162564183f3665ad5c0",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-02.zip"
+      },
+      {
+        "bytes": 1403,
+        "month": "2022-03",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-03.zip",
+        "rows": 93,
+        "sha256": "ce4fe9aaf1dfdee16e1d11cdabcbb405eb348966902950db1ca862dc86779013",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-03.zip"
+      },
+      {
+        "bytes": 1375,
+        "month": "2022-04",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-04.zip",
+        "rows": 90,
+        "sha256": "ccd759d048df4a1438af0860b51d632ed975cf33f10df0643def5d698d121459",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-04.zip"
+      },
+      {
+        "bytes": 1411,
+        "month": "2022-05",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-05.zip",
+        "rows": 93,
+        "sha256": "c53be80e88e4ebae5f19caf29699a0268c245409a1321649ffcd3307dfd5b4d9",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-05.zip"
+      },
+      {
+        "bytes": 1355,
+        "month": "2022-06",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-06.zip",
+        "rows": 90,
+        "sha256": "5e8870fdfeac1e0e8edf44c471b6b123c6e21cbe5018a880342d6f7ba586e347",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-06.zip"
+      },
+      {
+        "bytes": 1383,
+        "month": "2022-07",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-07.zip",
+        "rows": 93,
+        "sha256": "b8457486c7f290aec2c45f3788898dc680651ebb749ff9d9e79f016db74ca22f",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-07.zip"
+      },
+      {
+        "bytes": 1387,
+        "month": "2022-08",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-08.zip",
+        "rows": 93,
+        "sha256": "9622c6645fdf0d95d4499f4333f7164b245e07bf8aee539f4b5b66a0acc5cdb8",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-08.zip"
+      },
+      {
+        "bytes": 1334,
+        "month": "2022-09",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-09.zip",
+        "rows": 90,
+        "sha256": "6e8d3b7c75155c98bf66c5891c825d22ebba82f8c85f54c964ae999576c50181",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-09.zip"
+      },
+      {
+        "bytes": 1353,
+        "month": "2022-10",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-10.zip",
+        "rows": 93,
+        "sha256": "15f308c8fa99db7d820f1e32a8ae64adcab639a0c3282030a2c02f3cb8f9910b",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-10.zip"
+      },
+      {
+        "bytes": 1376,
+        "month": "2022-11",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-11.zip",
+        "rows": 90,
+        "sha256": "1d15886690dde2721bae195978e48cf2284d6703c158a818f7c85a4b6fff6325",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-11.zip"
+      },
+      {
+        "bytes": 1391,
+        "month": "2022-12",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2022-12.zip",
+        "rows": 93,
+        "sha256": "46046c11c772176cd563c670d738519040a5f25daed74917db1842e51406545e",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2022-12.zip"
+      },
+      {
+        "bytes": 1391,
+        "month": "2023-01",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-01.zip",
+        "rows": 93,
+        "sha256": "5894ffec2eb1ba4c3042a076d81d943128a4771a634faa7ebc53f1171d15d08e",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-01.zip"
+      },
+      {
+        "bytes": 1296,
+        "month": "2023-02",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-02.zip",
+        "rows": 84,
+        "sha256": "982d1bfb61276627b2e66c529d49dc5c93be5b95547c77f4debf011959de34da",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-02.zip"
+      },
+      {
+        "bytes": 1403,
+        "month": "2023-03",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-03.zip",
+        "rows": 93,
+        "sha256": "16268aeacd41d197261bb73dbcfc396a27ecf429fd7c6467d3d3ca4853acf72f",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-03.zip"
+      },
+      {
+        "bytes": 1363,
+        "month": "2023-04",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-04.zip",
+        "rows": 90,
+        "sha256": "efc1c70217b32fff80ff09cfd6840d4a2e724230fb7046abd529440b29e88746",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-04.zip"
+      },
+      {
+        "bytes": 1378,
+        "month": "2023-05",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-05.zip",
+        "rows": 93,
+        "sha256": "1dcdddb5189bf3a86493a03f172c64573625281a076062453d8d94f69b64d840",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-05.zip"
+      },
+      {
+        "bytes": 1362,
+        "month": "2023-06",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-06.zip",
+        "rows": 90,
+        "sha256": "8352b27508c902bed43ba566a49c6735a0e2a350404ec5f3588b2e47fbd1a860",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-06.zip"
+      },
+      {
+        "bytes": 1384,
+        "month": "2023-07",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-07.zip",
+        "rows": 93,
+        "sha256": "6978d6bc4e136a363f5409e2bf0bba2c800d5439d99259aa3959f0e14dfc76b5",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-07.zip"
+      },
+      {
+        "bytes": 1373,
+        "month": "2023-08",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-08.zip",
+        "rows": 93,
+        "sha256": "c1c5a77c3ff2bfa17a682866559bc26ddbc25d8b939de7cef4b2e21c8ceecf0b",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-08.zip"
+      },
+      {
+        "bytes": 1345,
+        "month": "2023-09",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-09.zip",
+        "rows": 90,
+        "sha256": "2ed222c710bbe1a7f6d87b3b5ce90b49887336d30c1c620adf0014dfd66d170d",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-09.zip"
+      },
+      {
+        "bytes": 1396,
+        "month": "2023-10",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-10.zip",
+        "rows": 93,
+        "sha256": "df36e5349d577b8d0ad242627bead14c27ae3f0d3708d0a823b0033ae817a171",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-10.zip"
+      },
+      {
+        "bytes": 1343,
+        "month": "2023-11",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-11.zip",
+        "rows": 90,
+        "sha256": "b78d0148337b60469d77e38a17a7baa5e6665ed7f84a683675d7d588c48e570e",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-11.zip"
+      },
+      {
+        "bytes": 1368,
+        "month": "2023-12",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2023-12.zip",
+        "rows": 93,
+        "sha256": "099f5b9b7ac9328f684b0cb1047f24b432b4f2f64d394c30f51bbbfa1beda07d",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2023-12.zip"
+      },
+      {
+        "bytes": 1375,
+        "month": "2024-01",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-01.zip",
+        "rows": 93,
+        "sha256": "0b435b9ee300183860c5fd2b471b3eb072142c7200769ab8d6eb37da7616c88d",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-01.zip"
+      },
+      {
+        "bytes": 1289,
+        "month": "2024-02",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-02.zip",
+        "rows": 87,
+        "sha256": "38977750c98d299ba2d09b6c3cd6e4c076cef3c80a4e84505a281135f7240faf",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-02.zip"
+      },
+      {
+        "bytes": 1377,
+        "month": "2024-03",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-03.zip",
+        "rows": 93,
+        "sha256": "cd692e21f3a25f22d29b61ca718a7f219ddcd7e1e39e00ac5af2468556630133",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-03.zip"
+      },
+      {
+        "bytes": 1345,
+        "month": "2024-04",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-04.zip",
+        "rows": 90,
+        "sha256": "f83067943670eb4c4ef368ee7b6922558b010564f9364c3fcb183b519701884c",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-04.zip"
+      },
+      {
+        "bytes": 1391,
+        "month": "2024-05",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-05.zip",
+        "rows": 93,
+        "sha256": "9341c97008018c8034b2bc65c5a26a380cd2e43844e9144136a350de038d9924",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-05.zip"
+      },
+      {
+        "bytes": 1343,
+        "month": "2024-06",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-06.zip",
+        "rows": 90,
+        "sha256": "09014feee7579667de0cde519719dbf0db6551f26434968b42df15a20cd4eeb5",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-06.zip"
+      },
+      {
+        "bytes": 1379,
+        "month": "2024-07",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-07.zip",
+        "rows": 93,
+        "sha256": "8e3639812c7ae52021efc6c3f8ae48380eddf4aa2098db3ecbe3208b568a83d4",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-07.zip"
+      },
+      {
+        "bytes": 1371,
+        "month": "2024-08",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-08.zip",
+        "rows": 93,
+        "sha256": "3bf8da434b21011dcdaed2ea9bb3184dff86b3cddd9b8f2d2a35bdf753770d7b",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-08.zip"
+      },
+      {
+        "bytes": 1339,
+        "month": "2024-09",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-09.zip",
+        "rows": 90,
+        "sha256": "b383fdcdea95ac9a6f81954f381770b83e24558e98fd661fefb6805f11dbedde",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-09.zip"
+      },
+      {
+        "bytes": 1376,
+        "month": "2024-10",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-10.zip",
+        "rows": 93,
+        "sha256": "2e97979946ca8b82684f151b98283f65b55277d5e881e65ba717f50421cbebe6",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-10.zip"
+      },
+      {
+        "bytes": 1328,
+        "month": "2024-11",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-11.zip",
+        "rows": 90,
+        "sha256": "b26c61aafdba9053797b51abab8713cfbfdc5b376e6698c885409f524abb14fe",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-11.zip"
+      },
+      {
+        "bytes": 1368,
+        "month": "2024-12",
+        "path": "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/raw-funding-archives/BTC-USDT-SWAP-fundingrates-2024-12.zip",
+        "rows": 93,
+        "sha256": "d0cf5d9a2defce408e294406e3336ded42dca64565c8b1c8810d927e7fc0cc4a",
+        "source_url": "https://static.okx.com/cdn/okex/traderecords/swaprates/monthly/BTC-USDT-SWAP-fundingrates-2024-12.zip"
+      }
+    ],
+    "duplicate_exact_timestamp_rows": 0,
+    "exact_interval_seconds_distribution": {
+      "18360": 1,
+      "28799": 1,
+      "28800": 3187,
+      "28801": 1,
+      "39240": 1,
+      "57600": 1
+    },
+    "first_exact_utc": "2022-02-01T00:00:00+00:00",
+    "last_exact_utc": "2024-12-31T08:00:00+00:00",
+    "normalization": "official event timestamps floored to 1h for Freqtrade",
+    "path": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/okx-market-data/futures/BTC_USDT_USDT-1h-funding_rate.feather",
+    "rows": 3193,
+    "sha256": "98fa273cb29c92a75a0fe09b7f36485b1a810986f4254569aad177f1ca42227d",
+    "source": "OKX official monthly swaprates archives"
+  },
+  "funding_fallback_per_hour": 4.2304172276700455e-06,
+  "funding_fallback_semantics": "Freqtrade leading-gap fallback per 1h mark row; actual OKX funding events are retained where present; 8h mean divided by 8",
+  "market": {
+    "15m": {
+      "discarded_at_or_after_end": 59,
+      "download_requested_end_exclusive": "2025-01-01T00:00:00+00:00",
+      "download_requested_start": "2022-02-01T00:00:00+00:00",
+      "downloaded_last_before_trim_utc": "2025-01-01T14:30:00+00:00",
+      "downloaded_rows_before_trim": 102299,
+      "downloader_overfetch_disclosed": true,
+      "duplicate_timestamp_rows": 0,
+      "first_utc": "2022-02-01T00:00:00+00:00",
+      "last_utc": "2024-12-31T23:45:00+00:00",
+      "path": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/okx-market-data/futures/BTC_USDT_USDT-15m-futures.feather",
+      "rows": 102240,
+      "sha256": "a8b065b6070c5e59cd021645ec1eb3256dabd2eb546acc276741a3b205235708",
+      "source": "OKX /api/v5/market/history-candles via CCXT/Freqtrade",
+      "unexpected_interval_count": 0
+    },
+    "1h": {
+      "discarded_at_or_after_end": 239,
+      "download_requested_end_exclusive": "2025-01-01T00:00:00+00:00",
+      "download_requested_start": "2022-02-01T00:00:00+00:00",
+      "downloaded_last_before_trim_utc": "2025-01-10T22:00:00+00:00",
+      "downloaded_rows_before_trim": 25799,
+      "downloader_overfetch_disclosed": true,
+      "duplicate_timestamp_rows": 0,
+      "first_utc": "2022-02-01T00:00:00+00:00",
+      "last_utc": "2024-12-31T23:00:00+00:00",
+      "path": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/okx-market-data/futures/BTC_USDT_USDT-1h-futures.feather",
+      "rows": 25560,
+      "sha256": "dce2eb3cfe136680413398f4ef39be483d5a8cd3d49b2ed96cd0344c2080dca0",
+      "source": "OKX /api/v5/market/history-candles via CCXT/Freqtrade",
+      "unexpected_interval_count": 0
+    },
+    "1h-mark": {
+      "discarded_at_or_after_end": 39,
+      "download_requested_end_exclusive": "2025-01-01T00:00:00+00:00",
+      "download_requested_start": "2022-02-01T00:00:00+00:00",
+      "downloaded_last_before_trim_utc": "2025-01-02T14:00:00+00:00",
+      "downloaded_rows_before_trim": 25599,
+      "downloader_overfetch_disclosed": true,
+      "duplicate_timestamp_rows": 0,
+      "first_utc": "2022-02-01T00:00:00+00:00",
+      "last_utc": "2024-12-31T23:00:00+00:00",
+      "path": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/okx-market-data/futures/BTC_USDT_USDT-1h-mark.feather",
+      "rows": 25560,
+      "sha256": "2a8a9ba530b17cd8292855772f948fb7d43940cfd312b82c17330e7992e1316b",
+      "source": "OKX /api/v5/market/history-candles via CCXT/Freqtrade",
+      "unexpected_interval_count": 0
+    },
+    "4h": {
+      "discarded_at_or_after_end": 209,
+      "download_requested_end_exclusive": "2025-01-01T00:00:00+00:00",
+      "download_requested_start": "2022-02-01T00:00:00+00:00",
+      "downloaded_last_before_trim_utc": "2025-02-04T16:00:00+00:00",
+      "downloaded_rows_before_trim": 6599,
+      "downloader_overfetch_disclosed": true,
+      "duplicate_timestamp_rows": 0,
+      "first_utc": "2022-02-01T00:00:00+00:00",
+      "last_utc": "2024-12-31T20:00:00+00:00",
+      "path": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/okx-market-data/futures/BTC_USDT_USDT-4h-futures.feather",
+      "rows": 6390,
+      "sha256": "12a264aa4fcce6ab86b69d021e1c4126c962b401a5fe2445e2bdc75b1951a5da",
+      "source": "OKX /api/v5/market/history-candles via CCXT/Freqtrade",
+      "unexpected_interval_count": 0
+    },
+    "5m": {
+      "discarded_at_or_after_end": 179,
+      "download_requested_end_exclusive": "2025-01-01T00:00:00+00:00",
+      "download_requested_start": "2022-02-01T00:00:00+00:00",
+      "downloaded_last_before_trim_utc": "2025-01-01T14:50:00+00:00",
+      "downloaded_rows_before_trim": 306899,
+      "downloader_overfetch_disclosed": true,
+      "duplicate_timestamp_rows": 0,
+      "first_utc": "2022-02-01T00:00:00+00:00",
+      "last_utc": "2024-12-31T23:55:00+00:00",
+      "path": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/okx-market-data/futures/BTC_USDT_USDT-5m-futures.feather",
+      "rows": 306720,
+      "sha256": "20a5167ff276c28226bc6e85a5ffea91f7dab67ad191626967cc6c6254f77da9",
+      "source": "OKX /api/v5/market/history-candles via CCXT/Freqtrade",
+      "unexpected_interval_count": 0
+    }
+  },
+  "pair": "BTC/USDT:USDT",
+  "research_only": true,
+  "window": {
+    "contains_rows_at_or_after_end": false,
+    "end_exclusive": "2025-01-01T00:00:00+00:00",
+    "start_inclusive": "2022-02-01T00:00:00+00:00"
+  }
+}

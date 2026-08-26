@@ -1,0 +1,23 @@
+{
+  "frozen_at_utc": "2026-08-12T19:38:50.9421163Z",
+  "inherits_corrected_freeze_sha256": "179268277FCF4628F7E2A128852D1C3547B7774A1F462CF4C9B409D75D213DE5",
+  "runner_wrapper": {
+    "path": "tools/run_offline_robust_candidate_backtest_corrected_v2.py",
+    "sha256": "825A232E0CCBFFEB9E593CC2833B8B7DA4BD44ED02A47DB00E7CB5D7EEF58122",
+    "purpose": "Supply static OKX futures leverage-tier metadata so the fully local 1x backtest can initialize without exchange I/O.",
+    "behavioral_scope": "Metadata only; max leverage is 100x while both frozen strategies request exactly 1x. Signals, exits, liquidation math, stake, fee, funding, pair, and time boundaries are unchanged."
+  },
+  "failed_preflight": {
+    "output_root": "ft_userdata/runtime/freqtrade-futures/backtest_results/robust-candidate-research-corrected-actual-funding",
+    "status": "No backtest or trade result was produced; all five attempted development runs stopped during exchange initialization because the leverage-tier cache contained no pair entry.",
+    "reuse": false
+  },
+  "authoritative_output_root": "ft_userdata/runtime/freqtrade-futures/backtest_results/robust-candidate-research-corrected-v2-actual-funding",
+  "candidate_identity": {
+    "baseline": "DonchianRobustBaselineResearchStrategy",
+    "candidate": "DonchianRobustHold72ResearchStrategy",
+    "only_candidate_change": "max_hold_hours: 48 -> 72",
+    "strategy_parameters_changed_after_original_freeze": false,
+    "candidate_reselected": false
+  }
+}

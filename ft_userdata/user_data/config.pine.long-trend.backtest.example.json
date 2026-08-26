@@ -1,0 +1,29 @@
+{
+    "$schema": "https://schema.freqtrade.io/schema.json",
+    "max_open_trades": 1,
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 1.0,
+    "dry_run_wallet": 1000,
+    "timeframe": "5m",
+    "futures_funding_rate": 0,
+    "entry_pricing": {
+        "price_side": "other"
+    },
+    "exit_pricing": {
+        "price_side": "other"
+    },
+    "order_types": {
+        "entry": "market",
+        "exit": "market",
+        "emergency_exit": "market",
+        "force_entry": "market",
+        "force_exit": "market",
+        "stoploss": "market",
+        "stoploss_on_exchange": false
+    },
+    "exchange": {
+        "pair_whitelist": [
+            "BTC/USDT:USDT"
+        ]
+    }
+}

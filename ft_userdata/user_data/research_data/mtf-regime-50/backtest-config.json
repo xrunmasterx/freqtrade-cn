@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "timeframe": "15m",
+  "max_open_trades": 1,
+  "stake_currency": "USDT",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 1.0,
+  "dry_run": true,
+  "dry_run_wallet": 1000,
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "minimal_roi": {},
+  "stoploss": -0.015,
+  "trailing_stop": false,
+  "use_exit_signal": true,
+  "exit_profit_only": false,
+  "ignore_roi_if_entry_signal": false,
+  "futures_funding_rate": 0.0,
+  "entry_pricing": {
+    "price_side": "other",
+    "use_order_book": false
+  },
+  "exit_pricing": {
+    "price_side": "other",
+    "use_order_book": false
+  },
+  "order_types": {
+    "entry": "market",
+    "exit": "market",
+    "emergency_exit": "market",
+    "force_entry": "market",
+    "force_exit": "market",
+    "stoploss": "market",
+    "stoploss_on_exchange": false
+  },
+  "dataformat_ohlcv": "feather",
+  "dataformat_trades": "feather",
+  "exchange": {
+    "name": "okx",
+    "key": "",
+    "secret": "",
+    "password": "",
+    "ccxt_config": {
+      "options": {
+        "defaultType": "swap",
+        "fetchMarkets": {
+          "types": [
+            "swap"
+          ]
+        }
+      }
+    },
+    "ccxt_async_config": {},
+    "pair_whitelist": [
+      "BTC/USDT:USDT"
+    ],
+    "pair_blacklist": []
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "bot_name": "mtf-regime-50-research"
+}

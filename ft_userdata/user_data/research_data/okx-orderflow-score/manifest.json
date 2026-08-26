@@ -1,0 +1,373 @@
+{
+  "source": "OKX official daily trade archives, OKX OHLCV, and OKX Rubik OI",
+  "start_inclusive": "2026-07-24T00:00:00+00:00",
+  "end_exclusive": "2026-08-23T16:00:00+00:00",
+  "causality": {
+    "orderflow": "15m source is usable only at that candle close",
+    "volume_profile": "previous completed UTC day only",
+    "open_interest": "daily OKX observation delayed by one UTC day",
+    "funding": "raw settlement observation delayed by one 15m candle"
+  },
+  "not_available": [
+    "historical best-bid/ask spread (requires a separate L2 archive pipeline)",
+    "historical liquidation clusters"
+  ],
+  "pairs": [
+    {
+      "symbol": "BTC",
+      "instrument": "BTC-USDT-SWAP",
+      "contract_value": 0.01,
+      "minimum_oi_usd": 1000000000.0,
+      "rows": 2944,
+      "start": "2026-07-24T00:00:00+00:00",
+      "end": "2026-08-23T15:45:00+00:00",
+      "output": "ft_userdata\\user_data\\research_data\\okx-orderflow-score\\derived\\BTC-USDT-SWAP-15m-orderflow.feather",
+      "output_sha256": "c780e962e56a60b528b7097624c6e2c23bfc10fd297b49a2fc44c39efa308b42",
+      "volume_validation": {
+        "candles_compared": 2944,
+        "maximum_relative_error": 0.00010244043965722727,
+        "mean_relative_error": 3.479634503267427e-08
+      },
+      "raw_archives": [
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-23.zip",
+          "bytes": 10740635,
+          "sha256": "f97c3b62c74099a416ea7853f24a40d754c8639bf0afff05ba32e8939925868f"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-24.zip",
+          "bytes": 12192823,
+          "sha256": "7dce70e37544ed2f3f9b2fdaf86ab36fb8cb1215a30416332a4982bc01d7e0f0"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-25.zip",
+          "bytes": 4280760,
+          "sha256": "4bf439f6d96efebf2a7536c456b0d9be5cb737c53fa13a42665bd22c2c39f9a7"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-26.zip",
+          "bytes": 3903931,
+          "sha256": "27153e7de8541f8f081de431ef144ec0fc565053006a8452d655dd7d30da3b83"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-27.zip",
+          "bytes": 11552249,
+          "sha256": "887dfc0c84e9175f6a7501974ac0c341d2b5ce6baf098e91fcc7dc76795da1d2"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-28.zip",
+          "bytes": 13898355,
+          "sha256": "1b5095b1595127ff5d4a212c7796ce29916be703a0596f44fd44d3eb2e20b6cc"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-29.zip",
+          "bytes": 12768334,
+          "sha256": "d72e79957ec47bd96efae08497091af7015483f94b3249a758e93bbf4eb8d92d"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-30.zip",
+          "bytes": 15607401,
+          "sha256": "f2088c133bab7af782d205d34115b503dcd2674d45395a98088dbb2afd7f282f"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-07-31.zip",
+          "bytes": 13228015,
+          "sha256": "354a127c020241fa430778982ec293da29832e6cfaad9475b38b1f1bdbcaa50e"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-01.zip",
+          "bytes": 4052503,
+          "sha256": "f17ef760efcb5726546f040e4e72db93aafa3670b6efdb226911c513aedfeebc"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-02.zip",
+          "bytes": 6739927,
+          "sha256": "62057fdb515c4dcdf0a0999d00a3260e104e37f027855ad51644fcb4ee9a119a"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-03.zip",
+          "bytes": 11489160,
+          "sha256": "464e0bbc4b45d6e3fb70d419faaaa506c04c04278466cd505be909f0a7f9242d"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-04.zip",
+          "bytes": 10441995,
+          "sha256": "73f94007ba7c113d841455848467a7357c3088861094c4c7645648eee3109032"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-05.zip",
+          "bytes": 10062902,
+          "sha256": "a54018206e5192c294cb3d245282fcc2ada158dae1647056e09f3c3cf90293a6"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-06.zip",
+          "bytes": 8636588,
+          "sha256": "18df20fc2d908f9f2124e6f412b59675a73d0e0a070a6f1f2cea4839137fb73b"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-07.zip",
+          "bytes": 8929560,
+          "sha256": "b6bc0b93a8e7e7b51a6857d36761bfa1e1ba1ae106272349689c2807eb4f46da"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-08.zip",
+          "bytes": 3637724,
+          "sha256": "5e76be293d92014d42fee8bbe0e7f31120406774e992376456b76c152f3e9ddf"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-09.zip",
+          "bytes": 2553739,
+          "sha256": "4b0f7f6b8a0d1b49ccff79117162ff939df48dfabdb28fd4dff478df8b4f2017"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-10.zip",
+          "bytes": 8250500,
+          "sha256": "0acf93e26f7a602ce7700b02bcebd8f2df0a30885ac07bcdf31cb3eca6b0b168"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-11.zip",
+          "bytes": 7872131,
+          "sha256": "cc5cf2b5e313df20168372ba1a74922077133c75b9a57550a47d047595beda24"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-12.zip",
+          "bytes": 9002373,
+          "sha256": "409345955e5f22b9233961be5ec01f7105724a38f78ab3cf69c49a7dae13c041"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-13.zip",
+          "bytes": 7062293,
+          "sha256": "58c70308def4795d744cf162f18ed303bc71d9892d1497233b3cd26ef5c54cc9"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-14.zip",
+          "bytes": 9365749,
+          "sha256": "145be598b468e6c34eb3ad26b1e30b63dc019660d94d18d2888dd62a20fcee82"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-15.zip",
+          "bytes": 3648955,
+          "sha256": "aebdb39b730160e1453ba65ad48f8155a7585a71b9530c77352de13df9646be4"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-16.zip",
+          "bytes": 1612668,
+          "sha256": "43dff5b143b8e887f5a07b45dc2052e5acc686ba9044498b5ad4edd3a4dc8d2b"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-17.zip",
+          "bytes": 8026893,
+          "sha256": "8e92ae35791a2cce43792cbaf00e256eed6e4ca4c79f1802869b6f5b8bd090e5"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-18.zip",
+          "bytes": 8278582,
+          "sha256": "8d1381eca5e471791704329ecdf85cc4942c7188bfecd1a1ab25d5f1c7a6c44c"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-19.zip",
+          "bytes": 15480353,
+          "sha256": "20e768f39caf81f0f4d62580024420e01934a2b859b728b71405154fff9c4eb3"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-20.zip",
+          "bytes": 31516011,
+          "sha256": "bb2061ca819dc5edb647aa295bfae3b197801706d0d2c945ff41a13c1e9105e1"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-21.zip",
+          "bytes": 46878301,
+          "sha256": "3a0c5791f88efda74fc536a5e631856fef845f4337a500be2697d202ae3390d4"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-22.zip",
+          "bytes": 24593125,
+          "sha256": "3e408a4914df71cf995797565eb392021b431eb7536b86f108ecf16a1ea1b931"
+        },
+        {
+          "filename": "BTC-USDT-SWAP-trades-2026-08-23.zip",
+          "bytes": 13597116,
+          "sha256": "8cd2af9ab98982765d79dcb0bed50ba1aebff04d404eea70536afc31a3c61398"
+        }
+      ]
+    },
+    {
+      "symbol": "ETH",
+      "instrument": "ETH-USDT-SWAP",
+      "contract_value": 0.1,
+      "minimum_oi_usd": 500000000.0,
+      "rows": 2944,
+      "start": "2026-07-24T00:00:00+00:00",
+      "end": "2026-08-23T15:45:00+00:00",
+      "output": "ft_userdata\\user_data\\research_data\\okx-orderflow-score\\derived\\ETH-USDT-SWAP-15m-orderflow.feather",
+      "output_sha256": "cab65d00823780e001078284170ab10e414589e80638bd1a89fcb4955bd5e28d",
+      "volume_validation": {
+        "candles_compared": 2944,
+        "maximum_relative_error": 1.8982653510512563e-05,
+        "mean_relative_error": 6.4479122534536844e-09
+      },
+      "raw_archives": [
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-23.zip",
+          "bytes": 17101978,
+          "sha256": "0b7ee9a38bd9bc078ea6cab49250b5bc7a2b1ed774f8947f7eaf5e4f84e7eb83"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-24.zip",
+          "bytes": 17628601,
+          "sha256": "ad943454542e37db6b1d50c21e6cfd58a41e4370c893a623c7af40f31df74bf3"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-25.zip",
+          "bytes": 6089834,
+          "sha256": "cf1102ef8b92a1c6eb0164968ea0184f41522f88267230cca1f4771b01777a6e"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-26.zip",
+          "bytes": 7163410,
+          "sha256": "fc70bfde7a2e65372d628463a932d7d971e06343aa5d16e992ac5df08a41bf2f"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-27.zip",
+          "bytes": 21359342,
+          "sha256": "b4411cdf153daa77be34d63db2e49262ca171c46258a809e485f6fb2cd4679a5"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-28.zip",
+          "bytes": 22460615,
+          "sha256": "ae84bb5682143300ae3bd48cb8bcc3dfb1bc918bace2e2daa7ff3c50b49c2056"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-29.zip",
+          "bytes": 18560904,
+          "sha256": "2e779ed3f8bdc96fb32d4889d496eef856446653b83d265fd39c7155302a1590"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-30.zip",
+          "bytes": 20595414,
+          "sha256": "e7f04b38d2e1c81d1885108e1eb9369115b22bbd7febc0ddad2b8e82c7b74b73"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-07-31.zip",
+          "bytes": 17440383,
+          "sha256": "32f135e71b470a8b30381f8008246e214e498fbadbc429b8a10fb9d3434771ec"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-01.zip",
+          "bytes": 5998464,
+          "sha256": "7ab8a6e80bfc50c3fd0300e84067823a5d4a8ababc1762455482e77764c9bcca"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-02.zip",
+          "bytes": 12000374,
+          "sha256": "fdc50eff7e486a41c55e83667532cffb9ac4b2f32bba7e83c3ad2d7620c1a2f6"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-03.zip",
+          "bytes": 17275276,
+          "sha256": "85b054635ad37a0352ee6100fdef41b0600adfa5129c80d21801592c9e3987b6"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-04.zip",
+          "bytes": 14523427,
+          "sha256": "67f07f4a25d2e29dd96c996d0eec4dd4f75937a298ef41e7b73486839f5c7f24"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-05.zip",
+          "bytes": 12971153,
+          "sha256": "39cdcfc12f97af28aa7be5fde9f78a1feb6d138fd3641d4e6b55ddac98504bdf"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-06.zip",
+          "bytes": 16024670,
+          "sha256": "9bc45958ea70d0c83749642a7c7dd933774def5b0a645214610b58ffbba438ab"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-07.zip",
+          "bytes": 12953326,
+          "sha256": "4dd9585c3c30917f991a9d63884657c1ddd435e3f2bd0e8a6a97ec3f669be22b"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-08.zip",
+          "bytes": 5474574,
+          "sha256": "19a865d4ac562dac1eae13ec9ec44fcf7c57bd83a2702eef55cd07e6d306b9f7"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-09.zip",
+          "bytes": 4143601,
+          "sha256": "8ed6b81d3f0de3aa47b2dcd96821044f44526e28dad867fc74e271fcc9c8494f"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-10.zip",
+          "bytes": 14505628,
+          "sha256": "4e1d198b389fb2688b9e9c85bfcfd51f614c241a7c41cb3a4d3890789f8d53c4"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-11.zip",
+          "bytes": 10875533,
+          "sha256": "4038cdfb883639108faed1584d84686f18b3f4daafed9a34164bad01c7c7059f"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-12.zip",
+          "bytes": 13608862,
+          "sha256": "66440c7e50c0c31578cd086896b0108a174d48ce3d550ee93115ff6ff4879420"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-13.zip",
+          "bytes": 10904955,
+          "sha256": "d1a20933211f2e6c6c67874cc8b003dc88206ece91b4f27605f411db949fb91e"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-14.zip",
+          "bytes": 10674554,
+          "sha256": "80340f823d35ce9e6eafc0d8a50a544429d09c5a64cd7f60be21ab81b0e44edb"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-15.zip",
+          "bytes": 4302550,
+          "sha256": "f7a3104b68fa53ca3914304358efabd7164ba9bf380586e6d4ce3218e979b794"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-16.zip",
+          "bytes": 2239495,
+          "sha256": "2c58b4a2acd7eee5c90ff0266f3ef0ef76a8c889f6267b312e2bb2e1695cccc5"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-17.zip",
+          "bytes": 10741779,
+          "sha256": "48780bf577bc956ed56ddb1ac08625f3eaee5783309311642cc0fb4b3684d099"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-18.zip",
+          "bytes": 9912696,
+          "sha256": "1cee9b3742192d50300c62d206c58a694b34f35e0501568180e65c4b6ad3a8a8"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-19.zip",
+          "bytes": 21787895,
+          "sha256": "1abfc9d26615145d5216140b1f91d11d4a34b7b26387268210950969c5893541"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-20.zip",
+          "bytes": 56252477,
+          "sha256": "f0370b2961e4f4b74c5763d6f0d24e1cd4f579580547721526ed6c826971e392"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-21.zip",
+          "bytes": 46445221,
+          "sha256": "eb33f629f0a1cb6f4b0f48a5e98015785bd3b77323395edb155e36b7b32cf871"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-22.zip",
+          "bytes": 45820365,
+          "sha256": "10f6566232365a7aa149585b4ee339b3a4c3c7f0c1f38568f4a2d745f3d45f85"
+        },
+        {
+          "filename": "ETH-USDT-SWAP-trades-2026-08-23.zip",
+          "bytes": 26380820,
+          "sha256": "f6ea9cb91c89f2ff5b159100b2ae0972a590069a5e0857ca40e2d579e575bdb3"
+        }
+      ]
+    }
+  ]
+}

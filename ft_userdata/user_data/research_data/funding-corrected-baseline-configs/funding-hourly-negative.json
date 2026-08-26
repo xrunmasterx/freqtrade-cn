@@ -1,0 +1,4 @@
+{
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "futures_funding_rate": -0.0000042304172276700455
+}

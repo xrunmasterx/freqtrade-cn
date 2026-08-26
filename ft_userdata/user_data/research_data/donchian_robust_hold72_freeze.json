@@ -1,0 +1,66 @@
+{
+  "frozen_at_utc": "2026-08-12T19:22:34.7533859Z",
+  "protocol": {
+    "development": "[2025-08-01T00:00:00Z, 2026-04-01T00:00:00Z)",
+    "validation": "[2026-04-01T00:00:00Z, 2026-07-01T00:00:00Z)",
+    "pseudo_oos": "[2026-07-01T00:00:00Z, 2026-08-13T00:00:00Z)",
+    "pseudo_oos_label": "retrospective pseudo-OOS; the repository has previously exposed this interval",
+    "strategies_in_order": [
+      "DonchianRobustBaselineResearchStrategy",
+      "DonchianRobustHold72ResearchStrategy"
+    ],
+    "candidate_change": "max_hold_hours: 48 -> 72; all other strategy parameters unchanged",
+    "pair": "BTC/USDT:USDT",
+    "timeframe": "15m",
+    "timeframe_detail": "5m",
+    "leverage": 1.0,
+    "fee_per_side": 0.0006,
+    "starting_wallet_usdt": 1000,
+    "stake_amount": "unlimited",
+    "max_open_trades": 1,
+    "funding_fallback": 0.000033843337821360364
+  },
+  "environment": {
+    "root_git_commit": "891d1be2552de994329aaaeea4f174a85bde579e",
+    "freqtrade_git_commit": "b1121f89512f6af1a99b4d3929d4405093363c99",
+    "freqtrade_version": "2026.7-dev-b1121f895",
+    "python_version": "3.11.15",
+    "ccxt_version": "4.5.73"
+  },
+  "sha256": {
+    "ft_userdata/user_data/strategies/DonchianCounterMomentumRegimeStrategy.py": "BF1C8A4CC1E5A47F5637E1D6572CC78C6D2C3F913BA735374E85953E341B4AE7",
+    "ft_userdata/user_data/strategies/DonchianRobustResearchStrategy.py": "727BEDBE169A70528CC9E43FA1CC1417383718EB2CEC434EE42C34F25F3B8DCE",
+    "ft_userdata/user_data/config.robust-candidate-research.json": "9C0B345E3097FBEBAA9D30C940DCDF743A0D7141BFE573E8CDB4DC507B3EE95F",
+    "tools/run_offline_robust_candidate_backtest.py": "7A3D171E7B7B8442AC859F47B0C2BE7E1ED5CBF612585662A64C4188849CC105",
+    "ft_userdata/runtime/freqtrade-futures/data/okx/futures/BTC_USDT_USDT-15m-futures.feather": "0A3C87AAD1FD62932BF04B1CF3B22B0C8CA6E2DA463AE5A1A9E02A6D203F6FAC",
+    "ft_userdata/runtime/freqtrade-futures/data/okx/futures/BTC_USDT_USDT-5m-futures.feather": "AA070B6846E0195D93A689D48DF4E962B8A1DC8E0F445CEC8C3235506575F6DB",
+    "ft_userdata/runtime/freqtrade-futures/data/okx/futures/BTC_USDT_USDT-1h-futures.feather": "3503A257F584D4F0A6B8FCADB7EED496EF17E3874BF268A863DCD7ABA36FA17E",
+    "ft_userdata/runtime/freqtrade-futures/data/okx/futures/BTC_USDT_USDT-1h-funding_rate.feather": "31535AEBCA67B0FC2DF10B2002AE926251B2E107BDF1EE9094D1FAF3345A1711",
+    "ft_userdata/runtime/freqtrade-futures/data/okx/futures/BTC_USDT_USDT-1h-mark.feather": "D11DB8233616409BC982B4923D00890427994CCFEEEA62E21F72A1DDA0AA71DA",
+    "frozen_development_zip": "CD65C705BB85D4A31FCE06AE6E03C11D1DFB1C8F91C71DC24583AF590371697B"
+  },
+  "development_metrics": {
+    "DonchianRobustBaselineResearchStrategy": {
+      "trades": 30,
+      "win_rate_pct": 33.33333333333333,
+      "average_win_loss_ratio": 2.4666903446818695,
+      "profit_factor": 1.2003998782660645,
+      "compounded_return_pct": 6.146119723999999,
+      "max_account_drawdown_pct": 6.361979927864768,
+      "fees_usdt": 36.608747351999995,
+      "funding_fees_usdt": 16.413804595740665,
+      "force_exits": 0
+    },
+    "DonchianRobustHold72ResearchStrategy": {
+      "trades": 30,
+      "win_rate_pct": 40.0,
+      "average_win_loss_ratio": 2.2504395246095186,
+      "profit_factor": 1.4593227556807116,
+      "compounded_return_pct": 14.002165545999998,
+      "max_account_drawdown_pct": 6.367280115386703,
+      "fees_usdt": 37.869883493999986,
+      "funding_fees_usdt": 17.226148953455837,
+      "force_exits": 0
+    }
+  }
+}

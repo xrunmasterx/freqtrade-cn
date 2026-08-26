@@ -1,0 +1,47 @@
+{
+  "bindings": {
+    "development_manifest": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/manifest.json",
+      "sha256": "5d8b2186d238247b37b637df4caaae009693081bb92f4100b95ce83378ca41f8"
+    },
+    "preparer": {
+      "path": "tools/prepare_donchian_funding_rv_development_data.py",
+      "sha256": "3e1be407272842c4190de14698e4adda5c71606af6e6d9b2fab3bd0d75398964"
+    },
+    "preregistration": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/PREREGISTRATION.md",
+      "sha256": "09e438d8bb6e0e1ef91026ce7c3ad35fb504fdbd7e0433afca504bb62d73cd4a"
+    },
+    "runner": {
+      "path": "tools/run_donchian_funding_rv_research.py",
+      "sha256": "a3723dba47cc95a821b715ae566b57e1a31cb5c0b94b0121a31da17eb6b54e6e"
+    },
+    "tests": {
+      "path": "tests/test_donchian_funding_rv_research.py",
+      "sha256": "d7445e2916a15693895d73125ba5df980b3db673539f3c2ee6e4ccbabd20a038"
+    }
+  },
+  "execution_inputs": {
+    "15m": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/BTC_USDT_USDT-15m-futures.feather",
+      "sha256": "20b4819b9cb8ad36f8f0c1b439de145d260a9b6f5f82fd4dc2e141efe0c0fc55"
+    },
+    "5m": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/BTC_USDT_USDT-5m-futures.feather",
+      "sha256": "ecf38bd22ea271d665c01ae9f80ea1aee4065e234d5af2183750d8c613bd6ee6"
+    },
+    "funding": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/BTC_USDT_USDT-1h-funding_rate.feather",
+      "sha256": "e068d437bca761d65a5a549d799941a40d1044aa9a19d76954376e5483711cc7"
+    }
+  },
+  "performance_execution": {
+    "development_requires_explicit_stage": true,
+    "development_requires_this_file_sha256": true,
+    "pseudo_oos_authorized": false,
+    "validation_authorized": false
+  },
+  "research_only": true,
+  "schema_version": 1,
+  "status": "FROZEN"
+}

@@ -1,0 +1,74 @@
+{
+  "frozen_at_utc": "2026-08-12T19:36:40.8835581Z",
+  "correction": {
+    "reason": "The original hourly fallback applied an 8-hour OKX funding-period value on an hourly engine timeline.",
+    "old_fallback": 0.000033843337821360364,
+    "corrected_hourly_fallback": 0.0000042304172276700455,
+    "ratio": 8.0,
+    "primary_funding_input": "Observed OKX 8-hour funding history; the corrected fallback is unused in all scored intervals."
+  },
+  "protocol": {
+    "development": "[2025-08-01T00:00:00Z, 2026-04-01T00:00:00Z)",
+    "development_block_1": "[2025-08-01T00:00:00Z, 2025-10-01T00:00:00Z)",
+    "development_block_2": "[2025-10-01T00:00:00Z, 2025-12-01T00:00:00Z)",
+    "development_block_3": "[2025-12-01T00:00:00Z, 2026-02-01T00:00:00Z)",
+    "development_block_4": "[2026-02-01T00:00:00Z, 2026-04-01T00:00:00Z)",
+    "validation": "[2026-04-01T00:00:00Z, 2026-07-01T00:00:00Z)",
+    "pseudo_oos": "[2026-07-01T00:00:00Z, 2026-08-13T00:00:00Z)",
+    "strategies_in_order": [
+      "DonchianRobustBaselineResearchStrategy",
+      "DonchianRobustHold72ResearchStrategy"
+    ],
+    "candidate_change": "max_hold_hours: 48 -> 72; no strategy parameter was reselected or changed",
+    "pair": "BTC/USDT:USDT",
+    "timeframe": "15m",
+    "timeframe_detail": "5m",
+    "leverage": 1.0,
+    "fee_per_side": 0.0006,
+    "starting_wallet_usdt": 1000,
+    "stake_amount": "unlimited",
+    "max_open_trades": 1
+  },
+  "observed_data_coverage": {
+    "development": {
+      "5m_rows": 69984,
+      "15m_rows": 23328,
+      "1h_rows": 5832,
+      "mark_1h_rows": 5832,
+      "funding_8h_rows": 729,
+      "missing_rows": 0
+    },
+    "validation": {
+      "5m_rows": 26208,
+      "15m_rows": 8736,
+      "1h_rows": 2184,
+      "mark_1h_rows": 2184,
+      "funding_8h_rows": 273,
+      "missing_rows": 0
+    },
+    "pseudo_oos": {
+      "5m_rows": 12326,
+      "15m_rows": 4108,
+      "1h_rows": 1027,
+      "mark_1h_rows": 1027,
+      "funding_8h_rows": 129,
+      "funding_missing_rows": 0,
+      "market_data_limitation": "Final UTC day is partial: 5m ends 19:05, 15m ends 18:45, 1h and mark end 18:00."
+    }
+  },
+  "sha256": {
+    "ft_userdata/user_data/strategies/DonchianCounterMomentumRegimeStrategy.py": "BF1C8A4CC1E5A47F5637E1D6572CC78C6D2C3F913BA735374E85953E341B4AE7",
+    "ft_userdata/user_data/strategies/DonchianRobustResearchStrategy.py": "727BEDBE169A70528CC9E43FA1CC1417383718EB2CEC434EE42C34F25F3B8DCE",
+    "ft_userdata/user_data/config.robust-candidate-research.corrected.json": "49C30BA0E1DF2A080602477BDEB589909F19D3B2F74447BAEB96C55D03E82B8F",
+    "tools/run_offline_robust_candidate_backtest_corrected.py": "4F9ED0127DBD930F4A89B92B0CF519D23B8664EA7A965F0A920197DFB93FCEF1",
+    "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/dataset-manifest.json": "29F2F05D3C56AF598084EB48EABEC213F56555F7848F9C2B16CCBAC3AE8282CF",
+    "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/funding-merge-manifest.json": "EA2BCC2FE22D0D1B570C15E5C50D5AEC9E4630EE0AACC41B68BB8D6AF29B691A",
+    "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/market-data/futures/BTC_USDT_USDT-5m-futures.feather": "77B4E092736CF2F4484555E6C3C76DB30DBE78508AEB1C03D2ACEAFDAA948851",
+    "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/market-data/futures/BTC_USDT_USDT-15m-futures.feather": "078F646D904A2964F66B5F0EB40F8E055396A5A43ED994CB25C8D52710626407",
+    "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/market-data/futures/BTC_USDT_USDT-1h-futures.feather": "79936E1C0A851ED6D57A74B0AD541D96CFB0F2D3CFF78C52C1D687E166F77DB1",
+    "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/market-data/futures/BTC_USDT_USDT-1h-mark.feather": "F887657E694C4627CD3B7F4B42B2AD2E24D663C1892013B29E07C7F375D81143",
+    "ft_userdata/user_data/data/okx-btc-usdt-swap-full-20260813/market-data/futures/BTC_USDT_USDT-1h-funding_rate.feather": "AA7D097B60B59B063B6C428D71F9F24983C85D9A1AA8892BC7EE6A28A343D0E4",
+    "original_freeze_manifest": "169AF769147FB96BC7A0BD189F95E6A52C1713E876C1F990AC895EB4B993AB26",
+    "original_results": "A058A74A5A6C8CCE0C5CB6CE0942342ABE9AF6C40DE3465EB48C039FABB85660"
+  }
+}

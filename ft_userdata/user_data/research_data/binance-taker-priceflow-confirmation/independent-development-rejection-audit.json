@@ -1,0 +1,111 @@
+{
+  "status": "DEVELOPMENT_REJECTED_BY_INDEPENDENT_READ_ONLY_RECONSTRUCTION",
+  "created_utc": "2026-08-12T21:34:05.4808934Z",
+  "research_only": true,
+  "paper_authorized": false,
+  "live_authorized": false,
+  "performance_retry_consumed": true,
+  "second_performance_retry_allowed": false,
+  "holdout_2024_opened": false,
+  "later_windows_opened": false,
+  "source_contract": {
+    "original_preregistration_sha256": "b62a968947223fade20e4048c0a7301e2be173a30f3390c36d97e72a9d03c8d0",
+    "supplemental_dns_retry_preregistration_sha256": "eed5a5b7aaf994f1464894fb6400dc3fa89746e421b267be26dc49ecf6e50a78",
+    "runner_sha256": "4d38bb01bd839e0f99ce6ae4374e8fe1866019bed200aff796567808d4b32991",
+    "strategy_sha256": "fd9a29132bca1e9157b37acfa0fd3950eb87aeb4e6ca3250c6e9889f94b1bad9",
+    "research_config_sha256": "8d6b2c4f64dd0c51a77c3a38b181a7f7819a449f0df5c376780491d002a49a74"
+  },
+  "performance_artifacts": {
+    "development_zip": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/results/development/backtest-result-2026-08-13_05-27-41.zip",
+    "development_zip_sha256": "bded0f3e362b13a38d50679e3a34b02493ab57a3fae30dc789461a352ed3a31a",
+    "run_log": "ft_userdata/user_data/research_data/binance-taker-priceflow-confirmation/results/development/run.log",
+    "run_log_sha256": "3a2e7573d7c60939ec74dfa1069f6814daab3a4534858f5da05c8b9ec1c7e9e1",
+    "zip_crc_ok": true,
+    "embedded_strategy_sha256": "fd9a29132bca1e9157b37acfa0fd3950eb87aeb4e6ca3250c6e9889f94b1bad9",
+    "embedded_sanitized_config_sha256": "7f1e0a4b084d9591f00be03ee4b2a465c2a82de10c25207c391c86a9391d8aa0"
+  },
+  "execution": {
+    "strategy": "PriceFlowBinanceTakerConfirmationResearchStrategy",
+    "pair": "BTC/USDT:USDT",
+    "timeframe": "15m",
+    "timeframe_detail": "5m",
+    "timerange_raw_inclusive": "1646092800-1704066300",
+    "logical_open_window_utc": "[2022-03-01T00:00:00Z, 2024-01-01T00:00:00Z)",
+    "all_trade_opens_inside_logical_window": true,
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "leverage_values": [
+      1.0
+    ],
+    "fee_open_values": [
+      0.0006
+    ],
+    "fee_close_values": [
+      0.0006
+    ],
+    "starting_balance_usdt": 1000.0,
+    "final_balance_usdt": 854.05848275,
+    "funding_fees_abs_usdt": -1.114749849773468,
+    "left_open_trades": 0
+  },
+  "metrics_recomputed_from_trade_rows": {
+    "trades": 14,
+    "wins": 2,
+    "draws": 0,
+    "losses": 12,
+    "win_rate": 0.14285714285714285,
+    "mean_winner_profit_ratio": 0.008286606886474137,
+    "mean_loser_profit_ratio_abs": 0.014416057789990252,
+    "strict_payoff": 0.5748178182407065,
+    "gross_profit_abs_usdt": 13.98429507,
+    "gross_loss_abs_usdt": -159.92581232,
+    "profit_factor": 0.08744238886227094,
+    "profit_total_abs_usdt": -145.94151725,
+    "profit_total_ratio": -0.14594151725,
+    "profit_total_pct_reconstructed": -14.594151725,
+    "max_drawdown_account": 0.15863268936,
+    "max_drawdown_pct": 15.863268936,
+    "liquidation_count": 0
+  },
+  "direction_breakdown": {
+    "long": {
+      "trades": 7,
+      "wins": 2,
+      "losses": 5,
+      "win_rate": 0.2857142857142857,
+      "strict_payoff": 0.6571703014009578,
+      "profit_abs_usdt": -43.70173314
+    },
+    "short": {
+      "trades": 7,
+      "wins": 0,
+      "losses": 7,
+      "win_rate": 0.0,
+      "strict_payoff": null,
+      "profit_abs_usdt": -102.23978411
+    }
+  },
+  "development_gate": {
+    "passed": false,
+    "checks": {
+      "trades_gte_30": false,
+      "win_rate_gte_40pct": false,
+      "strict_payoff_gte_2": false,
+      "profit_factor_gt_1_2": false,
+      "profit_gt_0": false,
+      "drawdown_lt_25pct": true,
+      "liquidation_count_eq_0": true
+    }
+  },
+  "runner_parser_failure": {
+    "exception": "KeyError: profit_total_pct",
+    "classification": "post-backtest result-schema compatibility failure",
+    "effect_on_trade_generation_or_metrics": false,
+    "reconstruction": "profit_total_pct = profit_total * 100",
+    "gate_uses_missing_field": false,
+    "runner_native_development_receipt_present": false,
+    "runner_native_freeze_before_2024_present": false
+  },
+  "protocol_decision": "The development gate failed unambiguously. The missing display field does not participate in the gate. No runner-native freeze-before-2024 exists, so 2024 and every later window remain closed. No rerun, parameter change, paper deployment, or live deployment is authorized.",
+  "provenance_note": "This file is an independent read-only reconstruction of the frozen ZIP and log. It is not a fabricated or backfilled runner-native receipt."
+}

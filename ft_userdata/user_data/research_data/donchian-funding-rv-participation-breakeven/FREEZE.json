@@ -1,0 +1,51 @@
+{
+  "bindings": {
+    "development_manifest": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/manifest.json",
+      "sha256": "5d8b2186d238247b37b637df4caaae009693081bb92f4100b95ce83378ca41f8"
+    },
+    "f3_base_freeze": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/FREEZE.json",
+      "sha256": "2dc650975aabb81f1e8e44c3cdc12502b4f13a1664698546b51c5e36e1d6dfb7"
+    },
+    "f3_base_runner": {
+      "path": "tools/run_donchian_funding_rv_research.py",
+      "sha256": "a3723dba47cc95a821b715ae566b57e1a31cb5c0b94b0121a31da17eb6b54e6e"
+    },
+    "preregistration": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv-participation-breakeven/PREREGISTRATION.md",
+      "sha256": "f80d3bb3fdc97abd67cdf9477261c3513683576a62635f8885fe75140d14f8a6"
+    },
+    "runner": {
+      "path": "tools/run_donchian_funding_rv_participation_breakeven_research.py",
+      "sha256": "4ed3f53042d0dff23e0f19de9456f742b8cd00ba70a111756f0d755b9b28edd2"
+    },
+    "tests": {
+      "path": "tests/test_donchian_funding_rv_participation_breakeven_research.py",
+      "sha256": "dc8d86ee70e55aca134b51fc6e0f0f05c6121a0ab74a9d6f633246102b4d5266"
+    }
+  },
+  "execution_inputs": {
+    "15m": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/BTC_USDT_USDT-15m-futures.feather",
+      "sha256": "20b4819b9cb8ad36f8f0c1b439de145d260a9b6f5f82fd4dc2e141efe0c0fc55"
+    },
+    "5m": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/BTC_USDT_USDT-5m-futures.feather",
+      "sha256": "ecf38bd22ea271d665c01ae9f80ea1aee4065e234d5af2183750d8c613bd6ee6"
+    },
+    "funding": {
+      "path": "ft_userdata/user_data/research_data/donchian-funding-rv/development-data/BTC_USDT_USDT-1h-funding_rate.feather",
+      "sha256": "e068d437bca761d65a5a549d799941a40d1044aa9a19d76954376e5483711cc7"
+    }
+  },
+  "performance_execution": {
+    "development_requires_explicit_stage": true,
+    "development_requires_this_file_sha256": true,
+    "pseudo_oos_authorized": false,
+    "validation_authorized": false
+  },
+  "research_only": true,
+  "schema_version": 1,
+  "status": "FROZEN"
+}

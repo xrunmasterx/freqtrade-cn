@@ -1,0 +1,160 @@
+{
+  "assessment": "promising research candidate; aggregate payoff stayed above 2, but rolling and holdout sample sizes are insufficient for promotion",
+  "metric_definitions": {
+    "win_rate": "positive-profit closed trades / all closed trades",
+    "average_win_loss_ratio": "mean(profit_ratio > 0) / abs(mean(profit_ratio < 0))",
+    "profit_factor": "sum(positive profit_ratio) / abs(sum(negative profit_ratio))",
+    "compounded_return": "Freqtrade account profit_total with a fresh 1000 USDT wallet per run",
+    "max_account_drawdown": "Freqtrade max_drawdown_account",
+    "fees_usdt": "sum(amount * open_rate * 0.0006 + amount * close_rate * 0.0006)",
+    "funding_fees_usdt": "sum of Freqtrade signed funding_fees; positive means received, negative means paid"
+  },
+  "stages": {
+    "development": {
+      "requested_interval": "[2025-08-01T00:00:00Z, 2026-04-01T00:00:00Z)",
+      "actual_scored_interval": "2025-08-01T00:00:00Z through 2026-03-31T23:45:00Z",
+      "baseline": {
+        "trades": 30,
+        "wins": 10,
+        "losses": 20,
+        "win_rate_pct": 33.33333333333333,
+        "average_win_loss_ratio": 2.4666903446818695,
+        "profit_factor": 1.2003998782660645,
+        "compounded_return_pct": 6.146119723999999,
+        "max_account_drawdown_pct": 6.361979927864768,
+        "fees_usdt": 36.608747351999995,
+        "funding_fees_usdt": 16.413804595740665,
+        "force_exits": 0
+      },
+      "hold72": {
+        "trades": 30,
+        "wins": 12,
+        "losses": 18,
+        "win_rate_pct": 40.0,
+        "average_win_loss_ratio": 2.2504395246095186,
+        "profit_factor": 1.4593227556807116,
+        "compounded_return_pct": 14.002165545999998,
+        "max_account_drawdown_pct": 6.367280115386703,
+        "fees_usdt": 37.869883493999986,
+        "funding_fees_usdt": 17.226148953455837,
+        "force_exits": 0
+      }
+    },
+    "validation": {
+      "requested_interval": "[2026-04-01T00:00:00Z, 2026-07-01T00:00:00Z)",
+      "actual_scored_interval": "2026-04-01T00:00:00Z through 2026-06-30T23:45:00Z",
+      "baseline": {
+        "trades": 10,
+        "wins": 6,
+        "losses": 4,
+        "win_rate_pct": 60.0,
+        "average_win_loss_ratio": 1.8224982524320419,
+        "profit_factor": 2.6773372477277046,
+        "compounded_return_pct": 11.497152667,
+        "max_account_drawdown_pct": 4.78889375935037,
+        "fees_usdt": 12.547625766,
+        "funding_fees_usdt": -2.7937175702737997,
+        "force_exits": 0
+      },
+      "hold72": {
+        "trades": 10,
+        "wins": 5,
+        "losses": 5,
+        "win_rate_pct": 50.0,
+        "average_win_loss_ratio": 2.639180898910432,
+        "profit_factor": 2.5830232057816636,
+        "compounded_return_pct": 11.757111684000002,
+        "max_account_drawdown_pct": 5.33885119193962,
+        "fees_usdt": 12.517173528,
+        "funding_fees_usdt": -3.649949625207222,
+        "force_exits": 0
+      }
+    },
+    "retrospective_pseudo_oos": {
+      "requested_interval": "[2026-07-01T00:00:00Z, 2026-08-13T00:00:00Z)",
+      "actual_scored_interval": "2026-07-01T00:00:00Z through 2026-08-12T17:00:00Z",
+      "data_status": "incomplete final day: 15m ends 17:00, 5m ends 17:30, 1h informative ends 15:00 UTC",
+      "baseline": {
+        "trades": 4,
+        "wins": 3,
+        "losses": 1,
+        "win_rate_pct": 75.0,
+        "average_win_loss_ratio": 1.301374858926982,
+        "profit_factor": 3.902919406182111,
+        "compounded_return_pct": 4.669782342,
+        "max_account_drawdown_pct": 1.6086503579999998,
+        "fees_usdt": 4.887637212,
+        "funding_fees_usdt": -0.7257593591567726,
+        "force_exits": 0
+      },
+      "hold72": {
+        "trades": 4,
+        "wins": 2,
+        "losses": 2,
+        "win_rate_pct": 50.0,
+        "average_win_loss_ratio": 2.10826761499099,
+        "profit_factor": 2.0539948496216995,
+        "compounded_return_pct": 3.5112558759999996,
+        "max_account_drawdown_pct": 1.637045529162898,
+        "fees_usdt": 4.896148439999999,
+        "funding_fees_usdt": -0.7841328026751179,
+        "force_exits": 0
+      }
+    }
+  },
+  "hold72_development_two_month_blocks": [
+    {
+      "interval": "[2025-08-01, 2025-10-01)",
+      "trades": 2,
+      "win_rate_pct": 0.0,
+      "average_win_loss_ratio": null,
+      "profit_factor": 0.0,
+      "compounded_return_pct": -3.054495277,
+      "max_account_drawdown_pct": 3.054495277,
+      "force_exits": 0
+    },
+    {
+      "interval": "[2025-10-01, 2025-12-01)",
+      "trades": 12,
+      "win_rate_pct": 41.66666666666667,
+      "average_win_loss_ratio": 2.0890989558189896,
+      "profit_factor": 1.4430491420017313,
+      "compounded_return_pct": 5.101100274000001,
+      "max_account_drawdown_pct": 4.520547577285614,
+      "force_exits": 1
+    },
+    {
+      "interval": "[2025-12-01, 2026-02-01)",
+      "trades": 4,
+      "win_rate_pct": 50.0,
+      "average_win_loss_ratio": 1.273807632677299,
+      "profit_factor": 1.2320696175675914,
+      "compounded_return_pct": 0.7581674360000001,
+      "max_account_drawdown_pct": 3.0854440019364125,
+      "force_exits": 0
+    },
+    {
+      "interval": "[2026-02-01, 2026-04-01)",
+      "trades": 12,
+      "win_rate_pct": 41.66666666666667,
+      "average_win_loss_ratio": 2.3270026586197923,
+      "profit_factor": 1.6024151693051971,
+      "compounded_return_pct": 7.265641210999996,
+      "max_account_drawdown_pct": 6.367196568171352,
+      "force_exits": 0
+    }
+  ],
+  "integrity": {
+    "freeze_manifest_sha256": "169AF769147FB96BC7A0BD189F95E6A52C1713E876C1F990AC895EB4B993AB26",
+    "validation_zip_sha256": "164FD41DAD6A41C56E315584676E84AEBDC35BC4B93180BF26D91690AA2BE261",
+    "pseudo_oos_zip_sha256": "DE53B765347BF107AC44959ED518AD7D0B6B3D997E170A85E10D8F452D2C8E58",
+    "frozen_input_hashes_unchanged_after_all_runs": true
+  },
+  "limitations": [
+    "Validation and pseudo-OOS intervals were already exposed elsewhere in the repository; neither is a globally untouched holdout.",
+    "The pseudo-OOS result is a single frozen retrospective run, but local data does not cover the final requested UTC day completely.",
+    "Development used fallback funding throughout; validation used fallback before 2026-05-11 and observed funding afterwards.",
+    "Only 30 development, 10 validation, and 4 pseudo-OOS trades were observed.",
+    "The two-month block evidence is not uniformly stable: the first block had no winners, the third block payoff was below 2, and the second block had one boundary force-exit."
+  ]
+}
